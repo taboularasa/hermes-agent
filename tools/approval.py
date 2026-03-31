@@ -415,8 +415,22 @@ Respond with exactly one word: APPROVE, DENY, or ESCALATE"""
         return "escalate"
 
 
+def _has_host_mounts(container_config: Optional[dict]) -> bool:
+    """Check if a container config has any host filesystem mounts."""
+    if not container_config:
+        return False
+    if container_config.get("persistent_filesystem"):
+        return True
+    if container_config.get("auto_mount_cwd"):
+        return True
+    if container_config.get("volumes"):
+        return True
+    return False
+
+
 def check_dangerous_command(command: str, env_type: str,
-                            approval_callback=None) -> dict:
+                            approval_callback=None,
+                            container_config: Optional[dict] = None) -> dict:
     """Check if a command is dangerous and handle approval.
 
     This is the main entry point called by terminal_tool before executing
@@ -426,16 +440,30 @@ def check_dangerous_command(command: str, env_type: str,
         command: The shell command to check.
         env_type: Terminal backend type ('local', 'ssh', 'docker', etc.).
         approval_callback: Optional CLI callback for interactive prompts.
+        container_config: Optional container configuration dict. When
+            present for container backends, safety checks are only skipped
+            if the container has no host mounts.
 
     Returns:
         {"approved": True/False, "message": str or None, ...}
     """
+    # C-04: Only skip checks for truly isolated containers (no host mounts)
     if env_type in ("docker", "singularity", "modal", "daytona"):
-        return {"approved": True, "message": None}
+        if not _has_host_mounts(container_config):
+            return {"approved": True, "message": None}
+        # Container has host mounts — fall through to normal checks
 
-    # --yolo: bypass all approval prompts
+    # C-05: YOLO mode requires HERMES_YOLO_ALLOW_LOCAL for local backend
     if os.getenv("HERMES_YOLO_MODE"):
-        return {"approved": True, "message": None}
+        if env_type in ("docker", "singularity", "modal", "daytona"):
+            return {"approved": True, "message": None}
+        if os.getenv("HERMES_YOLO_ALLOW_LOCAL"):
+            logger.warning(
+                "YOLO mode active on local backend — all command safety "
+                "checks disabled for host execution"
+            )
+            return {"approved": True, "message": None}
+        # YOLO without HERMES_YOLO_ALLOW_LOCAL on local — do not bypass
 
     is_dangerous, pattern_key, description = detect_dangerous_command(command)
     if not is_dangerous:
@@ -448,8 +476,23 @@ def check_dangerous_command(command: str, env_type: str,
     is_cli = os.getenv("HERMES_INTERACTIVE")
     is_gateway = os.getenv("HERMES_GATEWAY_SESSION")
 
+    # C-06: Non-interactive auto-approve requires explicit opt-in
     if not is_cli and not is_gateway:
-        return {"approved": True, "message": None}
+        if os.getenv("HERMES_HEADLESS_AUTO_APPROVE"):
+            return {"approved": True, "message": None}
+        logger.warning(
+            "Dangerous command denied in non-interactive mode: %s. "
+            "Set HERMES_HEADLESS_AUTO_APPROVE=true to allow.",
+            description,
+        )
+        return {
+            "approved": False,
+            "message": (
+                f"BLOCKED: Dangerous command ({description}) denied in "
+                "non-interactive/headless mode. Set "
+                "HERMES_HEADLESS_AUTO_APPROVE=true to enable auto-approval."
+            ),
+        }
 
     if is_gateway or os.getenv("HERMES_EXEC_ASK"):
         submit_pending(session_key, {
@@ -522,7 +565,8 @@ def _format_tirith_description(tirith_result: dict) -> str:
 
 
 def check_all_command_guards(command: str, env_type: str,
-                             approval_callback=None) -> dict:
+                             approval_callback=None,
+                             container_config: Optional[dict] = None) -> dict:
     """Run all pre-exec security checks and return a single approval decision.
 
     Gathers findings from tirith and dangerous-command detection, then
@@ -530,23 +574,48 @@ def check_all_command_guards(command: str, env_type: str,
     a gateway force=True replay from bypassing one check when only the
     other was shown to the user.
     """
-    # Skip containers for both checks
+    # C-04: Only skip checks for truly isolated containers (no host mounts)
     if env_type in ("docker", "singularity", "modal", "daytona"):
-        return {"approved": True, "message": None}
+        if not _has_host_mounts(container_config):
+            return {"approved": True, "message": None}
+        # Container has host mounts — fall through to normal checks
 
     # --yolo or approvals.mode=off: bypass all approval prompts
     approval_mode = _get_approval_mode()
-    if os.getenv("HERMES_YOLO_MODE") or approval_mode == "off":
+    if approval_mode == "off":
         return {"approved": True, "message": None}
+
+    # C-05: YOLO mode requires HERMES_YOLO_ALLOW_LOCAL for local backend
+    if os.getenv("HERMES_YOLO_MODE"):
+        if env_type in ("docker", "singularity", "modal", "daytona"):
+            return {"approved": True, "message": None}
+        if os.getenv("HERMES_YOLO_ALLOW_LOCAL"):
+            logger.warning(
+                "YOLO mode active on local backend — all command safety "
+                "checks disabled for host execution"
+            )
+            return {"approved": True, "message": None}
+        # YOLO without HERMES_YOLO_ALLOW_LOCAL on local — do not bypass
 
     is_cli = os.getenv("HERMES_INTERACTIVE")
     is_gateway = os.getenv("HERMES_GATEWAY_SESSION")
     is_ask = os.getenv("HERMES_EXEC_ASK")
 
-    # Preserve the existing non-interactive behavior: outside CLI/gateway/ask
-    # flows, we do not block on approvals and we skip external guard work.
+    # C-06: Non-interactive auto-approve requires explicit opt-in
     if not is_cli and not is_gateway and not is_ask:
-        return {"approved": True, "message": None}
+        if os.getenv("HERMES_HEADLESS_AUTO_APPROVE"):
+            return {"approved": True, "message": None}
+        logger.warning(
+            "Non-interactive mode: skipping external guard work. "
+            "Set HERMES_HEADLESS_AUTO_APPROVE=true to allow auto-approval."
+        )
+        return {
+            "approved": False,
+            "message": (
+                "BLOCKED: Dangerous command denied in non-interactive/headless "
+                "mode. Set HERMES_HEADLESS_AUTO_APPROVE=true to enable."
+            ),
+        }
 
     # --- Phase 1: Gather findings from both checks ---
 

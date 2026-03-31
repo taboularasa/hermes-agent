@@ -237,6 +237,10 @@ class GatewayConfig:
 
     # User-defined quick commands (slash commands that bypass the agent loop)
     quick_commands: Dict[str, Any] = field(default_factory=dict)
+
+    # C-10: User IDs allowed to trigger exec-type quick commands.
+    # If empty/absent, exec-type quick commands are disabled.
+    quick_commands_allowed_users: List[str] = field(default_factory=list)
     
     # Storage paths
     sessions_dir: Path = field(default_factory=lambda: get_hermes_home() / "sessions")
@@ -374,6 +378,10 @@ class GatewayConfig:
         if not isinstance(quick_commands, dict):
             quick_commands = {}
 
+        quick_commands_allowed_users = data.get("quick_commands_allowed_users", [])
+        if not isinstance(quick_commands_allowed_users, list):
+            quick_commands_allowed_users = []
+
         stt_enabled = data.get("stt_enabled")
         if stt_enabled is None:
             stt_enabled = data.get("stt", {}).get("enabled") if isinstance(data.get("stt"), dict) else None
@@ -391,6 +399,7 @@ class GatewayConfig:
             reset_by_platform=reset_by_platform,
             reset_triggers=data.get("reset_triggers", ["/new", "/reset"]),
             quick_commands=quick_commands,
+            quick_commands_allowed_users=quick_commands_allowed_users,
             sessions_dir=sessions_dir,
             always_log_local=data.get("always_log_local", True),
             stt_enabled=_coerce_bool(stt_enabled, True),

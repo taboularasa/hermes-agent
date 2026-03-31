@@ -126,16 +126,20 @@ from tools.approval import (
 )
 
 
-def _check_dangerous_command(command: str, env_type: str) -> dict:
+def _check_dangerous_command(command: str, env_type: str,
+                             container_config: dict = None) -> dict:
     """Delegate to the consolidated approval module, passing the CLI callback."""
     return _check_dangerous_command_impl(command, env_type,
-                                         approval_callback=_approval_callback)
+                                         approval_callback=_approval_callback,
+                                         container_config=container_config)
 
 
-def _check_all_guards(command: str, env_type: str) -> dict:
+def _check_all_guards(command: str, env_type: str,
+                      container_config: dict = None) -> dict:
     """Delegate to consolidated guard (tirith + dangerous cmd) with CLI callback."""
     return _check_all_guards_impl(command, env_type,
-                                  approval_callback=_approval_callback)
+                                  approval_callback=_approval_callback,
+                                  container_config=container_config)
 
 
 def _handle_sudo_failure(output: str, env_type: str) -> str:

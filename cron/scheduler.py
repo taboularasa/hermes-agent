@@ -316,6 +316,9 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     logger.info("Running job '%s' (ID: %s)", job_name, job_id)
     logger.info("Prompt: %s", prompt[:100])
 
+    # C-09: Mark this as a cron session to prevent recursive cron job creation
+    os.environ["HERMES_CRON_SESSION"] = "true"
+
     # Inject origin context so the agent's send_message tool knows the chat
     if origin:
         os.environ["HERMES_SESSION_PLATFORM"] = origin["platform"]
@@ -494,6 +497,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     finally:
         # Clean up injected env vars so they don't leak to other jobs
         for key in (
+            "HERMES_CRON_SESSION",
             "HERMES_SESSION_PLATFORM",
             "HERMES_SESSION_CHAT_ID",
             "HERMES_SESSION_CHAT_NAME",

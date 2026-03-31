@@ -1098,6 +1098,21 @@ class GatewayRunner:
                 "or configure platform allowlists (e.g., TELEGRAM_ALLOWED_USERS=your_id)."
             )
         
+        # C-10: Warn at startup if any exec-type quick commands are configured
+        _qcmds = (
+            self.config.get("quick_commands", {})
+            if isinstance(self.config, dict)
+            else getattr(self.config, "quick_commands", {})
+        ) or {}
+        if isinstance(_qcmds, dict):
+            _exec_cmds = [k for k, v in _qcmds.items() if isinstance(v, dict) and v.get("type") == "exec"]
+            if _exec_cmds:
+                logger.warning(
+                    "Exec-type quick commands configured: %s. "
+                    "These run shell commands on the host.",
+                    ", ".join(f"/{c}" for c in _exec_cmds),
+                )
+
         # Discover and load event hooks
         self.hooks.discover_and_load()
         
@@ -1981,8 +1996,38 @@ class GatewayRunner:
             if command in quick_commands:
                 qcmd = quick_commands[command]
                 if qcmd.get("type") == "exec":
+                    # C-10: Restrict exec-type quick commands to allowed users
+                    allowed_users = (
+                        self.config.get("quick_commands_allowed_users", [])
+                        if isinstance(self.config, dict)
+                        else getattr(self.config, "quick_commands_allowed_users", [])
+                    ) or []
+                    if not allowed_users:
+                        logger.warning(
+                            "Exec quick command '/%s' blocked: "
+                            "quick_commands_allowed_users is empty (disabled by default)",
+                            command,
+                        )
+                        return (
+                            f"Exec quick command '/{command}' is disabled. "
+                            "Configure quick_commands_allowed_users to enable."
+                        )
+                    user_id = source.user_id if source else None
+                    if user_id not in allowed_users:
+                        logger.warning(
+                            "Exec quick command '/%s' denied for user %s (%s)",
+                            command, user_id,
+                            source.platform.value if source and source.platform else "unknown",
+                        )
+                        return f"You are not authorized to run exec quick command '/{command}'."
                     exec_cmd = qcmd.get("command", "")
                     if exec_cmd:
+                        logger.info(
+                            "Exec quick command '/%s': user=%s, platform=%s, command=%s",
+                            command, user_id,
+                            source.platform.value if source and source.platform else "unknown",
+                            exec_cmd,
+                        )
                         try:
                             proc = await asyncio.create_subprocess_shell(
                                 exec_cmd,
