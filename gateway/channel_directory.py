@@ -8,6 +8,7 @@ action="list" and for resolving human-friendly channel names to numeric IDs.
 
 import json
 import logging
+import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -75,6 +76,7 @@ def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
         DIRECTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(DIRECTORY_PATH, "w", encoding="utf-8") as f:
             json.dump(directory, f, indent=2, ensure_ascii=False)
+        os.chmod(DIRECTORY_PATH, 0o600)
     except Exception as e:
         logger.warning("Channel directory: failed to write: %s", e)
 

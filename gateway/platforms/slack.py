@@ -112,6 +112,8 @@ class SlackAdapter(BasePlatformAdapter):
                         bot_tokens.append(tok)
                         team_label = entry.get("team_name", team_id) if isinstance(entry, dict) else team_id
                         logger.info("[Slack] Loaded saved token for workspace %s", team_label)
+                # Ensure token file has restrictive permissions
+                os.chmod(tokens_file, 0o600)
             except Exception as e:
                 logger.warning("[Slack] Failed to read %s: %s", tokens_file, e)
 

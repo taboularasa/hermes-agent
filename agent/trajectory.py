@@ -5,10 +5,13 @@ calls agent._convert_to_trajectory_format). Only the static helpers and
 the file-write logic live here.
 """
 
+import copy
 import json
 import logging
 from datetime import datetime
 from typing import Any, Dict, List
+
+from agent.redact import redact_sensitive_text
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +43,14 @@ def save_trajectory(trajectory: List[Dict[str, Any]], model: str,
     """
     if filename is None:
         filename = "trajectory_samples.jsonl" if completed else "failed_trajectories.jsonl"
+
+    # Deep copy to avoid mutating the caller's data, then redact secrets
+    trajectory = copy.deepcopy(trajectory)
+    for msg in trajectory:
+        if isinstance(msg, dict) and "value" in msg and isinstance(msg["value"], str):
+            msg["value"] = redact_sensitive_text(msg["value"])
+        if isinstance(msg, dict) and "content" in msg and isinstance(msg["content"], str):
+            msg["content"] = redact_sensitive_text(msg["content"])
 
     entry = {
         "conversations": trajectory,

@@ -24,6 +24,7 @@ import threading
 import time
 from pathlib import Path
 from hermes_constants import get_hermes_home
+from agent.redact import redact_sensitive_text
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -875,6 +876,10 @@ class SessionDB:
         Also increments the session's message_count (and tool_call_count
         if role is 'tool' or tool_calls is present).
         """
+        # Redact tool message content before storage to prevent secret leakage
+        if role == "tool" and content:
+            content = redact_sensitive_text(content)
+
         # Serialize structured fields to JSON before entering the write txn
         reasoning_details_json = (
             json.dumps(reasoning_details)
