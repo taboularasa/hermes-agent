@@ -535,6 +535,7 @@ class SessionStore:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp_path, sessions_file)
+            os.chmod(sessions_file, 0o600)
         except BaseException:
             try:
                 os.unlink(tmp_path)
@@ -946,6 +947,7 @@ class SessionStore:
         transcript_path = self.get_transcript_path(session_id)
         with open(transcript_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(message, ensure_ascii=False) + "\n")
+        os.chmod(transcript_path, 0o600)
     
     def rewrite_transcript(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
         """Replace the entire transcript for a session with new messages.
@@ -978,6 +980,7 @@ class SessionStore:
         with open(transcript_path, "w", encoding="utf-8") as f:
             for msg in messages:
                 f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+        os.chmod(transcript_path, 0o600)
 
     def load_transcript(self, session_id: str) -> List[Dict[str, Any]]:
         """Load all messages from a session's transcript."""

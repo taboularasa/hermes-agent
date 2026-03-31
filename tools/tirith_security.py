@@ -71,7 +71,7 @@ def _load_security_config() -> dict:
         "tirith_enabled": True,
         "tirith_path": "tirith",
         "tirith_timeout": 5,
-        "tirith_fail_open": True,
+        "tirith_fail_open": False,
     }
     try:
         from hermes_cli.config import load_config
@@ -629,6 +629,7 @@ def check_command_security(command: str) -> dict:
         logger.warning("tirith spawn failed: %s", exc)
         if fail_open:
             return {"action": "allow", "findings": [], "summary": f"tirith unavailable: {exc}"}
+        logger.warning("Tirith security scanner unavailable — commands requiring scanning will be blocked. Install tirith or set tirith_fail_open=true to allow.")
         return {"action": "block", "findings": [], "summary": f"tirith spawn failed (fail-closed): {exc}"}
     except subprocess.TimeoutExpired:
         logger.warning("tirith timed out after %ds", timeout)

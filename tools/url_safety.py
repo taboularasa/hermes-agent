@@ -47,6 +47,9 @@ def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return False
 
 
+ALLOWED_SCHEMES = {"http", "https"}
+
+
 def is_safe_url(url: str) -> bool:
     """Return True if the URL target is not a private/internal address.
 
@@ -55,6 +58,9 @@ def is_safe_url(url: str) -> bool:
     """
     try:
         parsed = urlparse(url)
+        if parsed.scheme.lower() not in ALLOWED_SCHEMES:
+            logger.warning("Blocked request — URL scheme '%s' not allowed (only http/https)", parsed.scheme)
+            return False
         hostname = (parsed.hostname or "").strip().lower()
         if not hostname:
             return False
