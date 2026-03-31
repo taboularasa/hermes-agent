@@ -113,6 +113,13 @@ class WebhookAdapter(BasePlatformAdapter):
                     f"Set 'secret' on the route or globally. "
                     f"For testing without auth, set secret to '{_INSECURE_NO_AUTH}'."
                 )
+            if secret == _INSECURE_NO_AUTH:
+                logger.warning(
+                    "SECURITY: Route '%s' configured with INSECURE_NO_AUTH — "
+                    "webhook signature verification DISABLED at startup. "
+                    "Do not use in production.",
+                    name,
+                )
 
         app = web.Application()
         app.router.add_get("/health", self._handle_health)
@@ -283,6 +290,13 @@ class WebhookAdapter(BasePlatformAdapter):
                 )
                 return web.json_response(
                     {"error": "Invalid signature"}, status=401
+                )
+        else:
+            if secret == _INSECURE_NO_AUTH:
+                logger.warning(
+                    "SECURITY: Route '%s' using INSECURE_NO_AUTH — webhook signature "
+                    "verification DISABLED. Do not use in production.",
+                    route_name,
                 )
 
         # Parse payload

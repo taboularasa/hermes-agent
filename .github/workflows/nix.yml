@@ -26,9 +26,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: DeterminateSystems/nix-installer-action@490cfee336d5220c80b0c5cab117b4a26fb3898a # main
+      - uses: DeterminateSystems/magic-nix-cache-action@1828eb4e5414b8dfe36daae53ea3e4b8c3fdec7a # main
       - name: Check flake
         if: runner.os == 'Linux'
         run: nix flake check --print-build-logs

@@ -17,9 +17,13 @@ Gateway-specific env vars:
 
 import asyncio
 import base64
+import collections
+import hashlib
+import hmac
 import logging
 import os
 import re
+import time
 import urllib.parse
 from typing import Any, Dict, Optional
 
@@ -77,8 +81,12 @@ class SmsAdapter(BasePlatformAdapter):
         self._webhook_port: int = int(
             os.getenv("SMS_WEBHOOK_PORT", str(DEFAULT_WEBHOOK_PORT))
         )
+        self._webhook_host: str = os.getenv("SMS_WEBHOOK_HOST", "127.0.0.1")
         self._runner = None
         self._http_session: Optional["aiohttp.ClientSession"] = None
+        # Rate limiting: track request timestamps per source IP
+        self._rate_window: Dict[str, collections.deque] = {}
+        self._rate_limit: int = 30  # max requests per minute per IP
 
     def _basic_auth_header(self) -> str:
         """Build HTTP Basic auth header value for Twilio."""
@@ -104,7 +112,7 @@ class SmsAdapter(BasePlatformAdapter):
 
         self._runner = web.AppRunner(app)
         await self._runner.setup()
-        site = web.TCPSite(self._runner, "0.0.0.0", self._webhook_port)
+        site = web.TCPSite(self._runner, self._webhook_host, self._webhook_port)
         await site.start()
         self._http_session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=30),
@@ -112,7 +120,8 @@ class SmsAdapter(BasePlatformAdapter):
         self._running = True
 
         logger.info(
-            "[sms] Twilio webhook server listening on port %d, from: %s",
+            "[sms] Twilio webhook server listening on %s:%d, from: %s",
+            self._webhook_host,
             self._webhook_port,
             _redact_phone(self._from_number),
         )
@@ -204,11 +213,71 @@ class SmsAdapter(BasePlatformAdapter):
         return content.strip()
 
     # ------------------------------------------------------------------
+    # Twilio signature verification
+    # ------------------------------------------------------------------
+
+    def _validate_twilio_signature(self, request, raw_body: bytes) -> bool:
+        """Validate Twilio request signature per https://www.twilio.com/docs/usage/security"""
+        auth_token = os.getenv("TWILIO_AUTH_TOKEN", "")
+        if not auth_token:
+            logger.warning("TWILIO_AUTH_TOKEN not set — cannot verify webhook signatures")
+            return False
+
+        signature = request.headers.get("X-Twilio-Signature", "")
+        if not signature:
+            return False
+
+        # Reconstruct the full URL Twilio used to generate the signature
+        url = str(request.url)
+
+        # Parse the POST body and sort params
+        params = urllib.parse.parse_qs(raw_body.decode("utf-8"))
+        sorted_params = ""
+        for key in sorted(params.keys()):
+            sorted_params += key + params[key][0]
+
+        # Compute expected signature
+        data = url + sorted_params
+        expected = base64.b64encode(
+            hmac.new(auth_token.encode("utf-8"), data.encode("utf-8"), hashlib.sha1).digest()
+        ).decode("utf-8")
+
+        return hmac.compare_digest(signature, expected)
+
+    # ------------------------------------------------------------------
+    # Rate limiting
+    # ------------------------------------------------------------------
+
+    def _check_rate_limit(self, source_ip: str) -> bool:
+        """Return True if the request is within rate limits."""
+        now = time.monotonic()
+        if source_ip not in self._rate_window:
+            self._rate_window[source_ip] = collections.deque()
+        window = self._rate_window[source_ip]
+        # Purge entries older than 60 seconds
+        while window and now - window[0] > 60:
+            window.popleft()
+        if len(window) >= self._rate_limit:
+            return False
+        window.append(now)
+        return True
+
+    # ------------------------------------------------------------------
     # Twilio webhook handler
     # ------------------------------------------------------------------
 
     async def _handle_webhook(self, request) -> "aiohttp.web.Response":
         from aiohttp import web
+
+        # Rate limiting by source IP
+        source_ip = request.remote or "unknown"
+        if not self._check_rate_limit(source_ip):
+            logger.warning("[sms] rate limit exceeded for %s", source_ip)
+            return web.Response(
+                text='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                content_type="application/xml",
+                status=429,
+            )
 
         try:
             raw = await request.read()
@@ -220,6 +289,15 @@ class SmsAdapter(BasePlatformAdapter):
                 text='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
                 content_type="application/xml",
                 status=400,
+            )
+
+        # Validate Twilio signature
+        if not self._validate_twilio_signature(request, raw):
+            logger.warning("[sms] invalid Twilio signature from %s", source_ip)
+            return web.Response(
+                text='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                content_type="application/xml",
+                status=403,
             )
 
         # Extract fields (parse_qs returns lists)

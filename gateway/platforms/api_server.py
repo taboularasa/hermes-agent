@@ -18,6 +18,7 @@ Requires:
 """
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -363,7 +364,7 @@ class APIServerAdapter(BasePlatformAdapter):
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
             token = auth_header[7:].strip()
-            if token == self._api_key:
+            if hmac.compare_digest(token, self._api_key):
                 return None  # Auth OK
 
         return web.json_response(
@@ -1238,6 +1239,16 @@ class APIServerAdapter(BasePlatformAdapter):
         """Start the aiohttp web server."""
         if not AIOHTTP_AVAILABLE:
             logger.warning("[%s] aiohttp not installed", self.name)
+            return False
+
+        # H-15: Refuse to start on non-localhost without API_SERVER_KEY
+        if self._host not in ("127.0.0.1", "localhost", "::1") and not self._api_key:
+            logger.critical(
+                "[%s] API server refusing to start: binding to non-localhost "
+                "address '%s' without API_SERVER_KEY is not allowed. "
+                "Set API_SERVER_KEY or use 127.0.0.1.",
+                self.name, self._host,
+            )
             return False
 
         try:
