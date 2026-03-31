@@ -26,6 +26,7 @@ RUN apt-get update && \
 
 # Copy built application and installed Python packages
 COPY --from=builder /build /opt/hermes
+COPY --from=builder /usr/local/bin /usr/local/bin
 COPY --from=builder /usr/local/lib/python3.13/dist-packages /usr/local/lib/python3.13/dist-packages/
 
 WORKDIR /opt/hermes
@@ -38,6 +39,7 @@ RUN chmod +x /opt/hermes/docker/entrypoint.sh && \
 
 # Data volume
 ENV HERMES_HOME=/opt/data
+ENV PYTHONPATH=/opt/hermes
 RUN mkdir -p /opt/data && chown hermes:hermes /opt/data
 VOLUME ["/opt/data"]
 
