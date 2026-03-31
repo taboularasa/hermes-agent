@@ -768,6 +768,13 @@ class TestSlashCommands:
     """Test slash command routing."""
 
     @pytest.mark.asyncio
+    async def test_sethome_command(self, adapter):
+        command = {"text": "sethome", "user_id": "U1", "channel_id": "C1"}
+        await adapter._handle_slash_command(command)
+        msg = adapter.handle_message.call_args[0][0]
+        assert msg.text == "/sethome"
+
+    @pytest.mark.asyncio
     async def test_compact_maps_to_compress(self, adapter):
         command = {"text": "compact", "user_id": "U1", "channel_id": "C1"}
         await adapter._handle_slash_command(command)

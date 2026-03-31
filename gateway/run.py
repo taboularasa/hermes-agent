@@ -270,6 +270,29 @@ def _expand_whatsapp_auth_aliases(identifier: str) -> set:
 
 logger = logging.getLogger(__name__)
 
+
+def _home_channel_setup_command(platform: Optional[Platform]) -> str:
+    """Return the command users should run to set the home channel."""
+    if platform == Platform.SLACK:
+        # Slack only exposes the single /hermes slash command; subcommands are
+        # parsed from that command's text payload.
+        return "/hermes sethome"
+    return "/sethome"
+
+
+def _home_channel_setup_message(platform: Platform) -> str:
+    """Build the onboarding message for platforms missing a home channel."""
+    platform_name = platform.value.title()
+    setup_command = _home_channel_setup_command(platform)
+    return (
+        f"📬 No home channel is set for {platform_name}. "
+        f"A home channel is where Hermes delivers cron job results "
+        f"and cross-platform messages.\n\n"
+        f"Type {setup_command} to make this chat your home channel, "
+        f"or ignore to skip."
+    )
+
+
 # Sentinel placed into _running_agents immediately when a session starts
 # processing, *before* any await.  Prevents a second message for the same
 # session from bypassing the "already running" guard during the async gap
@@ -2546,18 +2569,13 @@ class GatewayRunner:
         
         # One-time prompt if no home channel is set for this platform
         if not history and source.platform and source.platform != Platform.LOCAL:
-            platform_name = source.platform.value
-            env_key = f"{platform_name.upper()}_HOME_CHANNEL"
+            env_key = f"{source.platform.value.upper()}_HOME_CHANNEL"
             if not os.getenv(env_key):
                 adapter = self.adapters.get(source.platform)
                 if adapter:
                     await adapter.send(
                         source.chat_id,
-                        f"📬 No home channel is set for {platform_name.title()}. "
-                        f"A home channel is where Hermes delivers cron job results "
-                        f"and cross-platform messages.\n\n"
-                        f"Type /sethome to make this chat your home channel, "
-                        f"or ignore to skip."
+                        _home_channel_setup_message(source.platform),
                     )
         
         # -----------------------------------------------------------------
