@@ -52,6 +52,13 @@ class _Candidate:
     description: str | None = None
 
 
+@dataclass(frozen=True)
+class _TailnetInfo:
+    ip: str
+    dns_name: str
+    served_urls_by_port: dict[int, str]
+
+
 def _run_text(command: list[str]) -> str:
     try:
         return subprocess.check_output(command, text=True, stderr=subprocess.DEVNULL)
@@ -168,6 +175,58 @@ def _build_link(address: str, port: int, tailscale_ip: str) -> str:
     return f"{scheme}://{host}:{port}" if port not in {80, 443} else f"{scheme}://{host}"
 
 
+def _tailnet_info() -> _TailnetInfo:
+    ip = _run_text(["tailscale", "ip", "-4"]).strip().splitlines()
+    ip = ip[0].strip() if ip else ""
+
+    dns_name = ""
+    status_raw = _run_text(["tailscale", "status", "--json"])
+    if status_raw:
+        try:
+            status = json.loads(status_raw)
+            dns_name = str(status.get("Self", {}).get("DNSName") or "").strip().rstrip(".")
+        except Exception:
+            dns_name = ""
+
+    served_urls_by_port: dict[int, str] = {}
+    serve_raw = _run_text(["tailscale", "serve", "status", "--json"])
+    if serve_raw:
+        try:
+            serve_status = json.loads(serve_raw)
+            for hostport, config in (serve_status.get("Web") or {}).items():
+                handlers = (config or {}).get("Handlers") or {}
+                host = hostport.rsplit(":", 1)[0]
+                for path, handler in handlers.items():
+                    proxy = str((handler or {}).get("Proxy") or "").strip()
+                    match = re.match(r"https?://(?:127\.0\.0\.1|localhost):(?P<port>\d+)(?P<suffix>/.*)?$", proxy)
+                    if not match:
+                        continue
+                    exposed_port = int(match.group("port"))
+                    suffix = "" if path == "/" else path
+                    served_urls_by_port[exposed_port] = f"https://{host}{suffix}"
+        except Exception:
+            served_urls_by_port = {}
+
+    return _TailnetInfo(ip=ip, dns_name=dns_name, served_urls_by_port=served_urls_by_port)
+
+
+def _preferred_link(candidate: _Candidate, tailnet: _TailnetInfo) -> str:
+    if candidate.port in tailnet.served_urls_by_port:
+        return tailnet.served_urls_by_port[candidate.port]
+
+    host = candidate.address.strip("[]")
+    tailnet_host = tailnet.dns_name or tailnet.ip
+    if tailnet_host and host not in {"127.0.0.1", "localhost"}:
+        scheme = "https" if candidate.port == 443 else "http"
+        return (
+            f"{scheme}://{tailnet_host}"
+            if candidate.port in {80, 443}
+            else f"{scheme}://{tailnet_host}:{candidate.port}"
+        )
+
+    return _build_link(candidate.address, candidate.port, tailnet.ip)
+
+
 def _parse_published_port(ports_text: str) -> tuple[str, int] | None:
     for chunk in (part.strip() for part in ports_text.split(",")):
         match = re.search(r"([0-9a-fA-F:.\[\]*]+):(\d+)->(\d+)/(tcp|udp)", chunk)
@@ -271,8 +330,7 @@ def _dedupe_candidates(candidates: Iterable[_Candidate]) -> list[_Candidate]:
 
 def discover_host_apps(root: Path | str = STACKS_ROOT) -> list[HostApp]:
     root = Path(root)
-    tailscale_ip = _run_text(["tailscale", "ip", "-4"]).strip().splitlines()
-    tailscale_ip = tailscale_ip[0].strip() if tailscale_ip else ""
+    tailnet = _tailnet_info()
     repo_inventory = _inventory_repos(root)
     candidates = _dedupe_candidates([*_docker_candidates(), *_process_candidates(root)])
     apps: list[HostApp] = []
@@ -282,7 +340,7 @@ def discover_host_apps(root: Path | str = STACKS_ROOT) -> list[HostApp]:
         title = candidate.title or repo_meta.get("title") or _prettify_name(candidate.repo_name or candidate.slug)
         description = candidate.description or repo_meta.get("description") or "Running web UI on the Lenovo host."
         repo_url = repo_meta.get("repo_url", "")
-        link = _build_link(candidate.address, candidate.port, tailscale_ip)
+        link = _preferred_link(candidate, tailnet)
         if link in seen_links:
             continue
         seen_links.add(link)

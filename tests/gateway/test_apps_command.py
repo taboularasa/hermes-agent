@@ -57,6 +57,10 @@ class TestHostAppDiscovery:
 
         command_outputs = {
             ("tailscale", "ip", "-4"): "100.72.243.76\n",
+            ("tailscale", "status", "--json"):
+                '{"Self":{"DNSName":"hadto.tailcad088.ts.net."}}',
+            ("tailscale", "serve", "status", "--json"):
+                '{"Web":{"hadto.tailcad088.ts.net:443":{"Handlers":{"/graphs":{"Proxy":"http://127.0.0.1:7878"}}}}}',
             ("docker", "ps", "--format", "{{json .}}"):
                 '{"Names":"hadto-pipeline","Ports":"127.0.0.1:5100->5000/tcp"}\n'
                 '{"Names":"hadto-ontology-workbench","Ports":"100.72.243.76:3020->3000/tcp"}\n'
@@ -75,8 +79,8 @@ class TestHostAppDiscovery:
 
         links = {app.title: app.link for app in apps}
         assert links["Hadto Pipeline"] == "http://127.0.0.1:5100"
-        assert links["Hadto Ontology Workbench"] == "http://100.72.243.76:3020"
-        assert links["Oxigraph Triplestore"] == "http://127.0.0.1:7878"
+        assert links["Hadto Ontology Workbench"] == "http://hadto.tailcad088.ts.net:3020"
+        assert links["Oxigraph Triplestore"] == "https://hadto.tailcad088.ts.net/graphs"
         assert links["Ontology Explainer"] == "http://127.0.0.1:3017"
 
         repo_urls = {app.title: app.repo_url for app in apps}
