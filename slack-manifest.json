@@ -1,0 +1,63 @@
+{
+  "_metadata": {
+    "major_version": 1
+  },
+  "display_information": {
+    "name": "Hermes Agent",
+    "description": "Hermes AI Agent on Lenovo Home Server"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "Hermes",
+      "always_online": true
+    },
+    "slash_commands": [
+      {
+        "command": "/hermes",
+        "description": "Send a message to Hermes Agent",
+        "should_escape": false,
+        "usage_hint": "[your message]"
+      }
+    ]
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "channels:history",
+        "channels:read",
+        "chat:write",
+        "commands",
+        "files:read",
+        "files:write",
+        "groups:history",
+        "groups:read",
+        "im:history",
+        "im:read",
+        "im:write",
+        "mpim:history",
+        "reactions:read",
+        "reactions:write",
+        "users:read"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "bot_events": [
+        "app_mention",
+        "message.channels",
+        "message.groups",
+        "message.im",
+        "message.mpim"
+      ]
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": true,
+    "is_hosted": false,
+    "token_rotation_enabled": false,
+    "interactivity": {
+      "is_enabled": true
+    }
+  }
+}
