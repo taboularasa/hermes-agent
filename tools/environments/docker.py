@@ -8,6 +8,7 @@ persistence via bind mounts.
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -430,7 +431,7 @@ class DockerEnvironment(BaseEnvironment):
 
         # docker exec -w doesn't expand ~, so prepend a cd into the command
         if work_dir == "~" or work_dir.startswith("~/"):
-            exec_command = f"cd {work_dir} && {exec_command}"
+            exec_command = f"cd {shlex.quote(work_dir)} && {exec_command}"
             work_dir = "/"
 
         assert self._container_id, "Container not started"
