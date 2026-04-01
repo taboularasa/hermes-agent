@@ -803,6 +803,13 @@ class TestSlashCommands:
         assert msg.text == "/usage"
 
     @pytest.mark.asyncio
+    async def test_apps_command(self, adapter):
+        command = {"text": "apps", "user_id": "U1", "channel_id": "C1"}
+        await adapter._handle_slash_command(command)
+        msg = adapter.handle_message.call_args[0][0]
+        assert msg.text == "/apps"
+
+    @pytest.mark.asyncio
     async def test_reasoning_command(self, adapter):
         command = {"text": "reasoning", "user_id": "U1", "channel_id": "C1"}
         await adapter._handle_slash_command(command)

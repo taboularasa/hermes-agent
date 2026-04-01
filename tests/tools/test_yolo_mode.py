@@ -25,7 +25,7 @@ def _clear_approval_state():
 
 
 class TestYoloMode:
-    """When HERMES_YOLO_MODE is set, all dangerous commands are auto-approved."""
+    """YOLO mode only bypasses local-host approvals with explicit local opt-in."""
 
     def test_dangerous_command_blocked_normally(self, monkeypatch):
         """Without yolo mode, dangerous commands in interactive mode require approval."""
@@ -45,9 +45,10 @@ class TestYoloMode:
                                          approval_callback=lambda *a: "deny")
         assert not result["approved"]
 
-    def test_dangerous_command_approved_in_yolo_mode(self, monkeypatch):
-        """With HERMES_YOLO_MODE, dangerous commands are auto-approved."""
+    def test_dangerous_command_approved_in_yolo_mode_with_local_opt_in(self, monkeypatch):
+        """With HERMES_YOLO_MODE and HERMES_YOLO_ALLOW_LOCAL, dangerous commands are auto-approved."""
         monkeypatch.setenv("HERMES_YOLO_MODE", "1")
+        monkeypatch.setenv("HERMES_YOLO_ALLOW_LOCAL", "1")
         monkeypatch.setenv("HERMES_INTERACTIVE", "1")
         monkeypatch.setenv("HERMES_SESSION_KEY", "test-session")
 
@@ -55,9 +56,20 @@ class TestYoloMode:
         assert result["approved"]
         assert result["message"] is None
 
-    def test_yolo_mode_works_for_all_patterns(self, monkeypatch):
-        """Yolo mode bypasses all dangerous patterns, not just some."""
+    def test_dangerous_command_not_approved_in_yolo_mode_without_local_opt_in(self, monkeypatch):
+        """HERMES_YOLO_MODE alone must not disable host protections."""
         monkeypatch.setenv("HERMES_YOLO_MODE", "1")
+        monkeypatch.setenv("HERMES_INTERACTIVE", "1")
+        monkeypatch.setenv("HERMES_SESSION_KEY", "test-session")
+
+        result = check_dangerous_command("rm -rf /", "local",
+                                         approval_callback=lambda *a: "deny")
+        assert not result["approved"]
+
+    def test_yolo_mode_works_for_all_patterns_with_local_opt_in(self, monkeypatch):
+        """YOLO mode plus local opt-in bypasses all dangerous patterns."""
+        monkeypatch.setenv("HERMES_YOLO_MODE", "1")
+        monkeypatch.setenv("HERMES_YOLO_ALLOW_LOCAL", "1")
         monkeypatch.setenv("HERMES_INTERACTIVE", "1")
 
         dangerous_commands = [
@@ -73,9 +85,10 @@ class TestYoloMode:
             result = check_dangerous_command(cmd, "local")
             assert result["approved"], f"Command should be approved in yolo mode: {cmd}"
 
-    def test_combined_guard_bypasses_yolo_mode(self, monkeypatch):
-        """The new combined guard should preserve yolo bypass semantics."""
+    def test_combined_guard_bypasses_yolo_mode_with_local_opt_in(self, monkeypatch):
+        """The combined guard should preserve YOLO bypass semantics only with host opt-in."""
         monkeypatch.setenv("HERMES_YOLO_MODE", "1")
+        monkeypatch.setenv("HERMES_YOLO_ALLOW_LOCAL", "1")
         monkeypatch.setenv("HERMES_INTERACTIVE", "1")
 
         called = {"value": False}

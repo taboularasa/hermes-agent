@@ -1978,6 +1978,9 @@ class GatewayRunner:
         if canonical == "usage":
             return await self._handle_usage_command(event)
 
+        if canonical == "apps":
+            return await self._handle_apps_command(event)
+
         if canonical == "insights":
             return await self._handle_insights_command(event)
 
@@ -4556,6 +4559,18 @@ class GatewayRunner:
                 f"_(Detailed usage available during active conversations)_"
             )
         return "No usage data available for this session."
+
+    async def _handle_apps_command(self, event: MessageEvent) -> str:
+        """Handle /apps command -- list running dashboards, apps, and UIs on the host."""
+        loop = asyncio.get_event_loop()
+        try:
+            from gateway.host_apps import discover_host_apps, format_host_apps_markdown
+
+            apps = await loop.run_in_executor(None, discover_host_apps)
+            return format_host_apps_markdown(apps)
+        except Exception as e:
+            logger.error("Apps command error: %s", e, exc_info=True)
+            return f"Error inspecting host apps: {e}"
 
     async def _handle_insights_command(self, event: MessageEvent) -> str:
         """Handle /insights command -- show usage insights and analytics."""

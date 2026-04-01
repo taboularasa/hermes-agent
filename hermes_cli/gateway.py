@@ -506,8 +506,8 @@ Environment="LOGNAME={username}"
 Environment="PATH={sane_path}"
 Environment="VIRTUAL_ENV={venv_dir}"
 Environment="HERMES_HOME={hermes_home}"
-Restart=on-failure
-RestartSec=30
+Restart=always
+RestartSec=5
 KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=60
@@ -534,8 +534,8 @@ WorkingDirectory={working_dir}
 Environment="PATH={sane_path}"
 Environment="VIRTUAL_ENV={venv_dir}"
 Environment="HERMES_HOME={hermes_home}"
-Restart=on-failure
-RestartSec=30
+Restart=always
+RestartSec=5
 KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=60
