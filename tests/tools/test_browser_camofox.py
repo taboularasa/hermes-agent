@@ -236,7 +236,7 @@ class TestCamofoxGetImages:
         camofox_navigate("https://x.com", task_id="t10")
 
         mock_get.return_value = _mock_response(json_data={
-            "images": [{"src": "https://x.com/img.png", "alt": "Logo"}],
+            "snapshot": 'img "Logo"\n/url: https://x.com/img.png',
         })
         result = json.loads(camofox_get_images(task_id="t10"))
         assert result["success"] is True

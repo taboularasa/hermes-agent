@@ -38,6 +38,9 @@ def _isolate_hermes_home(tmp_path, monkeypatch):
     monkeypatch.delenv("HERMES_SESSION_CHAT_ID", raising=False)
     monkeypatch.delenv("HERMES_SESSION_CHAT_NAME", raising=False)
     monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+    # File-write tests should start from the unsandboxed default unless they
+    # explicitly opt into HERMES_WRITE_SAFE_ROOT within the test.
+    monkeypatch.delenv("HERMES_WRITE_SAFE_ROOT", raising=False)
 
 
 @pytest.fixture()

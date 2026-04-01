@@ -162,8 +162,11 @@ def cronjob(
         normalized = (action or "").strip().lower()
 
         if normalized == "create":
-            # C-09: Prevent cron jobs from creating new cron jobs
-            if os.getenv("HERMES_CRON_SESSION"):
+            # C-09: Prevent cron jobs from creating new cron jobs.
+            # Use a dedicated execution-context sentinel instead of the broader
+            # HERMES_CRON_SESSION marker so inherited shell env does not block
+            # normal CLI/tool usage outside an active scheduler run.
+            if os.getenv("HERMES_CRON_EXECUTION_CONTEXT"):
                 return json.dumps({"success": False, "error": "Cannot create cron jobs from within a cron job execution context"}, indent=2)
             if not schedule:
                 return json.dumps({"success": False, "error": "schedule is required for create"}, indent=2)

@@ -1,10 +1,14 @@
 """Tests for the local persistent shell backend."""
 
 import glob as glob_mod
+from pathlib import Path
 
 import pytest
 
-from tools.environments.local import LocalEnvironment
+from tools.environments.local import (
+    LocalEnvironment,
+    _get_local_persistent_temp_root,
+)
 from tools.environments.persistent_shell import PersistentShellMixin
 
 
@@ -162,3 +166,18 @@ class TestLocalPersistent:
     def test_multiple_commands_semicolon(self, env):
         r = env.execute("X=42; echo $X")
         assert r["output"].strip() == "42"
+
+
+class TestLocalPersistentTempRoot:
+    def test_falls_back_when_system_tmp_unwritable(self, monkeypatch, tmp_path):
+        hermes_tmp = tmp_path / "hermes-home"
+        blocked_tmp = tmp_path / "not-a-dir"
+        blocked_tmp.write_text("blocked")
+
+        monkeypatch.setenv("TMPDIR", str(blocked_tmp))
+        monkeypatch.setattr("tools.environments.local.tempfile.gettempdir", lambda: str(blocked_tmp))
+        monkeypatch.setattr("tools.environments.local.get_hermes_home", lambda: hermes_tmp)
+
+        root = Path(_get_local_persistent_temp_root())
+        assert root == hermes_tmp / "tmp"
+        assert root.is_dir()
