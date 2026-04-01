@@ -38,7 +38,13 @@ def _clean_state():
     clear_session(key)
     approval_module._permanent_approved.clear()
     saved = {}
-    for k in ("HERMES_INTERACTIVE", "HERMES_GATEWAY_SESSION", "HERMES_EXEC_ASK", "HERMES_YOLO_MODE"):
+    for k in (
+        "HERMES_INTERACTIVE",
+        "HERMES_GATEWAY_SESSION",
+        "HERMES_EXEC_ASK",
+        "HERMES_YOLO_MODE",
+        "HERMES_HEADLESS_AUTO_APPROVE",
+    ):
         if k in os.environ:
             saved[k] = os.environ.pop(k)
     yield
@@ -46,7 +52,13 @@ def _clean_state():
     approval_module._permanent_approved.clear()
     for k, v in saved.items():
         os.environ[k] = v
-    for k in ("HERMES_INTERACTIVE", "HERMES_GATEWAY_SESSION", "HERMES_EXEC_ASK", "HERMES_YOLO_MODE"):
+    for k in (
+        "HERMES_INTERACTIVE",
+        "HERMES_GATEWAY_SESSION",
+        "HERMES_EXEC_ASK",
+        "HERMES_YOLO_MODE",
+        "HERMES_HEADLESS_AUTO_APPROVE",
+    ):
         os.environ.pop(k, None)
 
 
@@ -84,7 +96,15 @@ class TestTirithAllowSafeCommand:
         assert result["approved"] is True
 
     @patch(_TIRITH_PATCH, return_value=_tirith_result("allow"))
-    def test_noninteractive_skips_external_scan(self, mock_tirith):
+    def test_noninteractive_blocks_without_headless_opt_in(self, mock_tirith):
+        result = check_all_command_guards("echo hello", "local")
+        assert result["approved"] is False
+        assert "HERMES_HEADLESS_AUTO_APPROVE=true" in result["message"]
+        mock_tirith.assert_not_called()
+
+    @patch(_TIRITH_PATCH, return_value=_tirith_result("allow"))
+    def test_noninteractive_allows_with_headless_opt_in(self, mock_tirith):
+        os.environ["HERMES_HEADLESS_AUTO_APPROVE"] = "true"
         result = check_all_command_guards("echo hello", "local")
         assert result["approved"] is True
         mock_tirith.assert_not_called()
@@ -163,6 +183,26 @@ class TestTirithAllowDangerous:
         # allow_permanent should be True (no tirith warning)
         assert cb.call_args[1]["allow_permanent"] is True
 
+    @patch(_TIRITH_PATCH, return_value=_tirith_result("allow"))
+    def test_gateway_self_restart_requires_approval_in_gateway_mode(self, mock_tirith):
+        os.environ["HERMES_GATEWAY_SESSION"] = "1"
+        result = check_all_command_guards(
+            "./venv/bin/python -m hermes_cli.main gateway run --replace",
+            "local",
+        )
+        assert result["approved"] is False
+        assert result.get("status") == "approval_required"
+        assert "disconnect hermes mid-reply" in result["description"].lower()
+
+    @patch(_TIRITH_PATCH, return_value=_tirith_result("allow"))
+    def test_gateway_restart_command_is_safe_outside_gateway_mode(self, mock_tirith):
+        os.environ["HERMES_INTERACTIVE"] = "1"
+        result = check_all_command_guards(
+            "systemctl --user restart hermes-gateway",
+            "local",
+        )
+        assert result["approved"] is True
+
 
 # ---------------------------------------------------------------------------
 # tirith warn + safe command
@@ -198,8 +238,18 @@ class TestTirithWarnSafe:
            return_value=_tirith_result("warn",
                                        [{"rule_id": "shortened_url"}],
                                        "shortened URL detected"))
-    def test_warn_non_interactive_auto_allow(self, mock_tirith):
+    def test_warn_non_interactive_blocks_without_headless_opt_in(self, mock_tirith):
         # No HERMES_INTERACTIVE or HERMES_GATEWAY_SESSION set
+        result = check_all_command_guards("curl https://bit.ly/abc", "local")
+        assert result["approved"] is False
+        assert "HERMES_HEADLESS_AUTO_APPROVE=true" in result["message"]
+
+    @patch(_TIRITH_PATCH,
+           return_value=_tirith_result("warn",
+                                       [{"rule_id": "shortened_url"}],
+                                       "shortened URL detected"))
+    def test_warn_non_interactive_allows_with_headless_opt_in(self, mock_tirith):
+        os.environ["HERMES_HEADLESS_AUTO_APPROVE"] = "true"
         result = check_all_command_guards("curl https://bit.ly/abc", "local")
         assert result["approved"] is True
 
@@ -273,12 +323,27 @@ class TestAlwaysVisibility:
 # ---------------------------------------------------------------------------
 
 class TestTirithImportError:
-    def test_import_error_allows(self):
-        """When tools.tirith_security can't be imported, treated as allow."""
+    def test_import_error_still_blocks_without_headless_opt_in(self):
+        """ImportError does not bypass the explicit headless opt-in requirement."""
         import sys
-        # Temporarily remove the module and replace with something that raises
         original = sys.modules.get("tools.tirith_security")
         sys.modules["tools.tirith_security"] = None  # causes ImportError on from-import
+        try:
+            result = check_all_command_guards("echo hello", "local")
+            assert result["approved"] is False
+            assert "HERMES_HEADLESS_AUTO_APPROVE=true" in result["message"]
+        finally:
+            if original is not None:
+                sys.modules["tools.tirith_security"] = original
+            else:
+                sys.modules.pop("tools.tirith_security", None)
+
+    def test_import_error_allows_with_headless_opt_in(self):
+        """When Tirith is unavailable, explicit headless opt-in still permits execution."""
+        import sys
+        original = sys.modules.get("tools.tirith_security")
+        sys.modules["tools.tirith_security"] = None  # causes ImportError on from-import
+        os.environ["HERMES_HEADLESS_AUTO_APPROVE"] = "true"
         try:
             result = check_all_command_guards("echo hello", "local")
             assert result["approved"] is True

@@ -77,6 +77,17 @@ DANGEROUS_PATTERNS = [
     (r'\bsed\s+--in-place\b.*\s/etc/', "in-place edit of system config (long flag)"),
 ]
 
+_GATEWAY_SESSION_SELF_MANAGEMENT_PATTERNS = [
+    r'\bgateway\s+run\b',
+    r'\bhermes\s+gateway\s+(?:start|restart|stop)\b',
+    r'\bsystemctl\s+(?:--user\s+)?(?:start|restart|stop)\s+hermes-gateway(?:\.service)?\b',
+]
+_GATEWAY_SESSION_SELF_MANAGEMENT_KEY = "gateway-session:self-management"
+_GATEWAY_SESSION_SELF_MANAGEMENT_DESC = (
+    "manage the running gateway from inside a gateway session "
+    "(can disconnect Hermes mid-reply)"
+)
+
 
 def _legacy_pattern_key(pattern: str) -> str:
     """Reproduce the old regex-derived approval key for backwards compatibility."""
@@ -134,6 +145,22 @@ def detect_dangerous_command(command: str) -> tuple:
         if re.search(pattern, command_lower, re.IGNORECASE | re.DOTALL):
             pattern_key = description
             return (True, pattern_key, description)
+    return (False, None, None)
+
+
+def detect_gateway_session_self_management(command: str) -> tuple:
+    """Detect gateway self-management commands issued from a gateway session."""
+    if not os.getenv("HERMES_GATEWAY_SESSION"):
+        return (False, None, None)
+
+    command_lower = _normalize_command_for_detection(command).lower()
+    for pattern in _GATEWAY_SESSION_SELF_MANAGEMENT_PATTERNS:
+        if re.search(pattern, command_lower, re.IGNORECASE | re.DOTALL):
+            return (
+                True,
+                _GATEWAY_SESSION_SELF_MANAGEMENT_KEY,
+                _GATEWAY_SESSION_SELF_MANAGEMENT_DESC,
+            )
     return (False, None, None)
 
 
@@ -465,7 +492,9 @@ def check_dangerous_command(command: str, env_type: str,
             return {"approved": True, "message": None}
         # YOLO without HERMES_YOLO_ALLOW_LOCAL on local — do not bypass
 
-    is_dangerous, pattern_key, description = detect_dangerous_command(command)
+    is_dangerous, pattern_key, description = detect_gateway_session_self_management(command)
+    if not is_dangerous:
+        is_dangerous, pattern_key, description = detect_dangerous_command(command)
     if not is_dangerous:
         return {"approved": True, "message": None}
 
@@ -512,8 +541,13 @@ def check_dangerous_command(command: str, env_type: str,
             ),
         }
 
-    choice = prompt_dangerous_approval(command, description,
-                                       approval_callback=approval_callback)
+    allow_permanent = pattern_key != _GATEWAY_SESSION_SELF_MANAGEMENT_KEY
+    choice = prompt_dangerous_approval(
+        command,
+        description,
+        approval_callback=approval_callback,
+        allow_permanent=allow_permanent,
+    )
 
     if choice == "deny":
         return {
@@ -629,7 +663,9 @@ def check_all_command_guards(command: str, env_type: str,
         pass  # tirith module not installed — allow
 
     # Dangerous command check (detection only, no approval)
-    is_dangerous, pattern_key, description = detect_dangerous_command(command)
+    is_dangerous, pattern_key, description = detect_gateway_session_self_management(command)
+    if not is_dangerous:
+        is_dangerous, pattern_key, description = detect_dangerous_command(command)
 
     # --- Phase 2: Decide ---
 
@@ -690,6 +726,9 @@ def check_all_command_guards(command: str, env_type: str,
     primary_key = warnings[0][0]
     all_keys = [key for key, _, _ in warnings]
     has_tirith = any(is_t for _, _, is_t in warnings)
+    has_gateway_self_management = any(
+        key == _GATEWAY_SESSION_SELF_MANAGEMENT_KEY for key, _, _ in warnings
+    )
 
     # Gateway/async: single approval_required with combined description
     # Store all pattern keys so gateway replay approves all of them
@@ -713,9 +752,12 @@ def check_all_command_guards(command: str, env_type: str,
 
     # CLI interactive: single combined prompt
     # Hide [a]lways when any tirith warning is present
-    choice = prompt_dangerous_approval(command, combined_desc,
-                                       allow_permanent=not has_tirith,
-                                       approval_callback=approval_callback)
+    choice = prompt_dangerous_approval(
+        command,
+        combined_desc,
+        allow_permanent=not has_tirith and not has_gateway_self_management,
+        approval_callback=approval_callback,
+    )
 
     if choice == "deny":
         return {
@@ -730,7 +772,7 @@ def check_all_command_guards(command: str, env_type: str,
         if choice == "session" or (choice == "always" and is_tirith):
             # tirith: session only (no permanent broad allowlisting)
             approve_session(session_key, key)
-        elif choice == "always":
+        elif choice == "always" and key != _GATEWAY_SESSION_SELF_MANAGEMENT_KEY:
             # dangerous patterns: permanent allowed
             approve_session(session_key, key)
             approve_permanent(key)

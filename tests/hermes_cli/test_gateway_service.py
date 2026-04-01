@@ -85,6 +85,8 @@ class TestGeneratedSystemdUnits:
         assert "ExecStart=" in unit
         assert "ExecStop=" not in unit
         assert "TimeoutStopSec=60" in unit
+        assert "Restart=always" in unit
+        assert "RestartSec=5" in unit
 
     def test_user_unit_includes_resolved_node_directory_in_path(self, monkeypatch):
         monkeypatch.setattr(gateway_cli.shutil, "which", lambda cmd: "/home/test/.nvm/versions/node/v24.14.0/bin/node" if cmd == "node" else None)
@@ -100,6 +102,8 @@ class TestGeneratedSystemdUnits:
         assert "ExecStop=" not in unit
         assert "TimeoutStopSec=60" in unit
         assert "WantedBy=multi-user.target" in unit
+        assert "Restart=always" in unit
+        assert "RestartSec=5" in unit
 
 
 class TestGatewayStopCleanup:
