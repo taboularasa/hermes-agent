@@ -6,11 +6,14 @@ import platform
 import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
+from pathlib import Path
 
 _IS_WINDOWS = platform.system() == "Windows"
 
+from hermes_cli.config import get_hermes_home
 from tools.environments.base import BaseEnvironment
 from tools.environments.persistent_shell import PersistentShellMixin
 from tools.interrupt import is_interrupted
@@ -314,6 +317,43 @@ def _extract_fenced_output(raw: str) -> str:
     return raw[start:last]
 
 
+def _dir_is_writable(path: str | Path) -> bool:
+    """Best-effort writability check that catches quota/full-temp failures."""
+    try:
+        root = Path(path)
+        root.mkdir(parents=True, exist_ok=True)
+        fd, probe = tempfile.mkstemp(prefix="hermes-local-probe-", dir=root)
+        os.close(fd)
+        os.unlink(probe)
+        return True
+    except OSError:
+        return False
+
+
+def _get_local_persistent_temp_root() -> str:
+    """Pick a writable temp root for local persistent-shell IPC files."""
+    candidates = []
+    tmpdir_env = os.environ.get("TMPDIR")
+    if tmpdir_env:
+        candidates.append(Path(tmpdir_env))
+    candidates.extend([
+        Path(tempfile.gettempdir()),
+        get_hermes_home() / "tmp",
+        Path.cwd() / ".hermes-tmp",
+    ])
+
+    seen = set()
+    for candidate in candidates:
+        root = str(candidate)
+        if root in seen:
+            continue
+        seen.add(root)
+        if _dir_is_writable(candidate):
+            return root
+
+    raise RuntimeError("No writable temp directory available for local persistent shell")
+
+
 class LocalEnvironment(PersistentShellMixin, BaseEnvironment):
     """Run commands directly on the host machine.
 
@@ -330,18 +370,27 @@ class LocalEnvironment(PersistentShellMixin, BaseEnvironment):
                  persistent: bool = False):
         super().__init__(cwd=cwd or os.getcwd(), timeout=timeout, env=env)
         self.persistent = persistent
+        self._persistent_temp_root = _get_local_persistent_temp_root()
         if self.persistent:
             self._init_persistent_shell()
 
     @property
     def _temp_prefix(self) -> str:
-        return f"/tmp/hermes-local-{self._session_id}"
+        return os.path.join(
+            self._persistent_temp_root,
+            f"hermes-local-{self._session_id}",
+        )
 
     def _spawn_shell_process(self) -> subprocess.Popen:
         user_shell = _find_bash()
         run_env = _make_run_env(self.env)
+        # Keep the long-lived shell deterministic and stdin-driven.
+        # Using a login shell here can source interactive dotfiles / prompt hooks
+        # that emit unread prompt text to stdout and interfere with the file-IPC
+        # protocol used by the persistent backend. A clean bash avoids that class
+        # of hangs while still preserving state across execute() calls.
         return subprocess.Popen(
-            [user_shell, "-l"],
+            [user_shell, "--noprofile", "--norc", "-s"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,

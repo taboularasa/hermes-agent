@@ -386,7 +386,19 @@ def _load_gateway_config() -> dict:
     return {}
 
 
-def _resolve_gateway_model(config: dict | None = None) -> str:
+def _provider_default_model(provider: str | None) -> str:
+    """Return the first curated model for a provider, if known."""
+    if not provider:
+        return ""
+    try:
+        from hermes_cli.models import _PROVIDER_MODELS
+        models = _PROVIDER_MODELS.get(provider, [])
+        return models[0] if models else ""
+    except Exception:
+        return ""
+
+
+def _resolve_gateway_model(config: dict | None = None, provider: str | None = None) -> str:
     """Read model from env/config — mirrors the resolution in _run_agent_sync.
 
     Without this, temporary AIAgent instances (memory flush, /compress) fall
@@ -400,7 +412,7 @@ def _resolve_gateway_model(config: dict | None = None) -> str:
         model = model_cfg
     elif isinstance(model_cfg, dict):
         model = model_cfg.get("default") or model_cfg.get("model") or model
-    return model
+    return model or _provider_default_model(provider)
 
 
 def _resolve_hermes_bin() -> Optional[list[str]]:
@@ -680,7 +692,7 @@ class GatewayRunner:
             # Resolve model from config — AIAgent's default is OpenRouter-
             # formatted ("anthropic/claude-opus-4.6") which fails when the
             # active provider is openai-codex.
-            model = _resolve_gateway_model()
+            model = _resolve_gateway_model(provider=runtime_kwargs.get("provider"))
 
             tmp_agent = AIAgent(
                 **runtime_kwargs,
@@ -4068,7 +4080,7 @@ class GatewayRunner:
                 return
 
             user_config = _load_gateway_config()
-            model = _resolve_gateway_model(user_config)
+            model = _resolve_gateway_model(user_config, provider=runtime_kwargs.get("provider"))
             platform_key = _platform_config_key(source.platform)
 
             from hermes_cli.tools_config import _get_platform_tools
@@ -4345,7 +4357,7 @@ class GatewayRunner:
                 return "No provider configured -- cannot compress."
 
             # Resolve model from config (same reason as memory flush above).
-            model = _resolve_gateway_model()
+            model = _resolve_gateway_model(provider=runtime_kwargs.get("provider"))
 
             msgs = [
                 {"role": m.get("role"), "content": m.get("content")}
@@ -5552,6 +5564,8 @@ class GatewayRunner:
 
             try:
                 runtime_kwargs = _resolve_runtime_agent_kwargs()
+                if not model:
+                    model = _provider_default_model(runtime_kwargs.get("provider"))
             except Exception as exc:
                 return {
                     "final_response": f"⚠️ Provider authentication failed: {exc}",

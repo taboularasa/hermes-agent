@@ -10,6 +10,14 @@ import pytest
 from cron.scheduler import _resolve_origin, _resolve_delivery_target, _deliver_result, run_job, SILENT_MARKER, _build_job_prompt
 
 
+@pytest.fixture(autouse=True)
+def _isolate_scheduler_lock(tmp_path, monkeypatch):
+    """Give each test its own tick lock so xdist workers do not contend."""
+    lock_dir = tmp_path / "cron-lock"
+    monkeypatch.setattr("cron.scheduler._LOCK_DIR", lock_dir)
+    monkeypatch.setattr("cron.scheduler._LOCK_FILE", lock_dir / ".tick.lock")
+
+
 class TestResolveOrigin:
     def test_full_origin(self):
         job = {

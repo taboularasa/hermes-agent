@@ -150,19 +150,28 @@ def _get_claude_code_version() -> str:
 def _is_oauth_token(key: str) -> bool:
     """Check if the key is an OAuth/setup token (not a regular Console API key).
 
-    Regular API keys start with 'sk-ant-api'. Everything else (setup-tokens
-    starting with 'sk-ant-oat', managed keys, JWTs, etc.) needs Bearer auth.
-    Azure AI Foundry keys (non sk-ant- prefixed) should use x-api-key, not Bearer.
+    Regular API keys start with ``sk-ant-api`` and use ``x-api-key``.
+    Anthropic OAuth/setup credentials use Bearer auth and commonly appear as:
+    - setup tokens: ``sk-ant-oat...``
+    - Claude-managed keys: ``ou1...``
+    - JWT access tokens: ``eyJ...``
+
+    Other third-party provider keys that do not use Anthropic's native token
+    shapes (for example Azure AI Foundry secrets) should continue using
+    ``x-api-key`` rather than being misclassified as OAuth Bearer tokens.
     """
     if not key:
         return False
     # Regular Console API keys use x-api-key header
     if key.startswith("sk-ant-api"):
         return False
-    # Azure AI Foundry keys don't start with sk-ant- at all — treat as regular API key
+    # Anthropic-native OAuth/setup token shapes use Bearer auth
+    if key.startswith("sk-ant-oat") or key.startswith("ou1") or key.startswith("eyJ"):
+        return True
+    # Other non-Anthropic key shapes (e.g. Azure AI Foundry) should not be treated as OAuth
     if not key.startswith("sk-ant-"):
         return False
-    # Everything else (setup-tokens sk-ant-oat, managed keys, JWTs) uses Bearer auth
+    # Unknown sk-ant-* variants default to Bearer auth for Anthropic-native compatibility
     return True
 
 

@@ -634,7 +634,8 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
                         max_tokens=self.config.summary_target_tokens * 2,
                     )
                 else:
-                    response = await self._get_async_client().chat.completions.create(
+                    async_client = self.async_client or self._get_async_client()
+                    response = await async_client.chat.completions.create(
                         model=self.config.summarization_model,
                         messages=[{"role": "user", "content": prompt}],
                         temperature=self.config.temperature,
