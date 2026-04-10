@@ -199,6 +199,21 @@ DEFAULT_CONFIG = {
     "model": "anthropic/claude-opus-4.6",
     "fallback_providers": [],
     "toolsets": ["hermes-cli"],
+    "ctx": {
+        "enabled": False,
+        "coding_mode": "auto",
+        "coding_toolsets": ["terminal", "file", "code_execution"],
+        "daemon_url": "",
+        "auth_token": "",
+        "workspace_id": "",
+        "data_dir": "~/.ctx-data",
+        # Optional: only create a ctx session when the daemon explicitly
+        # supports the configured provider/model pair. Hermes task/worktree
+        # binding works without this.
+        "session_provider_id": "",
+        "session_model_id": "",
+        "session_execution_environment": "host",
+    },
     "agent": {
         "max_turns": 90,
         # Tool-use enforcement: injects system prompt guidance that tells the

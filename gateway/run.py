@@ -4094,6 +4094,18 @@ class GatewayRunner:
             from hermes_cli.tools_config import _get_platform_tools
             enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
 
+            try:
+                from hermes_cli.ctx_runtime import maybe_bind_ctx_session
+
+                maybe_bind_ctx_session(
+                    session_id=task_id,
+                    enabled_toolsets=enabled_toolsets,
+                    platform=platform_key,
+                    prompt=prompt,
+                )
+            except Exception as ctx_exc:
+                logger.debug("ctx pre-bind failed for background task %s: %s", task_id, ctx_exc)
+
             pr = self._provider_routing
             max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
             reasoning_config = self._load_reasoning_config()
@@ -5249,6 +5261,7 @@ class GatewayRunner:
         runtime: dict,
         enabled_toolsets: list,
         ephemeral_prompt: str,
+        ctx_signature: str = "",
     ) -> str:
         """Compute a stable string key from agent config values.
 
@@ -5277,6 +5290,7 @@ class GatewayRunner:
                 # reasoning_config excluded — it's set per-message on the
                 # cached agent and doesn't affect system prompt or tools.
                 ephemeral_prompt or "",
+                ctx_signature or "",
             ],
             sort_keys=True,
             default=str,
@@ -5559,6 +5573,19 @@ class GatewayRunner:
             if self._ephemeral_system_prompt:
                 combined_ephemeral = (combined_ephemeral + "\n\n" + self._ephemeral_system_prompt).strip()
 
+            try:
+                from hermes_cli.ctx_runtime import maybe_bind_ctx_session
+
+                ctx_binding = maybe_bind_ctx_session(
+                    session_id=session_id,
+                    enabled_toolsets=enabled_toolsets,
+                    platform=platform_key,
+                    prompt=message,
+                )
+            except Exception as ctx_exc:
+                logger.debug("ctx pre-bind failed for gateway session %s: %s", session_id, ctx_exc)
+                ctx_binding = None
+
             # Re-read .env and config for fresh credentials (gateway is long-lived,
             # keys may change without restart).
             try:
@@ -5625,6 +5652,7 @@ class GatewayRunner:
                 turn_route["runtime"],
                 enabled_toolsets,
                 combined_ephemeral,
+                ctx_binding.signature if ctx_binding else "",
             )
             agent = None
             _cache_lock = getattr(self, "_agent_cache_lock", None)

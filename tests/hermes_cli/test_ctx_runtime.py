@@ -1,0 +1,195 @@
+import json
+
+from hermes_cli import ctx_runtime
+from hermes_cli.config import load_config, save_config
+from tools.terminal_tool import clear_task_env_overrides, get_task_cwd
+
+
+class _FakeCtxClient:
+    def __init__(self, providers=None):
+        self.providers = providers or []
+        self.created_tasks = []
+        self.created_sessions = []
+
+    def get_workspace(self, workspace_id: str):
+        return None
+
+    def list_workspaces(self):
+        return [
+            {
+                "id": "ws-1",
+                "root_path": "/tmp/project",
+            }
+        ]
+
+    def create_task(self, workspace_id: str, title: str, prompt: str):
+        self.created_tasks.append((workspace_id, title, prompt))
+        return {
+            "id": "task-1",
+            "workspace_id": workspace_id,
+            "primary_worktree_id": "wt-1",
+        }
+
+    def list_providers(self):
+        return self.providers
+
+    def create_session(self, task_id: str, *, provider_id: str, model_id: str, execution_environment: str):
+        self.created_sessions.append((task_id, provider_id, model_id, execution_environment))
+        return {
+            "id": "ctx-session-1",
+            "task_id": task_id,
+            "worktree_id": "wt-1",
+        }
+
+
+def _write_ctx_config(tmp_path, **overrides):
+    config = load_config()
+    config["ctx"].update(
+        {
+            "enabled": True,
+            "coding_mode": "auto",
+            "coding_toolsets": ["terminal", "file", "code_execution"],
+            "data_dir": str(tmp_path / "ctx-data"),
+        }
+    )
+    config["ctx"].update(overrides)
+    save_config(config)
+
+
+def test_is_ctx_candidate_requires_coding_toolsets(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _write_ctx_config(tmp_path)
+
+    assert ctx_runtime.is_ctx_candidate(
+        enabled_toolsets=["terminal"],
+        platform="cli",
+    )
+    assert not ctx_runtime.is_ctx_candidate(
+        enabled_toolsets=["web"],
+        platform="cli",
+    )
+    assert not ctx_runtime.is_ctx_candidate(
+        enabled_toolsets=["terminal"],
+        platform="acp",
+    )
+
+
+def test_maybe_bind_ctx_session_persists_and_registers_cwd(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _write_ctx_config(tmp_path)
+
+    fake_client = _FakeCtxClient()
+    monkeypatch.setattr(ctx_runtime, "_CtxDaemonClient", lambda *_args, **_kwargs: fake_client)
+    monkeypatch.setattr(ctx_runtime, "_find_auth_material", lambda _cfg: ("http://ctx.local", "token"))
+    monkeypatch.setattr(ctx_runtime, "_guess_repo_root", lambda _candidate: "/tmp/project")
+
+    binding = ctx_runtime.maybe_bind_ctx_session(
+        session_id="sess-1",
+        enabled_toolsets=["terminal", "file"],
+        platform="cli",
+        prompt="Fix the failing tests",
+    )
+
+    try:
+        assert binding.active
+        assert binding.workspace_id == "ws-1"
+        assert binding.task_id == "task-1"
+        assert binding.worktree_path == str(tmp_path / "ctx-data" / "worktrees" / "ws-1" / "wt-1")
+        assert get_task_cwd("sess-1") == binding.worktree_path
+
+        record = json.loads((tmp_path / "ctx" / "session_bindings.json").read_text(encoding="utf-8"))
+        assert record["sessions"]["sess-1"]["task_id"] == "task-1"
+        assert fake_client.created_tasks == [
+            ("ws-1", "Fix the failing tests", "Fix the failing tests")
+        ]
+    finally:
+        clear_task_env_overrides("sess-1")
+
+
+def test_maybe_bind_ctx_session_reuses_persisted_binding(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _write_ctx_config(tmp_path)
+
+    worktree = tmp_path / "ctx-data" / "worktrees" / "ws-1" / "wt-1"
+    worktree.mkdir(parents=True, exist_ok=True)
+    record_path = tmp_path / "ctx" / "session_bindings.json"
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "sessions": {
+                    "sess-1": {
+                        "active": True,
+                        "reason": "ctx task bound",
+                        "session_id": "sess-1",
+                        "platform": "cli",
+                        "workspace_id": "ws-1",
+                        "task_id": "task-1",
+                        "worktree_id": "wt-1",
+                        "worktree_path": str(worktree),
+                        "source": "ctx-daemon",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _unexpected_client(*_args, **_kwargs):
+        raise AssertionError("ctx daemon should not be called for persisted bindings")
+
+    monkeypatch.setattr(ctx_runtime, "_CtxDaemonClient", _unexpected_client)
+
+    binding = ctx_runtime.maybe_bind_ctx_session(
+        session_id="sess-1",
+        enabled_toolsets=["terminal"],
+        platform="cli",
+    )
+
+    try:
+        assert binding.active
+        assert binding.reason == "reused persisted binding"
+        assert binding.worktree_path == str(worktree)
+        assert get_task_cwd("sess-1") == str(worktree)
+    finally:
+        clear_task_env_overrides("sess-1")
+
+
+def test_maybe_bind_ctx_session_creates_optional_ctx_session(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _write_ctx_config(
+        tmp_path,
+        session_provider_id="codex",
+        session_model_id="gpt-5.2-codex",
+    )
+
+    fake_client = _FakeCtxClient(
+        providers=[
+            {
+                "provider_id": "codex",
+                "installed": True,
+                "usability": {"usable": True},
+            }
+        ]
+    )
+    monkeypatch.setattr(ctx_runtime, "_CtxDaemonClient", lambda *_args, **_kwargs: fake_client)
+    monkeypatch.setattr(ctx_runtime, "_find_auth_material", lambda _cfg: ("http://ctx.local", "token"))
+    monkeypatch.setattr(ctx_runtime, "_guess_repo_root", lambda _candidate: "/tmp/project")
+
+    binding = ctx_runtime.maybe_bind_ctx_session(
+        session_id="sess-2",
+        enabled_toolsets=["terminal"],
+        platform="telegram",
+        prompt="Implement the feature",
+    )
+
+    try:
+        assert binding.active
+        assert binding.ctx_session_id == "ctx-session-1"
+        assert binding.ctx_session_provider_id == "codex"
+        assert fake_client.created_sessions == [
+            ("task-1", "codex", "gpt-5.2-codex", "host")
+        ]
+    finally:
+        clear_task_env_overrides("sess-2")

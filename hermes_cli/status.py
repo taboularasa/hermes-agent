@@ -239,7 +239,30 @@ def show_status(args):
     
     sudo_password = os.getenv("SUDO_PASSWORD", "")
     print(f"  Sudo:         {check_mark(bool(sudo_password))} {'enabled' if sudo_password else 'disabled'}")
-    
+
+    # =========================================================================
+    # ctx Runtime
+    # =========================================================================
+    print()
+    print(color("◆ ctx Runtime", Colors.CYAN, Colors.BOLD))
+    try:
+        ctx_cfg = load_config().get("ctx", {})
+    except Exception:
+        ctx_cfg = {}
+    if not isinstance(ctx_cfg, dict):
+        ctx_cfg = {}
+    ctx_enabled = bool(ctx_cfg.get("enabled", False))
+    print(f"  Enabled:      {check_mark(ctx_enabled)} {'yes' if ctx_enabled else 'no'}")
+    print(f"  Mode:         {ctx_cfg.get('coding_mode', 'auto')}")
+    print(f"  Toolsets:     {', '.join(ctx_cfg.get('coding_toolsets', [])) or '(default)'}")
+    workspace_id = str(ctx_cfg.get("workspace_id", "") or "").strip()
+    if workspace_id:
+        print(f"  Workspace:    {workspace_id}")
+    provider_id = str(ctx_cfg.get("session_provider_id", "") or "").strip()
+    model_id = str(ctx_cfg.get("session_model_id", "") or "").strip()
+    if provider_id and model_id:
+        print(f"  ctx Session:  {provider_id} / {model_id}")
+
     # =========================================================================
     # Messaging Platforms
     # =========================================================================

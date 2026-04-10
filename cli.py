@@ -4083,6 +4083,18 @@ class HermesCLI:
 
         def run_background():
             try:
+                try:
+                    from hermes_cli.ctx_runtime import maybe_bind_ctx_session
+
+                    maybe_bind_ctx_session(
+                        session_id=task_id,
+                        enabled_toolsets=self.enabled_toolsets,
+                        platform="cli",
+                        prompt=prompt,
+                    )
+                except Exception as ctx_exc:
+                    logging.debug("ctx pre-bind failed for background task %s: %s", task_id, ctx_exc)
+
                 bg_agent = AIAgent(
                     model=turn_route["model"],
                     api_key=turn_route["runtime"].get("api_key"),
@@ -5596,6 +5608,18 @@ class HermesCLI:
         if turn_route["signature"] != self._active_agent_route_signature:
             self.agent = None
 
+        try:
+            from hermes_cli.ctx_runtime import maybe_bind_ctx_session
+
+            maybe_bind_ctx_session(
+                session_id=self.session_id,
+                enabled_toolsets=self.enabled_toolsets,
+                platform="cli",
+                prompt=message if isinstance(message, str) else "",
+            )
+        except Exception as e:
+            logging.debug("ctx pre-bind failed for CLI session %s: %s", self.session_id, e)
+
         # Initialize agent if needed
         if self.agent is None:
             _cprint(f"{_DIM}Initializing agent...{_RST}")
@@ -5619,10 +5643,14 @@ class HermesCLI:
             try:
                 from agent.context_references import preprocess_context_references
                 from agent.model_metadata import get_model_context_length
+                from tools.terminal_tool import get_task_cwd
                 _ctx_len = get_model_context_length(
                     self.model, base_url=self.base_url or "", api_key=self.api_key or "")
                 _ctx_result = preprocess_context_references(
-                    message, cwd=os.getcwd(), context_length=_ctx_len)
+                    message,
+                    cwd=get_task_cwd(self.session_id, os.getcwd()),
+                    context_length=_ctx_len,
+                )
                 if _ctx_result.expanded or _ctx_result.blocked:
                     if _ctx_result.references:
                         _cprint(
@@ -7584,33 +7612,9 @@ def main(
         asyncio.run(start_gateway())
         return
 
-    # Skip worktree for list commands (they exit immediately)
-    if not list_tools and not list_toolsets:
-        # ── Git worktree isolation (#652) ──
-        # Create an isolated worktree so this agent instance doesn't collide
-        # with other agents working on the same repo.
-        use_worktree = worktree or w or CLI_CONFIG.get("worktree", False)
-        wt_info = None
-        if use_worktree:
-            # Prune stale worktrees from crashed/killed sessions
-            _repo = _git_repo_root()
-            if _repo:
-                _prune_stale_worktrees(_repo)
-            wt_info = _setup_worktree()
-            if wt_info:
-                _active_worktree = wt_info
-                os.environ["TERMINAL_CWD"] = wt_info["path"]
-                atexit.register(_cleanup_worktree, wt_info)
-            else:
-                # Worktree was explicitly requested but setup failed —
-                # don't silently run without isolation.
-                return
-    else:
-        wt_info = None
-    
     # Handle query shorthand
     query = query or q
-    
+
     # Parse toolsets - handle both string and tuple/list inputs
     # Default to hermes-cli toolset which includes cronjob management tools
     toolsets_list = None
@@ -7629,10 +7633,10 @@ def main(
         # Use the shared resolver so MCP servers are included at runtime
         from hermes_cli.tools_config import _get_platform_tools
         toolsets_list = sorted(_get_platform_tools(CLI_CONFIG, "cli"))
-    
+
     parsed_skills = _parse_skills_argument(skills)
 
-    # Create CLI instance
+    # Create CLI instance early so ctx preflight can use the stable session_id.
     cli = HermesCLI(
         model=model,
         toolsets=toolsets_list,
@@ -7660,6 +7664,44 @@ def main(
                 part for part in (cli.system_prompt, skills_prompt) if part
             ).strip()
             cli.preloaded_skills = loaded_skills
+
+    # Skip worktree for list commands (they exit immediately)
+    if not list_tools and not list_toolsets:
+        from hermes_cli.ctx_runtime import maybe_bind_ctx_session
+
+        # ── Git worktree isolation (#652) ──
+        # Create an isolated worktree so this agent instance doesn't collide
+        # with other agents working on the same repo.
+        use_worktree = worktree or w or CLI_CONFIG.get("worktree", False)
+        wt_info = None
+        ctx_preview = maybe_bind_ctx_session(
+            session_id=cli.session_id,
+            enabled_toolsets=toolsets_list,
+            platform="cli",
+            dry_run=True,
+        )
+        if use_worktree and ctx_preview.active:
+            print(
+                "\033[36mℹ ctx worktree mode is available for this coding session; "
+                "ignoring --worktree and using the ctx-managed worktree once the agent starts.\033[0m"
+            )
+            use_worktree = False
+        if use_worktree:
+            # Prune stale worktrees from crashed/killed sessions
+            _repo = _git_repo_root()
+            if _repo:
+                _prune_stale_worktrees(_repo)
+            wt_info = _setup_worktree()
+            if wt_info:
+                _active_worktree = wt_info
+                os.environ["TERMINAL_CWD"] = wt_info["path"]
+                atexit.register(_cleanup_worktree, wt_info)
+            else:
+                # Worktree was explicitly requested but setup failed —
+                # don't silently run without isolation.
+                return
+    else:
+        wt_info = None
 
     # Inject worktree context into agent's system prompt
     if wt_info:

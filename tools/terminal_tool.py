@@ -435,6 +435,30 @@ def clear_task_env_overrides(task_id: str):
     """
     _task_env_overrides.pop(task_id, None)
 
+
+def get_task_env_overrides(task_id: Optional[str]) -> Dict[str, Any]:
+    """Return a shallow copy of the task-specific environment overrides."""
+    if not task_id:
+        return {}
+    return dict(_task_env_overrides.get(task_id, {}))
+
+
+def get_task_cwd(task_id: Optional[str], default: Optional[str] = None) -> Optional[str]:
+    """Resolve the effective working directory for a task.
+
+    Order of precedence:
+    1. Per-task override registry
+    2. TERMINAL_CWD environment variable
+    3. Explicit default
+    """
+    overrides = get_task_env_overrides(task_id)
+    if overrides.get("cwd"):
+        return overrides["cwd"]
+    env_cwd = os.getenv("TERMINAL_CWD")
+    if env_cwd:
+        return env_cwd
+    return default
+
 # Configuration from environment variables
 
 def _parse_env_var(name: str, default: str, converter=int, type_label: str = "integer"):

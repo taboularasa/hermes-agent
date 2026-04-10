@@ -50,6 +50,7 @@ from hermes_constants import get_hermes_home
 # Load .env from ~/.hermes/.env first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.
 from hermes_cli.env_loader import load_hermes_dotenv
+from hermes_cli.ctx_runtime import CtxBinding, maybe_bind_ctx_session
 
 _hermes_home = get_hermes_home()
 _project_env = Path(__file__).parent / '.env'
@@ -68,7 +69,7 @@ from model_tools import (
     handle_function_call,
     check_toolset_requirements,
 )
-from tools.terminal_tool import cleanup_vm
+from tools.terminal_tool import cleanup_vm, get_task_cwd
 from tools.interrupt import set_interrupt as _set_interrupt
 from tools.browser_tool import cleanup_browser
 
@@ -985,6 +986,32 @@ class AIAgent:
         self.logs_dir = hermes_home / "sessions"
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.session_log_file = self.logs_dir / f"session_{self.session_id}.json"
+        self._ctx_binding = CtxBinding(
+            active=False,
+            reason="ctx not evaluated",
+            session_id=self.session_id,
+            platform=self.platform or "",
+        )
+        try:
+            self._ctx_binding = maybe_bind_ctx_session(
+                session_id=self.session_id,
+                enabled_toolsets=self.enabled_toolsets,
+                platform=self.platform,
+            )
+            if self._ctx_binding.active and not self.quiet_mode:
+                print(
+                    "🧭 ctx binding: "
+                    f"task={self._ctx_binding.task_id} "
+                    f"worktree={self._ctx_binding.worktree_path}"
+                )
+        except Exception as exc:
+            logger.warning("ctx binding failed during agent init: %s", exc, exc_info=True)
+            self._ctx_binding = CtxBinding(
+                active=False,
+                reason=f"ctx binding error: {exc}",
+                session_id=self.session_id,
+                platform=self.platform or "",
+            )
         
         # Track conversation messages for session logging
         self._session_messages: List[Dict[str, Any]] = []
@@ -2700,7 +2727,7 @@ class AIAgent:
             # mode).  The gateway process runs from the hermes-agent install
             # dir, so os.getcwd() would pick up the repo's AGENTS.md and
             # other dev files — inflating token usage by ~10k for no benefit.
-            _context_cwd = os.getenv("TERMINAL_CWD") or None
+            _context_cwd = get_task_cwd(self.session_id, None)
             context_files_prompt = build_context_files_prompt(
                 cwd=_context_cwd, skip_soul=_soul_loaded)
             if context_files_prompt:
@@ -2732,6 +2759,9 @@ class AIAgent:
         platform_key = (self.platform or "").lower().strip()
         if platform_key in PLATFORM_HINTS:
             prompt_parts.append(PLATFORM_HINTS[platform_key])
+
+        if self._ctx_binding.active:
+            prompt_parts.append(self._ctx_binding.system_prompt_note())
 
         return "\n\n".join(prompt_parts)
 
@@ -5540,7 +5570,7 @@ class AIAgent:
                 try:
                     cmd = function_args.get("command", "")
                     if _is_destructive_command(cmd):
-                        cwd = function_args.get("workdir") or os.getenv("TERMINAL_CWD", os.getcwd())
+                        cwd = function_args.get("workdir") or get_task_cwd(self.session_id, os.getcwd())
                         self._checkpoint_mgr.ensure_checkpoint(
                             cwd, f"before terminal: {cmd[:60]}"
                         )
@@ -5745,7 +5775,7 @@ class AIAgent:
                 try:
                     cmd = function_args.get("command", "")
                     if _is_destructive_command(cmd):
-                        cwd = function_args.get("workdir") or os.getenv("TERMINAL_CWD", os.getcwd())
+                        cwd = function_args.get("workdir") or get_task_cwd(self.session_id, os.getcwd())
                         self._checkpoint_mgr.ensure_checkpoint(
                             cwd, f"before terminal: {cmd[:60]}"
                         )

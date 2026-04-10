@@ -30,6 +30,8 @@ from .terminal_tool import (
     cleanup_vm,
     cleanup_all_environments,
     get_active_environments_info,
+    get_task_cwd,
+    get_task_env_overrides,
     register_task_env_overrides,
     clear_task_env_overrides,
     TERMINAL_TOOL_DESCRIPTION
@@ -172,6 +174,8 @@ __all__ = [
     'cleanup_vm',
     'cleanup_all_environments',
     'get_active_environments_info',
+    'get_task_cwd',
+    'get_task_env_overrides',
     'register_task_env_overrides',
     'clear_task_env_overrides',
     'TERMINAL_TOOL_DESCRIPTION',
@@ -259,4 +263,3 @@ __all__ = [
     'check_delegate_requirements',
     'DELEGATE_TASK_SCHEMA',
 ]
-
