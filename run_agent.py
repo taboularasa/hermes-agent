@@ -4575,9 +4575,10 @@ class AIAgent:
             if fallback_reasoning is not None:
                 self.reasoning_config = fallback_reasoning
             else:
+                base_reasoning_config = getattr(self, "_base_reasoning_config", None)
                 self.reasoning_config = (
-                    copy.deepcopy(self._base_reasoning_config)
-                    if self._base_reasoning_config is not None
+                    copy.deepcopy(base_reasoning_config)
+                    if base_reasoning_config is not None
                     else None
                 )
             self.model = fb_model
