@@ -155,6 +155,11 @@ from .delegate_tool import (
     check_delegate_requirements,
     DELEGATE_TASK_SCHEMA,
 )
+from .codex_delegate_tool import (
+    codex_delegate,
+    check_codex_delegate_requirements,
+    CODEX_DELEGATE_SCHEMA,
+)
 
 # File tools have no external requirements - they use the terminal backend
 def check_file_requirements():
@@ -258,6 +263,10 @@ __all__ = [
     'execute_code',
     'check_sandbox_requirements',
     'EXECUTE_CODE_SCHEMA',
+    # Local Codex supervisor
+    'codex_delegate',
+    'check_codex_delegate_requirements',
+    'CODEX_DELEGATE_SCHEMA',
     # Subagent delegation
     'delegate_task',
     'check_delegate_requirements',

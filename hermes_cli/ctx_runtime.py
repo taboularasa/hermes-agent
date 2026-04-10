@@ -82,7 +82,11 @@ class CtxBinding:
             "[System note: This coding session is attached to "
             + ", ".join(details)
             + ". Use the ctx-managed worktree as the source of truth. "
-            "Do not create a nested Hermes worktree.]"
+            "Do not create a nested Hermes worktree. "
+            "If the codex_delegate tool is available, act as the engineering manager: "
+            "launch bounded local Codex implementation runs, inspect their status and "
+            "results, and course-correct with follow-up runs instead of delegating "
+            "the Linear issue to cloud Codex.]"
         )
 
 

@@ -214,6 +214,14 @@ DEFAULT_CONFIG = {
         "session_model_id": "",
         "session_execution_environment": "host",
     },
+    "codex_delegate": {
+        "enabled": True,
+        "prefer_for_coding": True,
+        # The Lenovo host + ctx worktree is the external sandbox boundary, so
+        # Codex should run with full permissions by default in this mode.
+        "dangerous_bypass": True,
+        "model": "",
+    },
     "agent": {
         "max_turns": 90,
         # Tool-use enforcement: injects system prompt guidance that tells the
