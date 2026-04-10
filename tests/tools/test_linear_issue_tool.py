@@ -152,3 +152,22 @@ def test_linear_issue_get_returns_issue_and_team_states(monkeypatch):
     assert result["success"] is True
     assert result["issue"]["identifier"] == "HAD-123"
     assert result["team_states"][0]["name"] == "In Progress"
+
+
+def test_normalize_issue_keeps_newest_comments_first():
+    issue = {
+        "comments": {
+            "nodes": [
+                {"id": "comment-newest"},
+                {"id": "comment-middle"},
+                {"id": "comment-oldest"},
+            ]
+        }
+    }
+
+    normalized = linear_issue_tool._normalize_issue(issue, comment_limit=2)
+
+    assert [comment["id"] for comment in normalized["comments"]] == [
+        "comment-newest",
+        "comment-middle",
+    ]

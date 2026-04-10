@@ -246,7 +246,7 @@ def _resolve_issue_ref(issue_id: Any, identifier: Any) -> str:
 def _normalize_issue(issue: dict[str, Any], *, comment_limit: int = 10) -> dict[str, Any]:
     comments = issue.get("comments", {})
     comment_nodes = comments.get("nodes", []) if isinstance(comments, dict) else []
-    normalized_comments = comment_nodes[-comment_limit:] if comment_limit > 0 else comment_nodes
+    normalized_comments = comment_nodes[:comment_limit] if comment_limit > 0 else comment_nodes
     result = dict(issue)
     result["comments"] = normalized_comments
     return result
