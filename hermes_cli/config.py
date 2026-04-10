@@ -199,6 +199,29 @@ DEFAULT_CONFIG = {
     "model": "anthropic/claude-opus-4.6",
     "fallback_providers": [],
     "toolsets": ["hermes-cli"],
+    "ctx": {
+        "enabled": False,
+        "coding_mode": "auto",
+        "coding_toolsets": ["terminal", "file", "code_execution"],
+        "daemon_url": "",
+        "auth_token": "",
+        "workspace_id": "",
+        "data_dir": "~/.ctx-data",
+        # Optional: only create a ctx session when the daemon explicitly
+        # supports the configured provider/model pair. Hermes task/worktree
+        # binding works without this.
+        "session_provider_id": "",
+        "session_model_id": "",
+        "session_execution_environment": "host",
+    },
+    "codex_delegate": {
+        "enabled": True,
+        "prefer_for_coding": True,
+        # The Lenovo host + ctx worktree is the external sandbox boundary, so
+        # Codex should run with full permissions by default in this mode.
+        "dangerous_bypass": True,
+        "model": "",
+    },
     "agent": {
         "max_turns": 90,
         # Tool-use enforcement: injects system prompt guidance that tells the
@@ -1445,6 +1468,17 @@ _FALLBACK_COMMENT = """
 # fallback_model:
 #   provider: openrouter
 #   model: anthropic/claude-sonnet-4
+#   reasoning_effort: xhigh
+#
+# fallback_providers:
+#  - provider: openrouter
+#    model: openai/gpt-5.4
+#    reasoning_effort: high
+#
+# or prefer a codex fallback:
+#  - provider: openai-codex
+#    model: gpt-5.3-codex-spark
+#    reasoning_effort: xhigh
 #
 # ── Smart Model Routing ────────────────────────────────────────────────
 # Optional cheap-vs-strong routing for simple turns.
@@ -1488,6 +1522,12 @@ _COMMENTED_SECTIONS = """
 # fallback_model:
 #   provider: openrouter
 #   model: anthropic/claude-sonnet-4
+#   reasoning_effort: xhigh
+#
+# fallback_providers:
+#  - provider: openrouter
+#    model: openai/gpt-5.4
+#    reasoning_effort: high
 #
 # ── Smart Model Routing ────────────────────────────────────────────────
 # Optional cheap-vs-strong routing for simple turns.
@@ -1521,8 +1561,16 @@ def save_config(config: Dict[str, Any]):
     sec = normalized.get("security", {})
     if not sec or sec.get("redact_secrets") is None:
         parts.append(_SECURITY_COMMENT)
-    fb = normalized.get("fallback_model", {})
-    if not fb or not (fb.get("provider") and fb.get("model")):
+    fb = normalized.get("fallback_providers")
+    if not isinstance(fb, list):
+        fb = normalized.get("fallback_model", {})
+        fb = [fb] if isinstance(fb, dict) and fb.get("provider") and fb.get("model") else []
+
+    fb = [
+        entry for entry in (fb or [])
+        if isinstance(entry, dict) and entry.get("provider") and entry.get("model")
+    ]
+    if not fb:
         parts.append(_FALLBACK_COMMENT)
 
     atomic_yaml_write(

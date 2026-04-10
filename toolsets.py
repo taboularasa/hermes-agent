@@ -55,7 +55,7 @@ _HERMES_CORE_TOOLS = [
     # Clarifying questions
     "clarify",
     # Code execution + delegation
-    "execute_code", "delegate_task",
+    "execute_code", "delegate_task", "codex_delegate", "linear_issue",
     # Cronjob management
     "cronjob",
     # Cross-platform messaging (gated on gateway running via check_fn)
@@ -193,6 +193,18 @@ TOOLSETS = {
     "delegation": {
         "description": "Spawn subagents with isolated context for complex subtasks",
         "tools": ["delegate_task"],
+        "includes": []
+    },
+
+    "codex": {
+        "description": "Supervise local Codex CLI implementation runs on the Lenovo host",
+        "tools": ["codex_delegate"],
+        "includes": []
+    },
+
+    "linear": {
+        "description": "Inspect and update Linear issues directly from Hermes",
+        "tools": ["linear_issue"],
         "includes": []
     },
 
