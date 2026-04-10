@@ -997,6 +997,7 @@ class AIAgent:
                 session_id=self.session_id,
                 enabled_toolsets=self.enabled_toolsets,
                 platform=self.platform,
+                repo_root=os.getcwd(),
             )
             if self._ctx_binding.active and not self.quiet_mode:
                 print(
@@ -6247,8 +6248,10 @@ class AIAgent:
         self._stream_callback = stream_callback
         self._persist_user_message_idx = None
         self._persist_user_message_override = persist_user_message
-        # Generate unique task_id if not provided to isolate VMs between concurrent tasks
-        effective_task_id = task_id or str(uuid.uuid4())
+        # Default to the stable session_id so per-session cwd/sandbox overrides
+        # remain consistent across callers that omit task_id (CLI quiet mode,
+        # API server, cron, etc.). Fall back to a UUID only when neither exists.
+        effective_task_id = task_id or self.session_id or str(uuid.uuid4())
         
         # Reset retry counters and iteration budget at the start of each turn
         # so subagent usage from a previous turn doesn't eat into the next one.

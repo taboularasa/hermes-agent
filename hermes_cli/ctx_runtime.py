@@ -185,23 +185,30 @@ def _path_within_root(path: Optional[str], root: Optional[str]) -> bool:
 
 
 def _guess_repo_root(candidate: Optional[str]) -> Optional[str]:
-    start = _normalize_path(candidate) or _normalize_path(os.getenv("TERMINAL_CWD")) or _normalize_path(os.getcwd())
-    if not start:
-        return None
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=start,
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-        if result.returncode == 0:
-            return _normalize_path(result.stdout.strip())
-    except Exception:
-        pass
-    return _normalize_path(start)
+    starts = []
+    for raw in (candidate, os.getcwd(), os.getenv("TERMINAL_CWD")):
+        normalized = _normalize_path(raw)
+        if normalized and normalized not in starts:
+            starts.append(normalized)
+
+    fallback = None
+    for start in starts:
+        if fallback is None:
+            fallback = start
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=start,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            if result.returncode == 0:
+                return _normalize_path(result.stdout.strip())
+        except Exception:
+            continue
+    return fallback
 
 
 def _load_ctx_config(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

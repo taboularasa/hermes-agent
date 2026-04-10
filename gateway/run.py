@@ -4102,6 +4102,7 @@ class GatewayRunner:
                     enabled_toolsets=enabled_toolsets,
                     platform=platform_key,
                     prompt=prompt,
+                    repo_root=os.getcwd(),
                 )
             except Exception as ctx_exc:
                 logger.debug("ctx pre-bind failed for background task %s: %s", task_id, ctx_exc)
@@ -5581,6 +5582,7 @@ class GatewayRunner:
                     enabled_toolsets=enabled_toolsets,
                     platform=platform_key,
                     prompt=message,
+                    repo_root=os.getcwd(),
                 )
             except Exception as ctx_exc:
                 logger.debug("ctx pre-bind failed for gateway session %s: %s", session_id, ctx_exc)

@@ -4091,6 +4091,7 @@ class HermesCLI:
                         enabled_toolsets=self.enabled_toolsets,
                         platform="cli",
                         prompt=prompt,
+                        repo_root=os.getcwd(),
                     )
                 except Exception as ctx_exc:
                     logging.debug("ctx pre-bind failed for background task %s: %s", task_id, ctx_exc)
@@ -5616,6 +5617,7 @@ class HermesCLI:
                 enabled_toolsets=self.enabled_toolsets,
                 platform="cli",
                 prompt=message if isinstance(message, str) else "",
+                repo_root=os.getcwd(),
             )
         except Exception as e:
             logging.debug("ctx pre-bind failed for CLI session %s: %s", self.session_id, e)
@@ -7678,6 +7680,7 @@ def main(
             session_id=cli.session_id,
             enabled_toolsets=toolsets_list,
             platform="cli",
+            repo_root=os.getcwd(),
             dry_run=True,
         )
         if use_worktree and ctx_preview.active:

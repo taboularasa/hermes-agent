@@ -193,3 +193,18 @@ def test_maybe_bind_ctx_session_creates_optional_ctx_session(monkeypatch, tmp_pa
         ]
     finally:
         clear_task_env_overrides("sess-2")
+
+
+def test_guess_repo_root_prefers_process_cwd_over_terminal_default(monkeypatch, tmp_path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / ".git").mkdir()
+
+    terminal_default = tmp_path / "terminal-default"
+    terminal_default.mkdir()
+
+    monkeypatch.chdir(repo_root)
+    monkeypatch.setenv("TERMINAL_CWD", str(terminal_default))
+
+    resolved = ctx_runtime._guess_repo_root(None)
+    assert resolved == str(repo_root)
