@@ -45,11 +45,30 @@ SILENT_MARKER = "[SILENT]"
 
 # Resolve Hermes home directory (respects HERMES_HOME override)
 _hermes_home = get_hermes_home()
+# Preserve the import-time default so tests/monkeypatches that override
+# ``_hermes_home`` continue to work, while still honoring runtime env updates.
+_HERMES_HOME_IMPORTED = _hermes_home
 
 # File-based lock prevents concurrent ticks from gateway + daemon + systemd timer
 _LOCK_DIR = _hermes_home / "cron"
 _LOCK_FILE = _LOCK_DIR / ".tick.lock"
 
+
+def _resolve_hermes_home() -> Path:
+    """Return the active Hermes home for the current cron invocation.
+
+    ``_hermes_home`` is evaluated at import time. For cron jobs that run after
+    environment changes (for example, when HERMES_HOME is injected at runtime
+    via a launcher), prefer the current env value. Keep using an explicitly
+    patched ``_hermes_home`` when it differs from the import-time value.
+    """
+
+    env_home = os.getenv("HERMES_HOME")
+    if _hermes_home != _HERMES_HOME_IMPORTED:
+        return _hermes_home
+    if env_home:
+        return Path(env_home)
+    return _hermes_home
 
 def _resolve_origin(job: dict) -> Optional[dict]:
     """Extract origin info from a job, preserving any extra routing metadata."""
@@ -332,11 +351,29 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     try:
         # Re-read .env and config.yaml fresh every run so provider/key
         # changes take effect without a gateway restart.
+        hermes_home = _resolve_hermes_home()
+        logger.debug("Job '%s': resolved hermes_home at runtime = %s", job_id, hermes_home)
+
         from dotenv import load_dotenv
-        try:
-            load_dotenv(str(_hermes_home / ".env"), override=True, encoding="utf-8")
-        except UnicodeDecodeError:
-            load_dotenv(str(_hermes_home / ".env"), override=True, encoding="latin-1")
+
+        def _load_dotenv_for(home_path: Path) -> None:
+            try:
+                load_dotenv(str(home_path / ".env"), override=True, encoding="utf-8")
+            except UnicodeDecodeError:
+                load_dotenv(str(home_path / ".env"), override=True, encoding="latin-1")
+
+        _load_dotenv_for(hermes_home)
+        # .env can change HERMES_HOME as well (e.g. launcher-injected path).
+        resolved_home = _resolve_hermes_home()
+        if resolved_home != hermes_home:
+            logger.debug(
+                "Job '%s': hermes_home changed after loading .env (%s -> %s)",
+                job_id,
+                hermes_home,
+                resolved_home,
+            )
+            hermes_home = resolved_home
+            _load_dotenv_for(hermes_home)
 
         delivery_target = _resolve_delivery_target(job)
         if delivery_target:
@@ -351,7 +388,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         _cfg = {}
         try:
             import yaml
-            _cfg_path = str(_hermes_home / "config.yaml")
+            _cfg_path = str(hermes_home / "config.yaml")
             if os.path.exists(_cfg_path):
                 with open(_cfg_path) as _f:
                     _cfg = yaml.safe_load(_f) or {}
@@ -376,9 +413,10 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         prefill_file = os.getenv("HERMES_PREFILL_MESSAGES_FILE", "") or _cfg.get("prefill_messages_file", "")
         if prefill_file:
             import json as _json
+
             pfpath = Path(prefill_file).expanduser()
             if not pfpath.is_absolute():
-                pfpath = _hermes_home / pfpath
+                pfpath = hermes_home / pfpath
             if pfpath.exists():
                 try:
                     with open(pfpath, "r", encoding="utf-8") as _pf:
@@ -395,6 +433,20 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         # Provider routing
         pr = _cfg.get("provider_routing", {})
         smart_routing = _cfg.get("smart_model_routing", {}) or {}
+        fallback_model = _cfg.get("fallback_providers") or _cfg.get("fallback_model")
+
+        if fallback_model is None:
+            fallback_count = 0
+        elif isinstance(fallback_model, list):
+            fallback_count = len(fallback_model)
+        else:
+            fallback_count = 1
+        logger.debug(
+            "Job '%s': fallback_model resolved from config.yaml (type=%s, count=%s)",
+            job_id,
+            type(fallback_model).__name__,
+            fallback_count,
+        )
 
         from hermes_cli.runtime_provider import (
             resolve_runtime_provider,
@@ -455,6 +507,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             platform="cron",
             session_id=_cron_session_id,
             session_db=_session_db,
+            fallback_model=fallback_model,
         )
         
         result = agent.run_conversation(prompt)

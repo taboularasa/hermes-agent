@@ -757,16 +757,24 @@ class GatewayRunner:
                 )
 
             flush_prompt += (
-                "Do NOT respond to the user. Just use the memory and skill_manage "
-                "tools if needed, then stop.]"
+                "Do NOT respond to the user. This is an internal maintenance turn. "
+                "Use the memory and skill_manage tools if needed. When you are "
+                "finished, reply with exactly MEMORY_FLUSH_DONE and nothing else.]"
             )
 
-            tmp_agent.run_conversation(
+            flush_result = tmp_agent.run_conversation(
                 user_message=flush_prompt,
                 conversation_history=msgs,
                 sync_honcho=False,
             )
-            logger.info("Pre-reset memory flush completed for session %s", old_session_id)
+            if isinstance(flush_result, dict) and flush_result.get("failed"):
+                logger.warning(
+                    "Pre-reset memory flush failed for session %s: %s",
+                    old_session_id,
+                    flush_result.get("error") or "unknown error",
+                )
+            else:
+                logger.info("Pre-reset memory flush completed for session %s", old_session_id)
             # Flush any queued Honcho writes before the session is dropped
             if getattr(tmp_agent, '_honcho', None):
                 try:

@@ -1445,6 +1445,17 @@ _FALLBACK_COMMENT = """
 # fallback_model:
 #   provider: openrouter
 #   model: anthropic/claude-sonnet-4
+#   reasoning_effort: xhigh
+#
+# fallback_providers:
+#  - provider: openrouter
+#    model: openai/gpt-5.4
+#    reasoning_effort: high
+#
+# or prefer a codex fallback:
+#  - provider: openai-codex
+#    model: gpt-5.3-codex-spark
+#    reasoning_effort: xhigh
 #
 # ── Smart Model Routing ────────────────────────────────────────────────
 # Optional cheap-vs-strong routing for simple turns.
@@ -1488,6 +1499,12 @@ _COMMENTED_SECTIONS = """
 # fallback_model:
 #   provider: openrouter
 #   model: anthropic/claude-sonnet-4
+#   reasoning_effort: xhigh
+#
+# fallback_providers:
+#  - provider: openrouter
+#    model: openai/gpt-5.4
+#    reasoning_effort: high
 #
 # ── Smart Model Routing ────────────────────────────────────────────────
 # Optional cheap-vs-strong routing for simple turns.
@@ -1521,8 +1538,16 @@ def save_config(config: Dict[str, Any]):
     sec = normalized.get("security", {})
     if not sec or sec.get("redact_secrets") is None:
         parts.append(_SECURITY_COMMENT)
-    fb = normalized.get("fallback_model", {})
-    if not fb or not (fb.get("provider") and fb.get("model")):
+    fb = normalized.get("fallback_providers")
+    if not isinstance(fb, list):
+        fb = normalized.get("fallback_model", {})
+        fb = [fb] if isinstance(fb, dict) and fb.get("provider") and fb.get("model") else []
+
+    fb = [
+        entry for entry in (fb or [])
+        if isinstance(entry, dict) and entry.get("provider") and entry.get("model")
+    ]
+    if not fb:
         parts.append(_FALLBACK_COMMENT)
 
     atomic_yaml_write(

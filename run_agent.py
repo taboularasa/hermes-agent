@@ -655,6 +655,10 @@ class AIAgent:
         # Model response configuration
         self.max_tokens = max_tokens  # None = use model default
         self.reasoning_config = reasoning_config  # None = use default (medium for OpenRouter)
+        # Keep a restore point for fallback chains that mix baseline vs per-provider
+        # reasoning settings.
+        self._base_reasoning_config = copy.deepcopy(reasoning_config) \
+            if isinstance(reasoning_config, dict) else reasoning_config
         self.prefill_messages = prefill_messages or []  # Prefilled conversation turns
         
         # Anthropic prompt caching: auto-enabled for Claude models via OpenRouter.
@@ -3306,11 +3310,67 @@ class AIAgent:
             return text.strip()
         return ""
 
+    def _make_responses_text_message(self, text: str) -> Any:
+        """Build a minimal Responses-style message item from streamed text."""
+        return SimpleNamespace(
+            type="message",
+            status="completed",
+            phase="final",
+            content=[SimpleNamespace(type="output_text", text=text)],
+        )
+
+    def _hydrate_empty_codex_response(
+        self,
+        response: Any,
+        streamed_text: str,
+        streamed_items: Optional[List[Any]] = None,
+    ) -> Any:
+        """Recover streamed assistant text or tool items when the terminal response has no output items."""
+        text = streamed_text.strip()
+        output_items = getattr(response, "output", None)
+        if isinstance(output_items, list) and output_items:
+            return response
+
+        synthetic_output: List[Any] = list(streamed_items or [])
+        if text:
+            synthetic_output.append(self._make_responses_text_message(text))
+
+        if not synthetic_output:
+            return response
+
+        mutated = False
+        try:
+            setattr(response, "output", synthetic_output)
+            mutated = True
+        except Exception:
+            pass
+        if text:
+            try:
+                setattr(response, "output_text", text)
+            except Exception:
+                pass
+        if mutated:
+            return response
+
+        return SimpleNamespace(
+            output=synthetic_output,
+            output_text=text if text else getattr(response, "output_text", None),
+            status=getattr(response, "status", None),
+            error=getattr(response, "error", None),
+            incomplete_details=getattr(response, "incomplete_details", None),
+            model=getattr(response, "model", None),
+            usage=getattr(response, "usage", None),
+        )
+
     def _normalize_codex_response(self, response: Any) -> tuple[Any, str]:
         """Normalize a Responses API object to an assistant_message-like object."""
         output = getattr(response, "output", None)
         if not isinstance(output, list) or not output:
-            raise RuntimeError("Responses API returned no output items")
+            out_text = getattr(response, "output_text", "")
+            if isinstance(out_text, str) and out_text.strip():
+                output = [self._make_responses_text_message(out_text.strip())]
+            else:
+                raise RuntimeError("Responses API returned no output items")
 
         response_status = getattr(response, "status", None)
         if isinstance(response_status, str):
@@ -3579,6 +3639,8 @@ class AIAgent:
         max_stream_retries = 1
         has_tool_calls = False
         first_delta_fired = False
+        streamed_text_parts: List[str] = []
+        streamed_output_items: List[Any] = []
         self._reasoning_deltas_fired = False
         for attempt in range(max_stream_retries + 1):
             try:
@@ -3591,6 +3653,7 @@ class AIAgent:
                         if "output_text.delta" in event_type or event_type == "response.output_text.delta":
                             delta_text = getattr(event, "delta", "")
                             if delta_text and not has_tool_calls:
+                                streamed_text_parts.append(delta_text)
                                 if not first_delta_fired:
                                     first_delta_fired = True
                                     if on_first_delta:
@@ -3602,12 +3665,24 @@ class AIAgent:
                         # Track tool calls to suppress text streaming
                         elif "function_call" in event_type:
                             has_tool_calls = True
+                        if event_type == "response.output_item.done":
+                            item = getattr(event, "item", None)
+                            item_type = getattr(item, "type", None)
+                            if item_type in {"reasoning", "function_call", "custom_tool_call"}:
+                                streamed_output_items.append(item)
                         # Fire reasoning callbacks
                         elif "reasoning" in event_type and "delta" in event_type:
                             reasoning_text = getattr(event, "delta", "")
                             if reasoning_text:
                                 self._fire_reasoning_delta(reasoning_text)
-                    return stream.get_final_response()
+                    final_response = stream.get_final_response()
+                    if streamed_output_items or (streamed_text_parts and not has_tool_calls):
+                        final_response = self._hydrate_empty_codex_response(
+                            final_response,
+                            "".join(streamed_text_parts),
+                            streamed_items=streamed_output_items,
+                        )
+                    return final_response
             except RuntimeError as exc:
                 err_text = str(exc)
                 missing_completed = "response.completed" in err_text
@@ -3642,11 +3717,32 @@ class AIAgent:
             return stream_or_response
 
         terminal_response = None
+        streamed_text_parts: List[str] = []
+        has_tool_calls = False
+        streamed_output_items: List[Any] = []
         try:
             for event in stream_or_response:
                 event_type = getattr(event, "type", None)
                 if not event_type and isinstance(event, dict):
                     event_type = event.get("type")
+                if "output_text.delta" in str(event_type):
+                    delta_text = getattr(event, "delta", None)
+                    if delta_text is None and isinstance(event, dict):
+                        delta_text = event.get("delta")
+                    if isinstance(delta_text, str) and delta_text and not has_tool_calls:
+                        streamed_text_parts.append(delta_text)
+                    continue
+                if "function_call" in str(event_type):
+                    has_tool_calls = True
+                if event_type == "response.output_item.done":
+                    item = getattr(event, "item", None)
+                    if item is None and isinstance(event, dict):
+                        item = event.get("item")
+                    item_type = getattr(item, "type", None) if item is not None else None
+                    if item_type is None and isinstance(item, dict):
+                        item_type = item.get("type")
+                    if item_type in {"reasoning", "function_call", "custom_tool_call"}:
+                        streamed_output_items.append(item)
                 if event_type not in {"response.completed", "response.incomplete", "response.failed"}:
                     continue
 
@@ -3654,6 +3750,12 @@ class AIAgent:
                 if terminal_response is None and isinstance(event, dict):
                     terminal_response = event.get("response")
                 if terminal_response is not None:
+                    if streamed_output_items or (streamed_text_parts and not has_tool_calls):
+                        terminal_response = self._hydrate_empty_codex_response(
+                            terminal_response,
+                            "".join(streamed_text_parts),
+                            streamed_items=streamed_output_items,
+                        )
                     return terminal_response
         finally:
             close_fn = getattr(stream_or_response, "close", None)
@@ -3664,6 +3766,12 @@ class AIAgent:
                     pass
 
         if terminal_response is not None:
+            if streamed_output_items or (streamed_text_parts and not has_tool_calls):
+                terminal_response = self._hydrate_empty_codex_response(
+                    terminal_response,
+                    "".join(streamed_text_parts),
+                    streamed_items=streamed_output_items,
+                )
             return terminal_response
         raise RuntimeError("Responses create(stream=True) fallback did not emit a terminal response.")
 
@@ -4345,6 +4453,47 @@ class AIAgent:
 
     # ── Provider fallback ──────────────────────────────────────────────────
 
+    @staticmethod
+    def _resolve_fallback_reasoning_config(fb: Dict[str, Any]) -> Optional[dict]:
+        """Extract a per-fallback reasoning config from a fallback entry."""
+        if not isinstance(fb, dict):
+            return None
+
+        raw = (
+            fb.get("reasoning_config")
+            if "reasoning_config" in fb
+            else fb.get("reasoning")
+            if "reasoning" in fb
+            else fb.get("reasoning_effort")
+        )
+        if raw is None:
+            return None
+
+        if isinstance(raw, dict):
+            return copy.deepcopy(raw) if raw else None
+
+        if isinstance(raw, str):
+            from hermes_constants import parse_reasoning_effort
+
+            parsed = parse_reasoning_effort(raw)
+            if parsed is None and raw.strip():
+                logging.warning(
+                    "Invalid fallback reasoning effort %r for provider=%s model=%s",
+                    raw,
+                    fb.get("provider"),
+                    fb.get("model"),
+                )
+            return parsed
+
+        logging.warning(
+            "Unsupported fallback reasoning config type %r for provider=%s model=%s",
+            type(raw).__name__,
+            fb.get("provider"),
+            fb.get("model"),
+        )
+        return None
+
+
     def _try_activate_fallback(self) -> bool:
         """Switch to the next fallback model/provider in the chain.
 
@@ -4391,6 +4540,15 @@ class AIAgent:
                 fb_api_mode = "codex_responses"
 
             old_model = self.model
+            fallback_reasoning = self._resolve_fallback_reasoning_config(fb)
+            if fallback_reasoning is not None:
+                self.reasoning_config = fallback_reasoning
+            else:
+                self.reasoning_config = (
+                    copy.deepcopy(self._base_reasoning_config)
+                    if self._base_reasoning_config is not None
+                    else None
+                )
             self.model = fb_model
             self.provider = fb_provider
             self.base_url = fb_base_url
@@ -6529,8 +6687,10 @@ class AIAgent:
                             response_invalid = True
                             error_details.append("response.output is not a list")
                         elif len(output_items) == 0:
-                            response_invalid = True
-                            error_details.append("response.output is empty")
+                            output_text = getattr(response, "output_text", "")
+                            if not isinstance(output_text, str) or not output_text.strip():
+                                response_invalid = True
+                                error_details.append("response.output is empty")
                     elif self.api_mode == "anthropic_messages":
                         content_blocks = getattr(response, "content", None) if response is not None else None
                         if response is None:
