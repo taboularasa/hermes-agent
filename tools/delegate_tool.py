@@ -31,6 +31,7 @@ DELEGATE_BLOCKED_TOOLS = frozenset([
     "clarify",         # no user interaction
     "memory",          # no writes to shared MEMORY.md
     "send_message",    # no cross-platform side effects
+    "linear_issue",    # Linear issue mutation belongs to the parent EM
     "execute_code",    # children should reason step-by-step, not write scripts
 ])
 
@@ -71,7 +72,7 @@ def _strip_blocked_tools(toolsets: List[str]) -> List[str]:
     """Remove toolsets that contain only blocked tools."""
     blocked_toolset_names = {
         "delegation", "clarify", "memory", "code_execution",
-        "cronjob", "rl_start_training", "mixture_of_agents", "process", "codex",
+        "cronjob", "rl_start_training", "mixture_of_agents", "process", "codex", "linear",
     }
     return [t for t in toolsets if t not in blocked_toolset_names]
 
@@ -707,7 +708,7 @@ DELEGATE_TASK_SCHEMA = {
         "- Subagents have NO memory of your conversation. Pass all relevant "
         "info (file paths, error messages, constraints) via the 'context' field.\n"
         "- Subagents CANNOT call: delegate_task, clarify, memory, send_message, "
-        "execute_code.\n"
+        "linear_issue, execute_code.\n"
         "- Each subagent gets its own terminal session (separate working directory and state).\n"
         "- Results are always returned as an array, one entry per task."
     ),

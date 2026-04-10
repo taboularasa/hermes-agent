@@ -160,6 +160,11 @@ from .codex_delegate_tool import (
     check_codex_delegate_requirements,
     CODEX_DELEGATE_SCHEMA,
 )
+from .linear_issue_tool import (
+    linear_issue,
+    check_linear_issue_requirements,
+    LINEAR_ISSUE_SCHEMA,
+)
 
 # File tools have no external requirements - they use the terminal backend
 def check_file_requirements():
@@ -267,6 +272,9 @@ __all__ = [
     'codex_delegate',
     'check_codex_delegate_requirements',
     'CODEX_DELEGATE_SCHEMA',
+    'linear_issue',
+    'check_linear_issue_requirements',
+    'LINEAR_ISSUE_SCHEMA',
     # Subagent delegation
     'delegate_task',
     'check_delegate_requirements',

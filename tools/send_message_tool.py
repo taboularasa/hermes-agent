@@ -42,7 +42,7 @@ SEND_MESSAGE_SCHEMA = {
             },
             "target": {
                 "type": "string",
-                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or Telegram topic 'telegram:chat_id:thread_id'. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:#bot-home', 'slack:#engineering', 'signal:+15551234567'"
+                "description": "Delivery target. Format: 'origin' (reply back to the current gateway chat/thread), 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or Telegram topic 'telegram:chat_id:thread_id'. Examples: 'origin', 'telegram', 'telegram:-1001234567890:17585', 'discord:#bot-home', 'slack:#engineering', 'signal:+15551234567'"
             },
             "message": {
                 "type": "string",
@@ -75,21 +75,31 @@ def _handle_list():
 
 def _handle_send(args):
     """Send a message to a platform target."""
-    target = args.get("target", "")
+    target = str(args.get("target", "")).strip()
     message = args.get("message", "")
     if not target or not message:
         return json.dumps({"error": "Both 'target' and 'message' are required when action='send'"})
 
-    parts = target.split(":", 1)
-    platform_name = parts[0].strip().lower()
-    target_ref = parts[1].strip() if len(parts) > 1 else None
-    chat_id = None
-    thread_id = None
+    try:
+        origin_target = _resolve_origin_target(target)
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
 
-    if target_ref:
-        chat_id, thread_id, is_explicit = _parse_target_ref(platform_name, target_ref)
+    if origin_target:
+        platform_name, chat_id, thread_id = origin_target
+        target_ref = None
+        is_explicit = True
     else:
-        is_explicit = False
+        parts = target.split(":", 1)
+        platform_name = parts[0].strip().lower()
+        target_ref = parts[1].strip() if len(parts) > 1 else None
+        chat_id = None
+        thread_id = None
+
+        if target_ref:
+            chat_id, thread_id, is_explicit = _parse_target_ref(platform_name, target_ref)
+        else:
+            is_explicit = False
 
     # Resolve human-friendly channel names to numeric IDs
     if target_ref and not is_explicit:
@@ -193,6 +203,24 @@ def _handle_send(args):
         return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": f"Send failed: {e}"})
+
+
+def _resolve_origin_target(target: str):
+    """Resolve the special origin target back to the current gateway session."""
+    if target.strip().lower() != "origin":
+        return None
+
+    platform_name = os.getenv("HERMES_SESSION_PLATFORM", "").strip().lower()
+    chat_id = os.getenv("HERMES_SESSION_CHAT_ID", "").strip()
+    thread_id = os.getenv("HERMES_SESSION_THREAD_ID", "").strip() or None
+
+    if not platform_name or platform_name == "local" or not chat_id:
+        raise ValueError(
+            "target='origin' requires a live gateway session with "
+            "HERMES_SESSION_PLATFORM and HERMES_SESSION_CHAT_ID set"
+        )
+
+    return platform_name, chat_id, thread_id
 
 
 def _parse_target_ref(platform_name: str, target_ref: str):

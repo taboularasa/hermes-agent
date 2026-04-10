@@ -94,6 +94,7 @@ CONFIGURABLE_TOOLSETS = [
     ("clarify",         "❓ Clarifying Questions",      "clarify"),
     ("delegation",      "👥 Task Delegation",           "delegate_task"),
     ("codex",           "🧠 Local Codex Supervisor",   "codex_delegate"),
+    ("linear",          "📎 Linear Issue Updates",     "linear_issue"),
     ("cronjob",         "⏰ Cron Jobs",                 "create/list/update/pause/resume/run, with optional attached skills"),
     ("rl",              "🧪 RL Training",               "Tinker-Atropos training tools"),
     ("homeassistant",    "🏠 Home Assistant",           "smart home device control"),
