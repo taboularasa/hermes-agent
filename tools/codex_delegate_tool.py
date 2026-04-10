@@ -72,6 +72,10 @@ CODEX_DELEGATE_SCHEMA = {
                 "type": "string",
                 "description": "Optional working directory override. Defaults to the current ctx-bound worktree or terminal cwd.",
             },
+            "external_key": {
+                "type": "string",
+                "description": "Optional stable work-item key such as linear:HAD-123. Active runs with the same external_key and workdir are reused instead of duplicated.",
+            },
             "timeout": {
                 "type": "integer",
                 "description": "Seconds to wait for action=wait before returning. Default 900.",
@@ -252,6 +256,26 @@ def _load_record(run_id: str) -> Dict[str, Any]:
     return dict(record)
 
 
+def _find_active_record_by_external_key(external_key: str, workdir: str) -> Optional[Dict[str, Any]]:
+    if not external_key:
+        return None
+    normalized_workdir = _normalize_path(workdir)
+    data = _load_runs()
+    records = list(data.get("runs", {}).values())
+    records.sort(key=lambda item: item.get("started_at", 0), reverse=True)
+    for raw_record in records:
+        if not isinstance(raw_record, dict):
+            continue
+        if str(raw_record.get("external_key") or "") != external_key:
+            continue
+        if _normalize_path(str(raw_record.get("workdir") or "")) != normalized_workdir:
+            continue
+        refreshed = _refresh_record(dict(raw_record))
+        if refreshed.get("status") == "running":
+            return refreshed
+    return None
+
+
 def _refresh_record(record: Dict[str, Any]) -> Dict[str, Any]:
     session_id = str(record.get("process_session_id") or "")
     session = process_registry.get(session_id) if session_id else None
@@ -293,6 +317,7 @@ def _build_response(record: Dict[str, Any], **extra: Any) -> str:
         "run_id": record["run_id"],
         "status": record.get("status"),
         "phase": record.get("phase"),
+        "external_key": record.get("external_key"),
         "workdir": record.get("workdir"),
         "process_session_id": record.get("process_session_id"),
         "codex_session_id": record.get("codex_session_id"),
@@ -344,6 +369,7 @@ def _start_run(
     task_id: str,
     parent_run_id: str = "",
     codex_session_id: str = "",
+    external_key: str = "",
 ) -> Dict[str, Any]:
     run_id = f"codex_{uuid.uuid4().hex[:12]}"
     artifacts = _artifact_paths(workdir, run_id)
@@ -379,6 +405,7 @@ def _start_run(
         "run_id": run_id,
         "status": "running",
         "phase": phase,
+        "external_key": external_key,
         "prompt": prompt,
         "model": model,
         "workdir": workdir,
@@ -410,6 +437,7 @@ def codex_delegate(
     phase: str = "",
     model: str = "",
     workdir: str = "",
+    external_key: str = "",
     timeout: int = 900,
     limit: int = 10,
     task_id: str = "",
@@ -434,6 +462,7 @@ def codex_delegate(
                 "run_id": record.get("run_id"),
                 "status": record.get("status"),
                 "phase": record.get("phase"),
+                "external_key": record.get("external_key"),
                 "workdir": record.get("workdir"),
                 "process_session_id": record.get("process_session_id"),
                 "codex_session_id": record.get("codex_session_id"),
@@ -450,6 +479,10 @@ def codex_delegate(
             return json.dumps({"error": "prompt is required for action=start"}, ensure_ascii=False)
         resolved_workdir = _resolve_workdir(workdir, task_id)
         _resolve_git_dir(resolved_workdir)
+        stable_key = str(external_key or "").strip()
+        existing_active = _find_active_record_by_external_key(stable_key, resolved_workdir) if stable_key else None
+        if existing_active:
+            return _build_response(existing_active, skipped_existing=True)
         effective_model = str(model or _load_codex_config()["default_model"]).strip()
         record = _start_run(
             prompt=prompt,
@@ -457,6 +490,7 @@ def codex_delegate(
             model=effective_model,
             workdir=resolved_workdir,
             task_id=task_id,
+            external_key=stable_key,
         )
         return _build_response(record)
 
@@ -481,6 +515,7 @@ def codex_delegate(
             task_id=str(record.get("task_id") or task_id),
             parent_run_id=record["run_id"],
             codex_session_id=codex_session_id,
+            external_key=str(external_key or record.get("external_key") or ""),
         )
         return _build_response(next_record, resumed_from=record["run_id"])
 
@@ -508,6 +543,7 @@ registry.register(
         phase=args.get("phase", ""),
         model=args.get("model", ""),
         workdir=args.get("workdir", ""),
+        external_key=args.get("external_key", ""),
         timeout=args.get("timeout", 900),
         limit=args.get("limit", 10),
         task_id=kw.get("task_id", ""),

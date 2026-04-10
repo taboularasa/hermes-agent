@@ -171,3 +171,47 @@ def test_codex_delegate_resume_uses_existing_codex_session(monkeypatch, tmp_path
     assert fake_registry.spawn_calls
     assert "codex exec resume" in fake_registry.spawn_calls[0]["command"]
     assert "thread-abc" in fake_registry.spawn_calls[0]["command"]
+
+
+def test_codex_delegate_start_reuses_active_external_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_git_repo(repo)
+
+    fake_registry = _FakeProcessRegistry()
+    fake_registry.sessions["proc_active"] = _FakeSession("proc_active", 5252, output_buffer="", exited=False)
+    monkeypatch.setattr(codex_delegate_tool, "process_registry", fake_registry)
+    monkeypatch.setattr(codex_delegate_tool.shutil, "which", lambda _name: "/usr/bin/codex")
+    monkeypatch.setattr(codex_delegate_tool, "_resolve_git_dir", lambda _workdir: repo / ".git")
+    monkeypatch.setattr(codex_delegate_tool, "describe_existing_ctx_binding", lambda _task_id: None)
+
+    record = {
+        "run_id": "codex_active",
+        "status": "running",
+        "phase": "implement",
+        "workdir": str(repo),
+        "task_id": "sess-1",
+        "process_session_id": "proc_active",
+        "external_key": "linear:HAD-300",
+        "record_path": str(repo / ".git" / "hermes-codex" / "codex_active.json"),
+        "latest_path": str(repo / ".git" / "hermes-codex" / "latest.json"),
+        "last_message_path": str(repo / ".git" / "hermes-codex" / "codex_active.last-message.txt"),
+    }
+    codex_delegate_tool._persist_record(record)
+
+    result = json.loads(
+        codex_delegate_tool.codex_delegate(
+            action="start",
+            prompt="Implement the next slice",
+            phase="implement",
+            task_id="sess-1",
+            workdir=str(repo),
+            external_key="linear:HAD-300",
+        )
+    )
+
+    assert result["status"] == "running"
+    assert result["run_id"] == "codex_active"
+    assert result["skipped_existing"] is True
+    assert fake_registry.spawn_calls == []
