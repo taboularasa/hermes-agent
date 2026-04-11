@@ -14,7 +14,7 @@ Use this when Hermes should inspect its own recent work, identify repeated capab
 
 - `/home/david/.hermes/notes/hermes-self-improvement-charter.md`
 - `/home/david/.hermes/notes/hermes-epoch-objective.yaml`
-- `/home/david/stacks/hermes-agent/skills/devops/hermes-self-improvement-loop/references/reward-policy-template.yaml`
+- `references/reward-policy-template.yaml`
 - `/home/david/stacks/hermes-journal/src/data/journal.json`
 - `/home/david/.hermes/codex/runs.json`
 - `/home/david/.hermes/ctx/session_bindings.json`
