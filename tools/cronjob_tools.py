@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from cron.jobs import (
     create_job,
     get_job,
+    inspect_job_topology,
     list_jobs,
     parse_schedule,
     pause_job,
@@ -125,6 +126,8 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         "model": job.get("model"),
         "provider": job.get("provider"),
         "base_url": job.get("base_url"),
+        "role": job.get("role"),
+        "scope": job.get("scope"),
         "schedule": job.get("schedule_display"),
         "repeat": _repeat_display(job),
         "deliver": job.get("deliver", "local"),
@@ -135,6 +138,31 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         "state": job.get("state", "scheduled" if job.get("enabled", True) else "paused"),
         "paused_at": job.get("paused_at"),
         "paused_reason": job.get("paused_reason"),
+    }
+
+
+def _format_topology(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    groups = []
+    for role in sorted(snapshot.get("grouped_active_jobs", {})):
+        scopes = snapshot["grouped_active_jobs"][role]
+        for scope in sorted(scopes):
+            groups.append(
+                {
+                    "role": role,
+                    "scope": scope,
+                    "jobs": [_format_job(job) for job in scopes[scope]],
+                }
+            )
+
+    return {
+        "ok": snapshot.get("ok", True),
+        "summary": snapshot.get("summary", {}),
+        "groups": groups,
+        "unclassified_active_jobs": [
+            _format_job(job) for job in snapshot.get("unclassified_active_jobs", [])
+        ],
+        "inactive_jobs": [_format_job(job) for job in snapshot.get("inactive_jobs", [])],
+        "issues": snapshot.get("issues", []),
     }
 
 
@@ -152,6 +180,8 @@ def cronjob(
     model: Optional[str] = None,
     provider: Optional[str] = None,
     base_url: Optional[str] = None,
+    role: Optional[str] = None,
+    scope: Optional[str] = None,
     reason: Optional[str] = None,
     task_id: str = None,
 ) -> str:
@@ -189,6 +219,8 @@ def cronjob(
                 model=_normalize_optional_job_value(model),
                 provider=_normalize_optional_job_value(provider),
                 base_url=_normalize_optional_job_value(base_url, strip_trailing_slash=True),
+                role=_normalize_optional_job_value(role),
+                scope=_normalize_optional_job_value(scope),
             )
             return json.dumps(
                 {
@@ -210,6 +242,24 @@ def cronjob(
         if normalized == "list":
             jobs = [_format_job(job) for job in list_jobs(include_disabled=include_disabled)]
             return json.dumps({"success": True, "count": len(jobs), "jobs": jobs}, indent=2)
+
+        if normalized == "topology":
+            snapshot = inspect_job_topology(include_disabled=include_disabled)
+            return json.dumps({"success": True, "topology": _format_topology(snapshot)}, indent=2)
+
+        if normalized == "doctor":
+            snapshot = inspect_job_topology(include_disabled=True)
+            formatted = _format_topology(snapshot)
+            return json.dumps(
+                {
+                    "success": True,
+                    "ok": formatted["ok"],
+                    "issue_count": len(formatted["issues"]),
+                    "issues": formatted["issues"],
+                    "topology": formatted,
+                },
+                indent=2,
+            )
 
         if not job_id:
             return json.dumps({"success": False, "error": f"job_id is required for action '{normalized}'"}, indent=2)
@@ -271,6 +321,10 @@ def cronjob(
                 updates["provider"] = _normalize_optional_job_value(provider)
             if base_url is not None:
                 updates["base_url"] = _normalize_optional_job_value(base_url, strip_trailing_slash=True)
+            if role is not None:
+                updates["role"] = _normalize_optional_job_value(role)
+            if scope is not None:
+                updates["scope"] = _normalize_optional_job_value(scope)
             if repeat is not None:
                 # Normalize: treat 0 or negative as None (infinite)
                 normalized_repeat = None if repeat <= 0 else repeat
@@ -338,6 +392,7 @@ CRONJOB_SCHEMA = {
 
 Use action='create' to schedule a new job from a prompt or one or more skills.
 Use action='list' to inspect jobs.
+Use action='topology' to inspect active job architecture and action='doctor' to lint for overlap/conflicts.
 Use action='update', 'pause', 'resume', 'remove', or 'run' to manage an existing job.
 
 Jobs run in a fresh session with no current-chat context, so prompts must be self-contained.
@@ -354,7 +409,7 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
         "properties": {
             "action": {
                 "type": "string",
-                "description": "One of: create, list, update, pause, resume, remove, run"
+                "description": "One of: create, list, topology, doctor, update, pause, resume, remove, run"
             },
             "job_id": {
                 "type": "string",
@@ -392,9 +447,17 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
                 "type": "string",
                 "description": "Optional per-job base URL override paired with provider/model routing"
             },
+            "role": {
+                "type": "string",
+                "description": "Optional machine-readable job role such as implement, report, study, publish, or coordinate"
+            },
+            "scope": {
+                "type": "string",
+                "description": "Optional machine-readable job scope such as global, ontology, pipeline, workbench, or hermes"
+            },
             "include_disabled": {
                 "type": "boolean",
-                "description": "For list: include paused/completed jobs"
+                "description": "For list/topology: include paused/completed jobs"
             },
             "skill": {
                 "type": "string",
@@ -456,6 +519,8 @@ registry.register(
         model=args.get("model"),
         provider=args.get("provider"),
         base_url=args.get("base_url"),
+        role=args.get("role"),
+        scope=args.get("scope"),
         reason=args.get("reason"),
         task_id=kw.get("task_id"),
     ),

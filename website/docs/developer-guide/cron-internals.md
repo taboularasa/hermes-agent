@@ -45,6 +45,7 @@ Each job can carry:
 - delivery target
 - lifecycle state (`scheduled`, `paused`, `completed`, etc.)
 - zero, one, or multiple attached skills
+- optional topology metadata (`role`, `scope`)
 
 Backward compatibility is preserved for older jobs that only stored a legacy single `skill` field or none of the newer lifecycle fields.
 
@@ -60,6 +61,29 @@ The scheduler:
 - updates next-run metadata and state
 
 In gateway mode, cron ticking is integrated into the long-running gateway loop.
+
+## Topology metadata and linting
+
+Cron jobs may optionally declare:
+
+- `role` — what the job is doing (`implement`, `report`, `study`, `publish`, `coordinate`, etc.)
+- `scope` — what surface it owns (`global`, `ontology`, `pipeline`, `workbench`, `hermes`, etc.)
+
+Hermes does not require these fields for ordinary personal cron jobs. They exist so larger autonomous installations can make scheduling intent machine-readable and inspectable.
+
+The built-in inspector (`inspect_job_topology()` in `cron/jobs.py`) powers:
+
+- `hermes cron topology`
+- `hermes cron doctor`
+- `cronjob(action="topology")`
+- `cronjob(action="doctor")`
+
+Today the linter enforces two conservative invariants:
+
+- duplicate job names are flagged because name-based operations become ambiguous
+- overlapping implementation jobs are flagged when:
+  - more than one active `role=implement` job shares a `scope`
+  - an active `role=implement scope=global` job coexists with scoped implementation jobs
 
 ## Skill-backed jobs
 

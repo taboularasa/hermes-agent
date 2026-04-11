@@ -20,9 +20,10 @@ class TestCronCommandLifecycle:
     def test_pause_resume_run(self, tmp_cron_dir, capsys):
         job = create_job(prompt="Check server status", schedule="every 1h")
 
-        cron_command(Namespace(cron_command="pause", job_id=job["id"]))
+        cron_command(Namespace(cron_command="pause", job_id=job["id"], reason="maintenance window"))
         paused = get_job(job["id"])
         assert paused["state"] == "paused"
+        assert paused["paused_reason"] == "maintenance window"
 
         cron_command(Namespace(cron_command="resume", job_id=job["id"]))
         resumed = get_job(job["id"])
@@ -34,6 +35,7 @@ class TestCronCommandLifecycle:
 
         out = capsys.readouterr().out
         assert "Paused job" in out
+        assert "maintenance window" in out
         assert "Resumed job" in out
         assert "Triggered job" in out
 
@@ -96,6 +98,8 @@ class TestCronCommandLifecycle:
                 repeat=None,
                 skill=None,
                 skills=["blogwatcher", "find-nearby"],
+                role=None,
+                scope=None,
             )
         )
         out = capsys.readouterr().out
@@ -105,3 +109,12 @@ class TestCronCommandLifecycle:
         assert len(jobs) == 1
         assert jobs[0]["skills"] == ["blogwatcher", "find-nearby"]
         assert jobs[0]["name"] == "Skill combo"
+
+    def test_doctor_reports_clean_topology(self, tmp_cron_dir, capsys):
+        create_job(prompt="Implement", schedule="every 1h", name="impl", role="implement", scope="ontology")
+
+        exit_code = cron_command(Namespace(cron_command="doctor", all=True))
+        out = capsys.readouterr().out
+
+        assert exit_code == 0
+        assert "no conflicts detected" in out.lower()

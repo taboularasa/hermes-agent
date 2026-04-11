@@ -175,6 +175,26 @@ class TestScheduleCronjob:
         assert job["provider"] == "custom"
         assert job["base_url"] == "http://127.0.0.1:4000/v1"
 
+    def test_schedule_persists_role_and_scope(self):
+        result = json.loads(schedule_cronjob(
+            prompt="Pinned job",
+            schedule="every 1h",
+            name="Scoped job",
+        ))
+        assert result["success"] is True
+
+        updated = json.loads(
+            cronjob(
+                action="update",
+                job_id=result["job_id"],
+                role="Implement",
+                scope="Workbench",
+            )
+        )
+        assert updated["success"] is True
+        assert updated["job"]["role"] == "implement"
+        assert updated["job"]["scope"] == "workbench"
+
     def test_thread_id_captured_in_origin(self, monkeypatch):
         monkeypatch.setenv("HERMES_SESSION_PLATFORM", "telegram")
         monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "123456")
@@ -241,6 +261,8 @@ class TestListCronjobs:
         assert "schedule" in job
         assert "next_run_at" in job
         assert "enabled" in job
+        assert "role" in job
+        assert "scope" in job
 
 
 # =========================================================================
@@ -316,6 +338,29 @@ class TestUnifiedCronjobTool:
         assert updated["success"] is True
         assert updated["job"]["name"] == "New Name"
         assert updated["job"]["schedule"] == "every 120m"
+
+    def test_topology_and_doctor_actions(self):
+        created = json.loads(
+            cronjob(
+                action="create",
+                prompt="Implement work",
+                schedule="every 1h",
+                name="Scoped impl",
+                role="implement",
+                scope="ontology",
+            )
+        )
+        assert created["success"] is True
+
+        topology = json.loads(cronjob(action="topology", include_disabled=True))
+        assert topology["success"] is True
+        assert topology["topology"]["groups"][0]["role"] == "implement"
+        assert topology["topology"]["groups"][0]["scope"] == "ontology"
+
+        doctor = json.loads(cronjob(action="doctor"))
+        assert doctor["success"] is True
+        assert doctor["ok"] is True
+        assert doctor["issue_count"] == 0
 
     def test_update_runtime_overrides_can_set_and_clear(self):
         created = json.loads(

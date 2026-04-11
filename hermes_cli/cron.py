@@ -90,6 +90,13 @@ def cron_list(show_all: bool = False):
         print(f"    Deliver:   {deliver_str}")
         if skills:
             print(f"    Skills:    {', '.join(skills)}")
+        if job.get("role") or job.get("scope"):
+            print(
+                f"    Topology:  role={job.get('role') or '-'}"
+                f", scope={job.get('scope') or '-'}"
+            )
+        if state == "paused" and job.get("paused_reason"):
+            print(f"    Reason:    {job['paused_reason']}")
         print()
 
     from hermes_cli.gateway import find_gateway_pids
@@ -139,6 +146,84 @@ def cron_status():
     print()
 
 
+def cron_topology(show_all: bool = False):
+    """Show grouped cron topology and any overlap issues."""
+    from cron.jobs import inspect_job_topology
+
+    snapshot = inspect_job_topology(include_disabled=show_all)
+
+    print()
+    print(color("Cron Topology", Colors.CYAN))
+    print(color("-------------", Colors.CYAN))
+    print(
+        f"  Active jobs: {snapshot['summary']['active_jobs']}  "
+        f"Inactive jobs: {snapshot['summary']['inactive_jobs']}  "
+        f"Issues: {snapshot['summary']['issue_count']}"
+    )
+    print()
+
+    grouped = snapshot.get("grouped_active_jobs", {})
+    if grouped:
+        for role in sorted(grouped):
+            print(color(f"  {role}", Colors.YELLOW))
+            for scope in sorted(grouped[role]):
+                jobs = grouped[role][scope]
+                print(f"    {scope}")
+                for job in jobs:
+                    print(
+                        f"      - {job['name']} ({job['id'][:8]})"
+                        f"  {job.get('schedule_display', job.get('next_run_at', '?'))}"
+                    )
+            print()
+
+    unclassified = snapshot.get("unclassified_active_jobs", [])
+    if unclassified:
+        print(color("  Unclassified", Colors.YELLOW))
+        for job in unclassified:
+            print(f"    - {job['name']} ({job['id'][:8]})")
+        print()
+
+    if show_all:
+        inactive = snapshot.get("inactive_jobs", [])
+        if inactive:
+            print(color("  Inactive / Paused", Colors.YELLOW))
+            for job in inactive:
+                reason = job.get("paused_reason")
+                suffix = f" — {reason}" if reason else ""
+                print(f"    - {job['name']} ({job['id'][:8]}){suffix}")
+            print()
+
+    if snapshot.get("issues"):
+        print(color("  Issues", Colors.RED))
+        for issue in snapshot["issues"]:
+            tint = Colors.RED if issue.get("severity") == "error" else Colors.YELLOW
+            print(f"    {color(issue['severity'].upper(), tint)} {issue['message']}")
+        print()
+    else:
+        print(color("  No topology conflicts detected.", Colors.GREEN))
+        print()
+
+
+def cron_doctor(show_all: bool = True) -> int:
+    """Lint cron topology for duplicate names and overlapping implementation jobs."""
+    from cron.jobs import inspect_job_topology
+
+    snapshot = inspect_job_topology(include_disabled=show_all)
+    print()
+    if snapshot.get("issues"):
+        print(color("Cron Doctor", Colors.CYAN))
+        print(color("-----------", Colors.CYAN))
+        for issue in snapshot["issues"]:
+            tint = Colors.RED if issue.get("severity") == "error" else Colors.YELLOW
+            print(f"  {color(issue['severity'].upper(), tint)} {issue['message']}")
+        print()
+    else:
+        print(color("Cron Doctor: no conflicts detected.", Colors.GREEN))
+        print()
+
+    return 1 if any(issue.get("severity") == "error" for issue in snapshot.get("issues", [])) else 0
+
+
 def cron_create(args):
     result = _cron_api(
         action="create",
@@ -149,6 +234,8 @@ def cron_create(args):
         repeat=getattr(args, "repeat", None),
         skill=getattr(args, "skill", None),
         skills=_normalize_skills(getattr(args, "skill", None), getattr(args, "skills", None)),
+        role=getattr(args, "role", None),
+        scope=getattr(args, "scope", None),
     )
     if not result.get("success"):
         print(color(f"Failed to create job: {result.get('error', 'unknown error')}", Colors.RED))
@@ -158,6 +245,11 @@ def cron_create(args):
     print(f"  Schedule: {result['schedule']}")
     if result.get("skills"):
         print(f"  Skills: {', '.join(result['skills'])}")
+    if result.get("job", {}).get("role") or result.get("job", {}).get("scope"):
+        print(
+            f"  Topology: role={result['job'].get('role') or '-'}, "
+            f"scope={result['job'].get('scope') or '-'}"
+        )
     print(f"  Next run: {result['next_run_at']}")
     return 0
 
@@ -195,6 +287,8 @@ def cron_edit(args):
         deliver=getattr(args, "deliver", None),
         repeat=getattr(args, "repeat", None),
         skills=final_skills,
+        role=getattr(args, "role", None),
+        scope=getattr(args, "scope", None),
     )
     if not result.get("success"):
         print(color(f"Failed to update job: {result.get('error', 'unknown error')}", Colors.RED))
@@ -208,11 +302,13 @@ def cron_edit(args):
         print(f"  Skills: {', '.join(updated['skills'])}")
     else:
         print("  Skills: none")
+    if updated.get("role") or updated.get("scope"):
+        print(f"  Topology: role={updated.get('role') or '-'}, scope={updated.get('scope') or '-'}")
     return 0
 
 
-def _job_action(action: str, job_id: str, success_verb: str) -> int:
-    result = _cron_api(action=action, job_id=job_id)
+def _job_action(action: str, job_id: str, success_verb: str, **kwargs) -> int:
+    result = _cron_api(action=action, job_id=job_id, **kwargs)
     if not result.get("success"):
         print(color(f"Failed to {action} job: {result.get('error', 'unknown error')}", Colors.RED))
         return 1
@@ -222,6 +318,8 @@ def _job_action(action: str, job_id: str, success_verb: str) -> int:
         print(f"  Next run: {result['job']['next_run_at']}")
     if action == "run":
         print("  It will run on the next scheduler tick.")
+    if action == "pause" and result.get("job", {}).get("paused_reason"):
+        print(f"  Reason: {result['job']['paused_reason']}")
     return 0
 
 
@@ -238,6 +336,13 @@ def cron_command(args):
         cron_status()
         return 0
 
+    if subcmd == "topology":
+        cron_topology(show_all=getattr(args, "all", False))
+        return 0
+
+    if subcmd == "doctor":
+        return cron_doctor(show_all=True)
+
     if subcmd == "tick":
         cron_tick()
         return 0
@@ -249,7 +354,7 @@ def cron_command(args):
         return cron_edit(args)
 
     if subcmd == "pause":
-        return _job_action("pause", args.job_id, "Paused")
+        return _job_action("pause", args.job_id, "Paused", reason=getattr(args, "reason", None))
 
     if subcmd == "resume":
         return _job_action("resume", args.job_id, "Resumed")

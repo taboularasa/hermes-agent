@@ -8,6 +8,30 @@ Instructions for AI coding assistants and developers working on the hermes-agent
 source venv/bin/activate  # ALWAYS activate before running Python
 ```
 
+## Hadto Cron Topology
+
+When working on the Hadto automation installed under `~/.hermes/cron/jobs.json`, treat the scheduler as a typed topology, not a flat list of prompts.
+
+Current operating model:
+
+- repo delivery is owned by scoped implementation jobs, not by one global implementer
+- `role=implement` jobs should be unique per `scope`
+- paused legacy jobs must not keep the same name as an active successor
+- if you pause or retire a job, record the reason
+
+Before and after changing cron automation, run:
+
+```bash
+./venv/bin/python -m hermes_cli.main cron topology --all
+./venv/bin/python -m hermes_cli.main cron doctor
+```
+
+For the Hadto setup specifically:
+
+- keep the scoped implementers active for `ontology`, `pipeline`, and `workbench`
+- do not re-enable the legacy cross-repo meta executor alongside scoped implementers
+- if you keep legacy jobs for history, rename them with a `legacy-` prefix so name-based inspection is unambiguous
+
 ## Project Structure
 
 ```

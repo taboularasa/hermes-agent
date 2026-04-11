@@ -15,7 +15,9 @@ Cron jobs can:
 - schedule one-shot or recurring tasks
 - pause, resume, edit, trigger, and remove jobs
 - attach zero, one, or multiple skills to a job
+- optionally tag jobs with machine-readable `role` / `scope` metadata
 - deliver results back to the origin chat, local files, or configured platform targets
+- inspect scheduler topology and lint for overlap with `hermes cron topology` / `hermes cron doctor`
 - run in fresh agent sessions with the normal static tool list
 
 :::warning
@@ -109,6 +111,7 @@ hermes cron edit <job_id> --skill blogwatcher --skill find-nearby
 hermes cron edit <job_id> --add-skill find-nearby
 hermes cron edit <job_id> --remove-skill blogwatcher
 hermes cron edit <job_id> --clear-skills
+hermes cron edit <job_id> --role implement --scope workbench
 ```
 
 Notes:
@@ -141,6 +144,8 @@ hermes cron resume <job_id>
 hermes cron run <job_id>
 hermes cron remove <job_id>
 hermes cron status
+hermes cron topology --all
+hermes cron doctor
 hermes cron tick
 ```
 
@@ -150,6 +155,36 @@ What they do:
 - `resume` — re-enable the job and compute the next future run
 - `run` — trigger the job on the next scheduler tick
 - `remove` — delete it entirely
+- `topology` — group active jobs by `role` / `scope` and show paused legacy entries
+- `doctor` — flag duplicate names and overlapping implementation jobs
+
+## Operational topology
+
+For simple personal use, cron jobs can stay unclassified. For larger autonomous setups, add:
+
+- `role` — what the job does, for example `implement`, `report`, `study`, `publish`, `coordinate`
+- `scope` — what surface it owns, for example `global`, `ontology`, `pipeline`, `workbench`, `hermes`
+
+Examples:
+
+```bash
+hermes cron create "35 */4 * * *" "Execute the next pipeline issue" \
+  --name hadto-pipeline-sprint-executor \
+  --role implement \
+  --scope pipeline
+
+hermes cron create "45 9 * * *" "Post the daily CTO summary" \
+  --name hadto-daily-cto-report \
+  --role report \
+  --scope global
+```
+
+Recommended invariants for autonomous implementations:
+
+- keep job names unique, even for paused legacy jobs
+- allow at most one active `implement` job per scope
+- do not run an active `implement/global` job alongside scoped implementation jobs unless you explicitly want overlap
+- record a `--reason` when pausing or retiring a job
 
 ## How it works
 

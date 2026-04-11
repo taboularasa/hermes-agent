@@ -3944,6 +3944,8 @@ For more help on a command:
     cron_create.add_argument("--deliver", help="Delivery target: origin, local, telegram, discord, signal, or platform:chat_id")
     cron_create.add_argument("--repeat", type=int, help="Optional repeat count")
     cron_create.add_argument("--skill", dest="skills", action="append", help="Attach a skill. Repeat to add multiple skills.")
+    cron_create.add_argument("--role", help="Optional machine-readable job role, e.g. implement, report, study, publish")
+    cron_create.add_argument("--scope", help="Optional machine-readable job scope, e.g. global, ontology, pipeline, workbench")
 
     # cron edit
     cron_edit = cron_subparsers.add_parser("edit", help="Edit an existing scheduled job")
@@ -3957,10 +3959,13 @@ For more help on a command:
     cron_edit.add_argument("--add-skill", dest="add_skills", action="append", help="Append a skill without replacing the existing list. Repeatable.")
     cron_edit.add_argument("--remove-skill", dest="remove_skills", action="append", help="Remove a specific attached skill. Repeatable.")
     cron_edit.add_argument("--clear-skills", action="store_true", help="Remove all attached skills from the job")
+    cron_edit.add_argument("--role", help="Set or clear the machine-readable job role")
+    cron_edit.add_argument("--scope", help="Set or clear the machine-readable job scope")
 
     # lifecycle actions
     cron_pause = cron_subparsers.add_parser("pause", help="Pause a scheduled job")
     cron_pause.add_argument("job_id", help="Job ID to pause")
+    cron_pause.add_argument("--reason", help="Optional pause reason recorded on the job")
 
     cron_resume = cron_subparsers.add_parser("resume", help="Resume a paused job")
     cron_resume.add_argument("job_id", help="Job ID to resume")
@@ -3973,6 +3978,12 @@ For more help on a command:
 
     # cron status
     cron_subparsers.add_parser("status", help="Check if cron scheduler is running")
+
+    # cron topology / doctor
+    cron_topology = cron_subparsers.add_parser("topology", help="Show cron job architecture grouped by role/scope")
+    cron_topology.add_argument("--all", action="store_true", help="Include paused/completed jobs")
+    cron_doctor = cron_subparsers.add_parser("doctor", help="Lint cron topology for overlap and duplicate names")
+    cron_doctor.add_argument("--all", action="store_true", help="Include paused/completed jobs")
 
     # cron tick (mostly for debugging)
     cron_subparsers.add_parser("tick", help="Run due jobs once and exit")

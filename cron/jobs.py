@@ -55,12 +55,24 @@ def _normalize_skill_list(skill: Optional[str] = None, skills: Optional[Any] = N
     return normalized
 
 
+def _normalize_taxonomy_value(value: Optional[Any]) -> Optional[str]:
+    """Normalize free-form job taxonomy values like role/scope."""
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    return re.sub(r"\s+", "-", text)
+
+
 def _apply_skill_fields(job: Dict[str, Any]) -> Dict[str, Any]:
-    """Return a job dict with canonical `skills` and legacy `skill` fields aligned."""
+    """Return a job dict with canonical skills and optional topology fields aligned."""
     normalized = dict(job)
     skills = _normalize_skill_list(normalized.get("skill"), normalized.get("skills"))
     normalized["skills"] = skills
     normalized["skill"] = skills[0] if skills else None
+    normalized["role"] = _normalize_taxonomy_value(normalized.get("role"))
+    normalized["scope"] = _normalize_taxonomy_value(normalized.get("scope"))
     return normalized
 
 
@@ -375,6 +387,8 @@ def create_job(
     model: Optional[str] = None,
     provider: Optional[str] = None,
     base_url: Optional[str] = None,
+    role: Optional[str] = None,
+    scope: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -419,6 +433,8 @@ def create_job(
     normalized_model = normalized_model or None
     normalized_provider = normalized_provider or None
     normalized_base_url = normalized_base_url or None
+    normalized_role = _normalize_taxonomy_value(role)
+    normalized_scope = _normalize_taxonomy_value(scope)
 
     label_source = (prompt or (normalized_skills[0] if normalized_skills else None)) or "cron job"
     job = {
@@ -430,6 +446,8 @@ def create_job(
         "model": normalized_model,
         "provider": normalized_provider,
         "base_url": normalized_base_url,
+        "role": normalized_role,
+        "scope": normalized_scope,
         "schedule": parsed_schedule,
         "schedule_display": parsed_schedule.get("display", schedule),
         "repeat": {
@@ -474,6 +492,118 @@ def list_jobs(include_disabled: bool = False) -> List[Dict[str, Any]]:
     return jobs
 
 
+def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
+    """Return a topology snapshot plus overlap diagnostics for cron jobs.
+
+    The inspector is intentionally generic:
+    - duplicate names are always flagged because name-based operator workflows
+      become ambiguous when multiple jobs share a label
+    - implementation conflicts are only checked for jobs that opt into the
+      `role=implement` / `scope=*` taxonomy
+    """
+    jobs = list_jobs(include_disabled=include_disabled)
+    active_jobs = [job for job in jobs if job.get("enabled", True)]
+    inactive_jobs = [job for job in jobs if not job.get("enabled", True)]
+
+    grouped_active: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+    unclassified_active: List[Dict[str, Any]] = []
+    for job in active_jobs:
+        role = job.get("role")
+        scope = job.get("scope")
+        if role or scope:
+            grouped_active.setdefault(role or "unclassified", {}).setdefault(
+                scope or "unscoped", []
+            ).append(job)
+        else:
+            unclassified_active.append(job)
+
+    issues: List[Dict[str, Any]] = []
+
+    jobs_by_name: Dict[str, List[Dict[str, Any]]] = {}
+    for job in jobs:
+        jobs_by_name.setdefault(job.get("name", job["id"]), []).append(job)
+    for name, named_jobs in sorted(jobs_by_name.items()):
+        if len(named_jobs) < 2:
+            continue
+        active_ids = [job["id"] for job in named_jobs if job.get("enabled", True)]
+        paused_ids = [job["id"] for job in named_jobs if not job.get("enabled", True)]
+        severity = "error" if len(active_ids) > 1 else "warning"
+        state_parts = []
+        if active_ids:
+            state_parts.append(f"active={', '.join(active_ids)}")
+        if paused_ids:
+            state_parts.append(f"paused={', '.join(paused_ids)}")
+        issues.append(
+            {
+                "severity": severity,
+                "code": "duplicate_job_name",
+                "name": name,
+                "job_ids": [job["id"] for job in named_jobs],
+                "message": (
+                    f"Multiple cron jobs share the name '{name}'"
+                    + (f" ({'; '.join(state_parts)})" if state_parts else "")
+                    + ". Rename or remove legacy entries so operators and agents do not target the wrong job."
+                ),
+            }
+        )
+
+    active_implementers = [job for job in active_jobs if job.get("role") == "implement"]
+    implementers_by_scope: Dict[str, List[Dict[str, Any]]] = {}
+    for job in active_implementers:
+        scope = job.get("scope")
+        if scope:
+            implementers_by_scope.setdefault(scope, []).append(job)
+
+    for scope, scoped_jobs in sorted(implementers_by_scope.items()):
+        if len(scoped_jobs) < 2:
+            continue
+        issues.append(
+            {
+                "severity": "error",
+                "code": "duplicate_implementation_scope",
+                "scope": scope,
+                "job_ids": [job["id"] for job in scoped_jobs],
+                "message": (
+                    f"Multiple active implementation jobs target scope '{scope}': "
+                    + ", ".join(f"{job['name']} ({job['id']})" for job in scoped_jobs)
+                ),
+            }
+        )
+
+    global_implementers = [job for job in active_implementers if job.get("scope") == "global"]
+    scoped_implementers = [
+        job for job in active_implementers if job.get("scope") and job.get("scope") != "global"
+    ]
+    if global_implementers and scoped_implementers:
+        issues.append(
+            {
+                "severity": "error",
+                "code": "global_implementation_overlap",
+                "job_ids": [job["id"] for job in global_implementers + scoped_implementers],
+                "message": (
+                    "A global implementation job is active alongside scoped implementation jobs. "
+                    "Pause or retire the global implementer to avoid duplicate autonomous work."
+                ),
+            }
+        )
+
+    return {
+        "ok": not any(issue["severity"] == "error" for issue in issues),
+        "summary": {
+            "total_jobs": len(jobs),
+            "active_jobs": len(active_jobs),
+            "inactive_jobs": len(inactive_jobs),
+            "classified_active_jobs": len(active_jobs) - len(unclassified_active),
+            "issue_count": len(issues),
+        },
+        "active_jobs": active_jobs,
+        "inactive_jobs": inactive_jobs,
+        "unclassified_active_jobs": unclassified_active,
+        "grouped_active_jobs": grouped_active,
+        "issues": issues,
+    }
+
+
 def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Update a job by ID, refreshing derived schedule fields when needed."""
     jobs = load_jobs()
@@ -488,6 +618,10 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
             normalized_skills = _normalize_skill_list(updated.get("skill"), updated.get("skills"))
             updated["skills"] = normalized_skills
             updated["skill"] = normalized_skills[0] if normalized_skills else None
+        if "role" in updates:
+            updated["role"] = _normalize_taxonomy_value(updated.get("role"))
+        if "scope" in updates:
+            updated["scope"] = _normalize_taxonomy_value(updated.get("scope"))
 
         if schedule_changed:
             updated_schedule = updated["schedule"]

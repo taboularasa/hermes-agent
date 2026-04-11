@@ -22,6 +22,7 @@ from cron.jobs import (
     mark_job_run,
     advance_next_run,
     get_due_jobs,
+    inspect_job_topology,
     save_job_output,
 )
 
@@ -233,6 +234,17 @@ class TestJobCRUD:
         job = create_job(prompt="Test", schedule="30m")
         assert job["deliver"] == "local"
 
+    def test_create_persists_role_and_scope(self, tmp_cron_dir):
+        job = create_job(
+            prompt="Ship work",
+            schedule="every 1h",
+            role="Implement",
+            scope="Ontology Workbench",
+        )
+        fetched = get_job(job["id"])
+        assert fetched["role"] == "implement"
+        assert fetched["scope"] == "ontology-workbench"
+
 
 class TestUpdateJob:
     def test_update_name(self, tmp_cron_dir):
@@ -278,6 +290,12 @@ class TestUpdateJob:
     def test_update_nonexistent_returns_none(self, tmp_cron_dir):
         result = update_job("nonexistent_id", {"name": "X"})
         assert result is None
+
+    def test_update_role_and_scope_normalizes_values(self, tmp_cron_dir):
+        job = create_job(prompt="Check server status", schedule="every 1h")
+        updated = update_job(job["id"], {"role": "Report", "scope": "Global Ops"})
+        assert updated["role"] == "report"
+        assert updated["scope"] == "global-ops"
 
 
 class TestPauseResumeJob:
@@ -534,6 +552,41 @@ class TestGetDueJobs:
 
         assert get_due_jobs() == []
         assert get_job("oneshot-stale")["next_run_at"] is None
+
+
+class TestInspectJobTopology:
+    def test_duplicate_names_are_flagged(self, tmp_cron_dir):
+        first = create_job(prompt="A", schedule="every 1h", name="shared-name")
+        second = create_job(prompt="B", schedule="every 2h", name="shared-name")
+        pause_job(second["id"], reason="legacy duplicate")
+
+        snapshot = inspect_job_topology(include_disabled=True)
+
+        duplicate_issue = next(issue for issue in snapshot["issues"] if issue["code"] == "duplicate_job_name")
+        assert duplicate_issue["severity"] == "warning"
+        assert first["id"] in duplicate_issue["job_ids"]
+        assert second["id"] in duplicate_issue["job_ids"]
+
+    def test_duplicate_implementation_scope_is_error(self, tmp_cron_dir):
+        create_job(prompt="A", schedule="every 1h", name="impl-a", role="implement", scope="pipeline")
+        create_job(prompt="B", schedule="every 2h", name="impl-b", role="implement", scope="pipeline")
+
+        snapshot = inspect_job_topology(include_disabled=True)
+
+        issue = next(issue for issue in snapshot["issues"] if issue["code"] == "duplicate_implementation_scope")
+        assert issue["severity"] == "error"
+        assert issue["scope"] == "pipeline"
+        assert snapshot["ok"] is False
+
+    def test_global_implementer_overlapping_scoped_implementers_is_error(self, tmp_cron_dir):
+        create_job(prompt="A", schedule="every 1h", name="impl-global", role="implement", scope="global")
+        create_job(prompt="B", schedule="every 2h", name="impl-ontology", role="implement", scope="ontology")
+
+        snapshot = inspect_job_topology(include_disabled=True)
+
+        issue = next(issue for issue in snapshot["issues"] if issue["code"] == "global_implementation_overlap")
+        assert issue["severity"] == "error"
+        assert snapshot["ok"] is False
 
 
 class TestSaveJobOutput:

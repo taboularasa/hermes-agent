@@ -920,7 +920,7 @@ class APIServerAdapter(BasePlatformAdapter):
 
     _JOB_ID_RE = __import__("re").compile(r"[a-f0-9]{12}")
     # Allowed fields for update — prevents clients injecting arbitrary keys
-    _UPDATE_ALLOWED_FIELDS = {"name", "schedule", "prompt", "deliver", "skills", "skill", "repeat", "enabled"}
+    _UPDATE_ALLOWED_FIELDS = {"name", "schedule", "prompt", "deliver", "skills", "skill", "repeat", "enabled", "role", "scope"}
     _MAX_NAME_LENGTH = 200
     _MAX_PROMPT_LENGTH = 5000
 
@@ -972,6 +972,8 @@ class APIServerAdapter(BasePlatformAdapter):
             deliver = body.get("deliver", "local")
             skills = body.get("skills")
             repeat = body.get("repeat")
+            role = (body.get("role") or "").strip() or None
+            scope = (body.get("scope") or "").strip() or None
 
             if not name:
                 return web.json_response({"error": "Name is required"}, status=400)
@@ -998,6 +1000,10 @@ class APIServerAdapter(BasePlatformAdapter):
                 kwargs["skills"] = skills
             if repeat is not None:
                 kwargs["repeat"] = repeat
+            if role is not None:
+                kwargs["role"] = role
+            if scope is not None:
+                kwargs["scope"] = scope
 
             job = self._cron_create(**kwargs)
             return web.json_response({"job": job})
@@ -1087,7 +1093,13 @@ class APIServerAdapter(BasePlatformAdapter):
         if id_err:
             return id_err
         try:
-            job = self._cron_pause(job_id)
+            reason = None
+            try:
+                body = await request.json()
+                reason = (body.get("reason") or "").strip() or None
+            except Exception:
+                reason = None
+            job = self._cron_pause(job_id, reason=reason)
             if not job:
                 return web.json_response({"error": "Job not found"}, status=404)
             return web.json_response({"job": job})
