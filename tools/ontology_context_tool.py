@@ -10,6 +10,7 @@ from typing import Any
 from agent.ontology_context import (
     DEFAULT_ONTOLOGY_REPO_ROOT,
     build_consulting_context,
+    build_ontology_engineering_context,
     build_vertical_readiness_context,
     build_self_improvement_context,
     build_source_material_context,
@@ -24,7 +25,7 @@ ONTOLOGY_CONTEXT_SCHEMA = {
     "name": "ontology_context",
     "description": (
         "Read Hadto ontology platform artifacts and return compact reasoning context for "
-        "snapshot, self-improvement, consulting, sales, source-material, or vertical detail use cases."
+        "snapshot, ontology-engineering, self-improvement, consulting, sales, source-material, or vertical detail use cases."
     ),
     "parameters": {
         "type": "object",
@@ -33,6 +34,7 @@ ONTOLOGY_CONTEXT_SCHEMA = {
                 "type": "string",
                 "enum": [
                     "snapshot",
+                    "ontology_engineering",
                     "self_improvement",
                     "vertical_readiness",
                     "consulting_context",
@@ -101,6 +103,8 @@ def ontology_context(args: dict[str, Any], **_kw) -> str:
 
     if action == "snapshot":
         context = load_ontology_snapshot(repo_root)
+    elif action == "ontology_engineering":
+        context = build_ontology_engineering_context(repo_root, limit=limit)
     elif action == "self_improvement":
         context = build_self_improvement_context(repo_root, now=now, freshness_hours=freshness_hours)
     elif action == "vertical_readiness":

@@ -42,6 +42,7 @@ import os
 import re
 import asyncio
 from typing import List, Dict, Any, Optional
+from urllib.parse import urlsplit, urlunsplit
 import httpx
 from firecrawl import Firecrawl
 from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
@@ -50,6 +51,13 @@ from tools.url_safety import is_safe_url
 from tools.website_policy import check_website_access
 
 logger = logging.getLogger(__name__)
+
+WEB_PROVIDER_ENV_KEYS = {
+    "exa": ("EXA_API_KEY",),
+    "parallel": ("PARALLEL_API_KEY",),
+    "tavily": ("TAVILY_API_KEY",),
+    "firecrawl": ("FIRECRAWL_API_KEY", "FIRECRAWL_API_URL"),
+}
 
 
 # ─── Backend Selection ────────────────────────────────────────────────────────
@@ -89,6 +97,37 @@ def _get_backend() -> str:
             return backend
 
     return "firecrawl"  # default (backward compat)
+
+
+def _provider_is_available(provider: str) -> bool:
+    keys = WEB_PROVIDER_ENV_KEYS.get(provider, ())
+    return any(_has_env(key) for key in keys)
+
+
+def get_web_provider_status() -> dict:
+    configured_backend = (_load_web_config().get("backend") or "").lower().strip() or None
+    available = []
+    missing = []
+    providers = {}
+    for provider, keys in WEB_PROVIDER_ENV_KEYS.items():
+        present_keys = [key for key in keys if _has_env(key)]
+        entry = {
+            "available": bool(present_keys),
+            "configured": provider == configured_backend,
+            "required_env_keys": list(keys),
+            "present_env_keys": present_keys,
+        }
+        providers[provider] = entry
+        if entry["available"]:
+            available.append(provider)
+        else:
+            missing.append(provider)
+    return {
+        "configured_backend": configured_backend,
+        "available_providers": available,
+        "missing_providers": missing,
+        "providers": providers,
+    }
 
 # ─── Firecrawl Client ────────────────────────────────────────────────────────
 
@@ -184,6 +223,20 @@ def _tavily_request(endpoint: str, payload: dict) -> dict:
     response = httpx.post(url, json=payload, timeout=60)
     response.raise_for_status()
     return response.json()
+
+
+def _tavily_search(query: str, limit: int = 5) -> dict:
+    logger.info("Tavily search: '%s' (limit: %d)", query, limit)
+    raw = _tavily_request(
+        "search",
+        {
+            "query": query,
+            "max_results": min(limit, 20),
+            "include_raw_content": False,
+            "include_images": False,
+        },
+    )
+    return _normalize_tavily_search_results(raw)
 
 
 def _normalize_tavily_search_results(response: dict) -> dict:
@@ -723,6 +776,211 @@ def _parallel_search(query: str, limit: int = 5) -> dict:
     return {"success": True, "data": {"web": web_results}}
 
 
+def _firecrawl_search(query: str, limit: int = 5) -> dict:
+    logger.info("Searching the web for: '%s' (limit: %d)", query, limit)
+
+    response = _get_firecrawl_client().search(
+        query=query,
+        limit=limit
+    )
+
+    web_results = []
+    if hasattr(response, 'web'):
+        if response.web:
+            for result in response.web:
+                if hasattr(result, 'model_dump'):
+                    web_results.append(result.model_dump())
+                elif hasattr(result, '__dict__'):
+                    web_results.append(result.__dict__)
+                elif isinstance(result, dict):
+                    web_results.append(result)
+    elif hasattr(response, 'model_dump'):
+        response_dict = response.model_dump()
+        if 'web' in response_dict and response_dict['web']:
+            web_results = response_dict['web']
+    elif isinstance(response, dict):
+        if 'web' in response and response['web']:
+            web_results = response['web']
+
+    logger.info("Found %d search results", len(web_results))
+    return {"success": True, "data": {"web": web_results}}
+
+
+def _canonicalize_result_url(url: str) -> str:
+    if not url:
+        return ""
+    try:
+        parts = urlsplit(url.strip())
+    except Exception:
+        return url.strip()
+    path = parts.path.rstrip("/") or "/"
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, parts.query, ""))
+
+
+def _normalize_provider_results(provider: str, response_data: dict) -> list[dict]:
+    results = response_data.get("data", {}).get("web", []) if isinstance(response_data, dict) else []
+    normalized = []
+    for index, result in enumerate(results):
+        if not isinstance(result, dict):
+            continue
+        normalized.append(
+            {
+                "provider": provider,
+                "url": result.get("url", ""),
+                "title": result.get("title", ""),
+                "description": result.get("description", ""),
+                "position": int(result.get("position") or index + 1),
+            }
+        )
+    return normalized
+
+
+def web_search_matrix_tool(query: str, limit: int = 5, providers: Optional[List[str]] = None) -> str:
+    """Search across all available web providers and fuse the evidence.
+
+    This is intended for higher-rigor research tasks where Hermes should compare
+    multiple search providers instead of trusting a single configured backend.
+    """
+    debug_call_data = {
+        "parameters": {
+            "query": query,
+            "limit": limit,
+            "providers": providers or [],
+        },
+        "error": None,
+        "results_count": 0,
+        "final_response_size": 0,
+    }
+
+    try:
+        from tools.interrupt import is_interrupted
+        if is_interrupted():
+            return json.dumps({"error": "Interrupted", "success": False})
+
+        provider_status = get_web_provider_status()
+        requested = [str(provider).strip().lower() for provider in (providers or []) if str(provider).strip()]
+        if not requested or "all" in requested:
+            requested = list(provider_status.get("available_providers", []))
+        else:
+            requested = [provider for provider in requested if provider in WEB_PROVIDER_ENV_KEYS]
+
+        available_requested = [provider for provider in requested if _provider_is_available(provider)]
+        missing_requested = [provider for provider in requested if provider not in available_requested]
+        if not available_requested:
+            payload = {
+                "success": False,
+                "error": "No configured web search providers are available for web_search_matrix.",
+                "provider_status": provider_status,
+                "requested_providers": requested,
+            }
+            result_json = json.dumps(payload, ensure_ascii=False)
+            debug_call_data["error"] = payload["error"]
+            debug_call_data["final_response_size"] = len(result_json)
+            _debug.log_call("web_search_matrix_tool", debug_call_data)
+            _debug.save()
+            return result_json
+
+        provider_dispatch = {
+            "parallel": _parallel_search,
+            "exa": _exa_search,
+            "tavily": _tavily_search,
+            "firecrawl": _firecrawl_search,
+        }
+
+        provider_results: dict[str, dict[str, Any]] = {}
+        fused_index: dict[str, dict[str, Any]] = {}
+
+        for provider in available_requested:
+            try:
+                response_data = provider_dispatch[provider](query, limit)
+                normalized = _normalize_provider_results(provider, response_data)
+                provider_results[provider] = {
+                    "success": True,
+                    "result_count": len(normalized),
+                    "results": normalized,
+                }
+                for item in normalized:
+                    key = _canonicalize_result_url(item["url"]) or item["url"] or f"{provider}:{item['position']}"
+                    entry = fused_index.setdefault(
+                        key,
+                        {
+                            "url": item["url"],
+                            "title": item["title"],
+                            "description": item["description"],
+                            "providers": [],
+                            "positions": {},
+                        },
+                    )
+                    if item["provider"] not in entry["providers"]:
+                        entry["providers"].append(item["provider"])
+                    entry["positions"][item["provider"]] = item["position"]
+                    if not entry.get("title") and item["title"]:
+                        entry["title"] = item["title"]
+                    if not entry.get("description") and item["description"]:
+                        entry["description"] = item["description"]
+            except Exception as exc:
+                provider_results[provider] = {
+                    "success": False,
+                    "result_count": 0,
+                    "error": str(exc),
+                    "results": [],
+                }
+
+        fused_results = []
+        for entry in fused_index.values():
+            provider_hits = len(entry["providers"])
+            avg_position = sum(entry["positions"].values()) / max(1, provider_hits)
+            fused_results.append(
+                {
+                    "url": entry["url"],
+                    "title": entry["title"],
+                    "description": entry["description"],
+                    "providers": sorted(entry["providers"]),
+                    "provider_hits": provider_hits,
+                    "positions": entry["positions"],
+                    "position": min(entry["positions"].values()) if entry["positions"] else None,
+                    "_avg_position": avg_position,
+                }
+            )
+
+        fused_results.sort(
+            key=lambda item: (
+                -int(item.get("provider_hits") or 0),
+                float(item.get("_avg_position") or 999.0),
+                str(item.get("title") or ""),
+            )
+        )
+        trimmed_results = []
+        for item in fused_results[:limit]:
+            payload = dict(item)
+            payload.pop("_avg_position", None)
+            trimmed_results.append(payload)
+
+        response_payload = {
+            "success": True,
+            "query": query,
+            "strategy": "all_available",
+            "data": {"web": trimmed_results},
+            "provider_status": provider_status,
+            "providers_used": available_requested,
+            "providers_missing": missing_requested,
+            "provider_results": provider_results,
+        }
+        result_json = json.dumps(response_payload, indent=2, ensure_ascii=False)
+        debug_call_data["results_count"] = len(trimmed_results)
+        debug_call_data["final_response_size"] = len(result_json)
+        _debug.log_call("web_search_matrix_tool", debug_call_data)
+        _debug.save()
+        return result_json
+
+    except Exception as e:
+        error_msg = f"Error searching across provider matrix: {str(e)}"
+        debug_call_data["error"] = error_msg
+        _debug.log_call("web_search_matrix_tool", debug_call_data)
+        _debug.save()
+        return json.dumps({"error": error_msg, "success": False}, ensure_ascii=False)
+
+
 async def _parallel_extract(urls: List[str]) -> List[Dict[str, Any]]:
     """Extract content from URLs using the Parallel async SDK.
 
@@ -837,14 +1095,7 @@ def web_search_tool(query: str, limit: int = 5) -> str:
             return result_json
 
         if backend == "tavily":
-            logger.info("Tavily search: '%s' (limit: %d)", query, limit)
-            raw = _tavily_request("search", {
-                "query": query,
-                "max_results": min(limit, 20),
-                "include_raw_content": False,
-                "include_images": False,
-            })
-            response_data = _normalize_tavily_search_results(raw)
+            response_data = _tavily_search(query, limit)
             debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
             result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
             debug_call_data["final_response_size"] = len(result_json)
@@ -852,52 +1103,8 @@ def web_search_tool(query: str, limit: int = 5) -> str:
             _debug.save()
             return result_json
 
-        logger.info("Searching the web for: '%s' (limit: %d)", query, limit)
-
-        response = _get_firecrawl_client().search(
-            query=query,
-            limit=limit
-        )
-
-        # The response is a SearchData object with web, news, and images attributes
-        # When not scraping, the results are directly in these attributes
-        web_results = []
-
-        # Check if response has web attribute (SearchData object)
-        if hasattr(response, 'web'):
-            # Response is a SearchData object with web attribute
-            if response.web:
-                # Convert each SearchResultWeb object to dict
-                for result in response.web:
-                    if hasattr(result, 'model_dump'):
-                        # Pydantic model - use model_dump
-                        web_results.append(result.model_dump())
-                    elif hasattr(result, '__dict__'):
-                        # Regular object - use __dict__
-                        web_results.append(result.__dict__)
-                    elif isinstance(result, dict):
-                        # Already a dict
-                        web_results.append(result)
-        elif hasattr(response, 'model_dump'):
-            # Response has model_dump method - use it to get dict
-            response_dict = response.model_dump()
-            if 'web' in response_dict and response_dict['web']:
-                web_results = response_dict['web']
-        elif isinstance(response, dict):
-            # Response is already a dictionary
-            if 'web' in response and response['web']:
-                web_results = response['web']
-        
-        results_count = len(web_results)
-        logger.info("Found %d search results", results_count)
-        
-        # Build response with just search metadata (URLs, titles, descriptions)
-        response_data = {
-            "success": True,
-            "data": {
-                "web": web_results
-            }
-        }
+        response_data = _firecrawl_search(query, limit)
+        results_count = len(response_data.get("data", {}).get("web", []))
         
         # Capture debug information
         debug_call_data["results_count"] = results_count
@@ -1802,6 +2009,39 @@ WEB_SEARCH_SCHEMA = {
     }
 }
 
+WEB_SEARCH_MATRIX_SCHEMA = {
+    "name": "web_search_matrix",
+    "description": (
+        "Search across all configured web-search providers and fuse the results. "
+        "Use this for higher-rigor research where provider overlap and novelty matter, "
+        "such as ontology domain discovery or market research."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "The search query to look up across the provider matrix"
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of fused results to return",
+                "minimum": 1,
+                "maximum": 10,
+            },
+            "providers": {
+                "type": "array",
+                "description": "Optional provider subset to use; defaults to all available providers.",
+                "items": {
+                    "type": "string",
+                    "enum": ["all", "parallel", "exa", "tavily", "firecrawl"],
+                },
+            },
+        },
+        "required": ["query"]
+    }
+}
+
 WEB_EXTRACT_SCHEMA = {
     "name": "web_extract",
     "description": "Extract content from web page URLs. Returns page content in markdown format. Also works with PDF URLs (arxiv papers, documents, etc.) — pass the PDF link directly and it converts to markdown text. Pages under 5000 chars return full markdown; larger pages are LLM-summarized and capped at ~5000 chars per page. Pages over 2M chars are refused. If a URL fails or times out, use the browser tool to access it instead.",
@@ -1827,6 +2067,19 @@ registry.register(
     check_fn=check_web_api_key,
     requires_env=["EXA_API_KEY", "PARALLEL_API_KEY", "FIRECRAWL_API_KEY", "TAVILY_API_KEY"],
     emoji="🔍",
+)
+registry.register(
+    name="web_search_matrix",
+    toolset="web",
+    schema=WEB_SEARCH_MATRIX_SCHEMA,
+    handler=lambda args, **kw: web_search_matrix_tool(
+        args.get("query", ""),
+        limit=max(1, min(int(args.get("limit") or 5), 10)),
+        providers=args.get("providers") if isinstance(args.get("providers"), list) else None,
+    ),
+    check_fn=check_web_api_key,
+    requires_env=["EXA_API_KEY", "PARALLEL_API_KEY", "FIRECRAWL_API_KEY", "TAVILY_API_KEY"],
+    emoji="🧭",
 )
 registry.register(
     name="web_extract",

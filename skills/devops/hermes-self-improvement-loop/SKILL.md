@@ -22,6 +22,11 @@ Use this when Hermes should inspect its own recent work, identify repeated capab
 - `/home/david/stacks/smb-ontology-platform/evolution/delta_report.json`
 - `/home/david/stacks/smb-ontology-platform/evolution/daily_report.md`
 - `/home/david/stacks/smb-ontology-platform/research/manifests/`
+- `/home/david/stacks/smb-ontology-platform/research/agenda/`
+- `/home/david/stacks/smb-ontology-platform/research/retrospectives/`
+- `/home/david/stacks/smb-ontology-platform/docs/plans/2026-03-31-keet-ontology-engineering-progress-tracker.md`
+- `/home/david/stacks/smb-ontology-platform/docs/plans/2026-03-31-keet-ontology-engineering-heartbeat.md`
+- `/home/david/stacks/smb-ontology-platform/docs/issues/ONT-009-ontology-engineering-textbook-study-program.md`
 
 ## Core operating model
 
@@ -72,6 +77,9 @@ Treat the reliability floor as degraded when any of these are true:
 Always compute an explicit evidence freshness gate using the `self_improvement_evidence_gate` tool.
 Also compute `ontology_context(action="self_improvement")` so ontology bottlenecks and business recommendations
 show up in the candidate set instead of being treated as blog-only side effects.
+When ontology engineering or ontology-domain research is in scope, also compute
+`ontology_context(action="ontology_engineering")` so Hermes sees the textbook-study backlog,
+current upgrade targets, and search-provider coverage before shaping work.
 If the gate reports contradictions or stale evidence, treat the reliability floor as degraded.
 
 Important distinction:
@@ -103,10 +111,11 @@ Minimum flow:
 1. `linear_issue(action="list_users")`
 2. `linear_issue(action="list_projects")`
 3. `ontology_context(action="self_improvement")`
-4. `linear_issue(action="project_upsert", ...)`
-5. `linear_issue(action="issue_upsert", ...)` for each durable gap
-6. `linear_issue(action="comment", ...)` for machine-readable status
-7. `linear_issue(action="update_state", ...)` when work starts or finishes
+4. `ontology_context(action="ontology_engineering")` when ontology work is relevant
+5. `linear_issue(action="project_upsert", ...)`
+6. `linear_issue(action="issue_upsert", ...)` for each durable gap
+7. `linear_issue(action="comment", ...)` for machine-readable status
+8. `linear_issue(action="update_state", ...)` when work starts or finishes
 
 Prefer `delegateId` for Hermes-owned work.
 Leave `assigneeId` empty unless a human operator is explicitly needed.
@@ -133,6 +142,7 @@ Every candidate must cite at least one durable evidence source:
 - Codex run metadata,
 - ctx session history or bindings,
 - ontology metrics, delta reports, source-material manifests, or prompt proposals,
+- ontology textbook study tracker / heartbeat / governing issue,
 - CI failures or logs,
 - Linear delivery history,
 - Slack or client-work signals.
@@ -245,12 +255,13 @@ On each loop:
    If the `self_improvement_evidence_gate` tool reports a degraded gate, list the reasons and
    suppress non-maintenance work for this cycle.
 5. Use ontology business recommendations and conversion bottlenecks as candidate evidence when they are grounded in machine-readable artifacts.
-6. Score the remaining candidates with the bundled formula.
-7. Upsert the umbrella Linear project.
-8. Upsert or update the corresponding Linear issues with lane, evidence, and verification context.
-9. Pick the highest-leverage unblocked issue that fits the guardrails.
-10. Delegate that issue to local Codex if the repo surface is clear.
-11. Write a concise status comment back to Linear explaining the chosen issue and why it outranked the others.
+6. If ontology business-domain research is part of the work, require `web_search_matrix` before source capture or ontology changes so Hermes compares all configured providers instead of silently trusting one backend.
+7. Score the remaining candidates with the bundled formula.
+8. Upsert the umbrella Linear project.
+9. Upsert or update the corresponding Linear issues with lane, evidence, and verification context.
+10. Pick the highest-leverage unblocked issue that fits the guardrails.
+11. Delegate that issue to local Codex if the repo surface is clear.
+12. Write a concise status comment back to Linear explaining the chosen issue and why it outranked the others.
    Include an **Evidence provenance** section using the tags above.
 
 If no clear implementation issue exists, do not force delegation. Leave the project and issues in a clean planned state and report the blocker.
