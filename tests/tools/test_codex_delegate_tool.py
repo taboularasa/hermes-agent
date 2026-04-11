@@ -185,6 +185,7 @@ def test_codex_delegate_start_reuses_active_external_key(monkeypatch, tmp_path):
     monkeypatch.setattr(codex_delegate_tool.shutil, "which", lambda _name: "/usr/bin/codex")
     monkeypatch.setattr(codex_delegate_tool, "_resolve_git_dir", lambda _workdir: repo / ".git")
     monkeypatch.setattr(codex_delegate_tool, "describe_existing_ctx_binding", lambda _task_id: None)
+    monkeypatch.setattr(codex_delegate_tool.os, "kill", lambda pid, sig: None)
 
     record = {
         "run_id": "codex_active",
@@ -215,3 +216,113 @@ def test_codex_delegate_start_reuses_active_external_key(monkeypatch, tmp_path):
     assert result["run_id"] == "codex_active"
     assert result["skipped_existing"] is True
     assert fake_registry.spawn_calls == []
+
+
+def test_codex_delegate_start_ignores_stale_duplicate_external_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_git_repo(repo)
+
+    fake_registry = _FakeProcessRegistry()
+    fake_registry.sessions["proc_stale"] = _FakeSession("proc_stale", 6161, output_buffer="", exited=False)
+    fake_registry.sessions["proc_active"] = _FakeSession("proc_active", 6262, output_buffer="", exited=False)
+    monkeypatch.setattr(codex_delegate_tool, "process_registry", fake_registry)
+    monkeypatch.setattr(codex_delegate_tool.shutil, "which", lambda _name: "/usr/bin/codex")
+    monkeypatch.setattr(codex_delegate_tool, "_resolve_git_dir", lambda _workdir: repo / ".git")
+    monkeypatch.setattr(codex_delegate_tool, "describe_existing_ctx_binding", lambda _task_id: None)
+
+    def fake_kill(pid, sig):
+        if pid == 6161:
+            raise ProcessLookupError
+        return None
+
+    monkeypatch.setattr(codex_delegate_tool.os, "kill", fake_kill)
+
+    stale_record = {
+        "run_id": "codex_stale",
+        "status": "running",
+        "phase": "implement",
+        "workdir": str(repo),
+        "task_id": "sess-1",
+        "process_session_id": "proc_stale",
+        "external_key": "linear:HAD-128",
+        "started_at": 200.0,
+        "record_path": str(repo / ".git" / "hermes-codex" / "codex_stale.json"),
+        "latest_path": str(repo / ".git" / "hermes-codex" / "latest.json"),
+        "last_message_path": str(repo / ".git" / "hermes-codex" / "codex_stale.last-message.txt"),
+    }
+    active_record = {
+        "run_id": "codex_active",
+        "status": "running",
+        "phase": "implement",
+        "workdir": str(repo),
+        "task_id": "sess-1",
+        "process_session_id": "proc_active",
+        "external_key": "linear:HAD-128",
+        "started_at": 100.0,
+        "record_path": str(repo / ".git" / "hermes-codex" / "codex_active.json"),
+        "latest_path": str(repo / ".git" / "hermes-codex" / "latest.json"),
+        "last_message_path": str(repo / ".git" / "hermes-codex" / "codex_active.last-message.txt"),
+    }
+    codex_delegate_tool._persist_record(stale_record)
+    codex_delegate_tool._persist_record(active_record)
+
+    result = json.loads(
+        codex_delegate_tool.codex_delegate(
+            action="start",
+            prompt="Continue HAD-128.",
+            phase="implement",
+            task_id="sess-1",
+            workdir=str(repo),
+            external_key="linear:HAD-128",
+        )
+    )
+
+    stale_saved = codex_delegate_tool._load_record("codex_stale")
+
+    assert result["status"] == "running"
+    assert result["run_id"] == "codex_active"
+    assert result["skipped_existing"] is True
+    assert stale_saved["status"] == "failed"
+    assert stale_saved["stale_reason"] == "process_missing"
+    assert fake_registry.spawn_calls == []
+
+
+def test_codex_delegate_status_normalizes_unknown_run_with_missing_process(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git_dir = repo / ".git"
+    git_dir.mkdir()
+
+    fake_registry = _FakeProcessRegistry()
+    monkeypatch.setattr(codex_delegate_tool, "process_registry", fake_registry)
+    monkeypatch.setattr(codex_delegate_tool.shutil, "which", lambda _name: "/usr/bin/codex")
+
+    def fake_kill(pid, sig):
+        raise ProcessLookupError
+
+    monkeypatch.setattr(codex_delegate_tool.os, "kill", fake_kill)
+
+    record = {
+        "run_id": "codex_orphaned",
+        "status": "unknown",
+        "phase": "implement",
+        "workdir": str(repo),
+        "task_id": "sess-1",
+        "process_session_id": "proc_missing",
+        "pid": 8181,
+        "last_message_path": str(git_dir / "hermes-codex" / "codex_orphaned.last-message.txt"),
+        "record_path": str(git_dir / "hermes-codex" / "codex_orphaned.json"),
+        "latest_path": str(git_dir / "hermes-codex" / "latest.json"),
+    }
+    codex_delegate_tool._persist_record(record)
+
+    result = json.loads(codex_delegate_tool.codex_delegate(action="status", run_id="codex_orphaned"))
+    saved = codex_delegate_tool._load_record("codex_orphaned")
+
+    assert result["status"] == "failed"
+    assert saved["status"] == "failed"
+    assert saved["stale_reason"] == "process_missing"
+    assert saved["completed_at"] > 0
