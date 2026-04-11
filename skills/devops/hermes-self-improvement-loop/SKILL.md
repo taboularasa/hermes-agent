@@ -1,6 +1,6 @@
 ---
 name: hermes-self-improvement-loop
-description: Review Hermes journal and execution history, maintain a Linear self-improvement project, and delegate implementation work to the local Codex CLI without spawning duplicate runs.
+description: Review Hermes journal and execution history, maintain a Linear self-improvement project, score work against the current Hadto epoch objective, and delegate implementation work to the local Codex CLI without spawning duplicate runs.
 version: 1.0.0
 author: Hermes Agent
 license: MIT
@@ -8,11 +8,13 @@ license: MIT
 
 # Hermes Self-Improvement Loop
 
-Use this when Hermes should inspect its own recent work, identify repeated capability gaps, create or update a Linear self-improvement backlog, and push concrete implementation work to the local Codex CLI on the Lenovo host.
+Use this when Hermes should inspect its own recent work, identify repeated capability gaps, score them against the current Hadto business epoch, create or update a Linear self-improvement backlog, and push concrete implementation work to the local Codex CLI on the Lenovo host.
 
 ## Inputs to read first
 
 - `/home/david/.hermes/notes/hermes-self-improvement-charter.md`
+- `/home/david/.hermes/notes/hermes-epoch-objective.yaml`
+- `references/reward-policy-template.yaml`
 - `/home/david/stacks/hermes-journal/src/data/journal.json`
 - `/home/david/.hermes/codex/runs.json`
 - `/home/david/.hermes/ctx/session_bindings.json`
@@ -23,8 +25,51 @@ Hermes is the EM.
 Local Codex on the Lenovo host is the IC.
 Linear is the canonical planning and audit surface.
 
+Hermes must plan through three lanes:
+
+- `Maintenance`: restore or protect operational reliability
+- `Growth`: improve Hadto's ability to win contracts, preserve revenue, and create social proof
+- `Capability`: build new Hermes abilities that clearly compound Maintenance or Growth
+
 Do not treat cloud Codex as the delegate for this loop.
 Do not create duplicate Linear projects, duplicate Linear issues, or duplicate Codex runs for the same work item.
+
+## Reward hierarchy
+
+Hermes should optimize in this order:
+
+1. Reliability floor
+2. Current epoch objective
+3. Capability investment
+
+Interpretation:
+
+- If the reliability floor is degraded, only `Maintenance` work is eligible.
+- If the reliability floor is healthy, prefer `Growth` work that improves contract-winning throughput for the current epoch.
+- `Capability` work only survives prioritization when it clearly improves `Maintenance` or `Growth`.
+
+The live epoch objective is defined in `/home/david/.hermes/notes/hermes-epoch-objective.yaml`.
+If that file is missing, fall back to the bundled template and assume the current epoch is:
+
+- help Hadto win client contracts,
+- maintain revenue continuity,
+- build visible social proof through delivery quality.
+
+## Reliability floor triggers
+
+Treat the reliability floor as degraded when any of these are true:
+
+- required CI on `main` is red,
+- Slack, Linear, ctx, or local Codex delegation is broken,
+- a production automation or scheduled workflow is stalled,
+- a client-facing delivery path is broken,
+- the evidence sources used by this loop are clearly stale or contradictory.
+
+When a reliability trigger is active:
+
+- do not open speculative `Growth` or `Capability` issues ahead of the repair,
+- create or update only the `Maintenance` issue that resolves the degraded state,
+- explain in the Linear description or status comment which trigger forced the agenda.
 
 ## Canonical Linear structures
 
@@ -63,8 +108,52 @@ Create or update Linear issues only for shortcomings that are durable and reusab
 - missing integration surfaces,
 - missing documentation that blocks execution,
 - repeated failure to translate goals into shipped code.
+- missing business-side visibility that blocks contract-winning work.
 
 Do not create Linear issues for one-off annoyances unless they indicate a systemic gap.
+
+Every candidate must cite at least one durable evidence source:
+
+- journal entries,
+- Codex run metadata,
+- ctx session history or bindings,
+- CI failures or logs,
+- Linear delivery history,
+- Slack or client-work signals.
+
+## Scoring model
+
+When the reliability floor is healthy, score candidate work with the bundled formula:
+
+`score = 5*epoch_impact + 3*reliability_impact + 2*reuse + 2*urgency + 1*confidence - 3*risk - 2*effort`
+
+Use coarse operator-friendly ratings rather than false precision. A 0-3 scale is enough.
+
+Field meanings:
+
+- `epoch_impact`: how much the work increases the chance of winning contracts or building social proof this epoch
+- `reliability_impact`: how much the work reduces breakage or manual intervention
+- `reuse`: how often the result should pay off again
+- `urgency`: how immediate the pain or opportunity is
+- `confidence`: how strong the evidence is that this work will help
+- `risk`: how likely the change is to cause distraction or regressions
+- `effort`: expected implementation cost
+
+Default lane bias for the current epoch:
+
+- `Growth`: 50%
+- `Maintenance`: 30%
+- `Capability`: 20%
+
+Do not treat the percentages as quotas. They are tie-break guidance after the reliability floor is healthy.
+
+## Guardrails
+
+- Keep at most one active issue per lane.
+- Keep at most one standing umbrella project unless a major theme truly cannot fit inside it.
+- Do not let `Capability` work consume more than 20% of active self-improvement effort while `Maintenance` and `Growth` still have higher-scoring items.
+- Every self-created issue must include the lane, why now, evidence, target repo or surface, and verification expectation.
+- If the top-scoring item is not concrete enough for Codex, keep it in planning state rather than forcing delegation.
 
 ## Project maintenance rules
 
@@ -77,11 +166,13 @@ Do not create Linear issues for one-off annoyances unless they indicate a system
 
 Each issue should include:
 
+- the lane (`Maintenance`, `Growth`, or `Capability`),
 - the capability gap,
 - why it matters now,
 - evidence from journal entries, Codex runs, or recent execution failures,
 - the target repo or execution surface when known,
-- a concrete verification expectation.
+- a concrete verification expectation,
+- the expected effect on reliability or the current epoch objective.
 
 When ordering is obvious, use `linear_issue(action="issue_relation", relation_type="blocks", ...)` to encode it.
 
@@ -112,13 +203,15 @@ If a previous run finished but needs correction, use `codex_delegate(action="res
 
 On each loop:
 
-1. Read the charter and the most recent journal entries.
-2. Extract up to 3 concrete capability gaps.
-3. Upsert the umbrella Linear project.
-4. Upsert the corresponding Linear issues.
-5. Pick the highest-leverage unblocked implementation issue, if any.
-6. Delegate that issue to local Codex if the repo surface is clear.
-7. Write a concise status comment back to Linear.
+1. Read the charter, the live epoch objective, and the most recent evidence sources.
+2. Extract up to 3 concrete candidates and classify each into `Maintenance`, `Growth`, or `Capability`.
+3. Check reliability-floor triggers. If any are active, discard non-maintenance candidates for this loop.
+4. Score the remaining candidates with the bundled formula.
+5. Upsert the umbrella Linear project.
+6. Upsert or update the corresponding Linear issues with lane, evidence, and verification context.
+7. Pick the highest-leverage unblocked issue that fits the guardrails.
+8. Delegate that issue to local Codex if the repo surface is clear.
+9. Write a concise status comment back to Linear explaining the chosen issue and why it outranked the others.
 
 If no clear implementation issue exists, do not force delegation. Leave the project and issues in a clean planned state and report the blocker.
 
@@ -128,6 +221,6 @@ Return only a concise operator summary:
 
 - Project status
 - Issues created or updated
-- One issue chosen for implementation, or why none was chosen
+- One issue chosen for implementation, its lane, and why it won
 - Codex run id / status if delegation happened
 - Next highest-leverage move
