@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 LINEAR_API_URL = "https://api.linear.app/graphql"
 _MARKER_PREFIX = "<!-- hermes-linear:v1 "
 _MARKER_SUFFIX = " -->"
+# Linear rejects longer project descriptions with a generic Argument Validation
+# Error. Keep project descriptions compact and reserve issue descriptions for
+# the full detail.
+_PROJECT_DESCRIPTION_MAX_CHARS = 240
 _CTX_DAEMON_ENV_PATHS = (
     Path.home() / ".config" / "ctx-daemon.env",
 )
@@ -585,6 +589,18 @@ def _format_marker_body(body: str, dedupe_key: str | None) -> str:
     return _format_comment_body(body, dedupe_key)
 
 
+def _format_project_description(body: str, dedupe_key: str | None) -> str:
+    marker = _build_marker(dedupe_key) if dedupe_key else ""
+    text = body.strip()
+    reserved = len(marker) + (1 if marker and text else 0)
+    available = max(0, _PROJECT_DESCRIPTION_MAX_CHARS - reserved)
+    if available and len(text) > available:
+        text = text[: max(1, available - 1)].rstrip() + "…"
+    if marker and text:
+        return f"{marker}\n{text}"
+    return marker or text
+
+
 def _find_comment_by_dedupe(issue: dict[str, Any], dedupe_key: str) -> dict[str, Any] | None:
     comments = issue.get("comments", [])
     for comment in comments:
@@ -773,12 +789,12 @@ def linear_issue(args: dict[str, Any], **_kw) -> str:
         if not existing_project:
             existing_project = _find_project_by_name(_list_projects(limit=100), name)
 
-        desired_description = _format_marker_body(description, dedupe_key)
+        desired_description = _format_project_description(description, dedupe_key)
         if existing_project:
             input_data: dict[str, Any] = {}
             if str(existing_project.get("name") or "").strip() != name:
                 input_data["name"] = name
-            if _strip_marker(str(existing_project.get("description") or "")).strip() != description:
+            if str(existing_project.get("description") or "").strip() != desired_description:
                 input_data["description"] = desired_description
             current_team_ids = {str(team.get("id") or "") for team in existing_project.get("teams", []) if isinstance(team, dict)}
             if team_id and team_id not in current_team_ids:

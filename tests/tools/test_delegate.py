@@ -28,6 +28,7 @@ from tools.delegate_tool import (
     _strip_blocked_tools,
     _resolve_delegation_credentials,
 )
+from agent.execution_frame import build_execution_frame
 
 
 def _make_mock_parent(depth=0):
@@ -61,8 +62,11 @@ class TestDelegateRequirements(unittest.TestCase):
         self.assertIn("tasks", props)
         self.assertIn("context", props)
         self.assertIn("toolsets", props)
+        self.assertIn("execution_frame", props)
         self.assertIn("max_iterations", props)
         self.assertEqual(props["tasks"]["maxItems"], 3)
+        task_props = props["tasks"]["items"]["properties"]
+        self.assertIn("execution_frame", task_props)
 
 
 class TestChildSystemPrompt(unittest.TestCase):
@@ -81,6 +85,13 @@ class TestChildSystemPrompt(unittest.TestCase):
     def test_empty_context_ignored(self):
         prompt = _build_child_system_prompt("Do something", "  ")
         self.assertNotIn("CONTEXT", prompt)
+
+    def test_execution_frame_included(self):
+        frame = build_execution_frame(goal="Ship the fix", source="test")
+        prompt = _build_child_system_prompt("Ship the fix", execution_frame=frame)
+        self.assertIn("EXECUTION FRAME", prompt)
+        self.assertIn("Goals:", prompt)
+        self.assertIn("Ship the fix", prompt)
 
 
 class TestStripBlockedTools(unittest.TestCase):
@@ -308,6 +319,7 @@ class TestToolNamePreservation(unittest.TestCase):
                     task_index=0,
                     goal="regression check",
                     context=None,
+                    execution_frame=None,
                     toolsets=None,
                     model=None,
                     max_iterations=10,
@@ -388,6 +400,29 @@ class TestDelegateObservability(unittest.TestCase):
             self.assertIn("args_bytes", entry["tool_trace"][0])
             self.assertIn("result_bytes", entry["tool_trace"][0])
             self.assertEqual(entry["tool_trace"][0]["status"], "ok")
+
+    def test_execution_frame_returned(self):
+        parent = _make_mock_parent(depth=0)
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.model = "claude-sonnet-4-6"
+            mock_child.session_prompt_tokens = 10
+            mock_child.session_completion_tokens = 5
+            mock_child.run_conversation.return_value = {
+                "final_response": "done",
+                "completed": True,
+                "interrupted": False,
+                "api_calls": 1,
+                "messages": [],
+            }
+            MockAgent.return_value = mock_child
+
+            result = json.loads(delegate_task(goal="Test execution frame", parent_agent=parent))
+            entry = result["results"][0]
+            self.assertIn("execution_frame", entry)
+            self.assertIn("goals", entry["execution_frame"])
+            self.assertIn("Test execution frame", entry["execution_frame"]["goals"][0])
 
     def test_tool_trace_detects_error(self):
         """Tool results containing 'error' should be marked as error status."""

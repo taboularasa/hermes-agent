@@ -193,6 +193,45 @@ def test_linear_issue_project_upsert_creates_when_missing(monkeypatch):
     assert "project:hermes-self-improvement" in create_calls[0]["description"]
 
 
+def test_linear_issue_project_upsert_truncates_long_descriptions(monkeypatch):
+    create_calls = []
+
+    monkeypatch.setattr(linear_issue_tool, "_list_projects", lambda limit=100: [])
+    monkeypatch.setattr(
+        linear_issue_tool,
+        "_resolve_team_id",
+        lambda team_id, team_key: ("team-1", "HAD"),
+    )
+    monkeypatch.setattr(
+        linear_issue_tool,
+        "_create_project",
+        lambda input_data: create_calls.append(input_data) or {
+            "id": "project-1",
+            "name": input_data["name"],
+            "description": input_data["description"],
+            "url": "https://linear.app/project/hermes-ontology-intelligence",
+            "teams": [{"id": "team-1", "key": "HAD", "name": "Hadto"}],
+        },
+    )
+
+    result = json.loads(
+        linear_issue_tool.linear_issue(
+            {
+                "action": "project_upsert",
+                "name": "Hermes Ontology Intelligence",
+                "description": "x" * 400,
+                "team_key": "HAD",
+                "dedupe_key": "project:hermes-ontology-intelligence",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["created"] is True
+    assert len(create_calls[0]["description"]) <= linear_issue_tool._PROJECT_DESCRIPTION_MAX_CHARS
+    assert create_calls[0]["description"].endswith("…")
+
+
 def test_linear_issue_issue_upsert_updates_existing_issue_by_dedupe_key(monkeypatch):
     update_calls = []
 

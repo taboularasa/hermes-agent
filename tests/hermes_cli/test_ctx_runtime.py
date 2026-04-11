@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 
 from hermes_cli import ctx_runtime
 from hermes_cli.config import load_config, save_config
@@ -293,6 +294,75 @@ def test_normalize_ctx_bindings_deactivates_missing_worktree_and_clears_override
     assert record["sessions"][session_id]["active"] is False
     assert record["sessions"][session_id]["reason"] == "ctx binding retired: worktree missing"
     assert get_task_cwd(session_id, default="fallback") == "fallback"
+
+
+def test_normalize_ctx_bindings_deactivates_stale_active_binding(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    session_id = "sess-stale-active"
+    updated_at = (datetime.now(timezone.utc) - timedelta(hours=13)).isoformat()
+    worktree = tmp_path / "ctx-data" / "worktrees" / "ws-1" / "wt-1"
+    worktree.mkdir(parents=True, exist_ok=True)
+    _write_binding_record(
+        tmp_path,
+        session_id,
+        {
+            "active": True,
+            "reason": "ctx task bound",
+            "session_id": session_id,
+            "platform": "cli",
+            "workspace_id": "ws-1",
+            "task_id": "task-1",
+            "worktree_id": "wt-1",
+            "worktree_path": str(worktree),
+            "updated_at": updated_at,
+            "source": "ctx-daemon",
+        },
+    )
+
+    retired = ctx_runtime.normalize_ctx_bindings()
+    record = json.loads((tmp_path / "ctx" / "session_bindings.json").read_text(encoding="utf-8"))
+
+    assert retired == {session_id: "ctx binding retired: stale active binding (>12h)"}
+    assert record["sessions"][session_id]["active"] is False
+    assert record["sessions"][session_id]["reason"] == "ctx binding retired: stale active binding (>12h)"
+
+
+def test_normalize_ctx_bindings_deactivates_stale_active_session(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    worktree = tmp_path / "ctx-data" / "worktrees" / "ws-1" / "wt-1"
+    worktree.mkdir(parents=True, exist_ok=True)
+    session_id = "sess-active"
+    updated_at = (datetime.now(timezone.utc) - timedelta(hours=13)).isoformat()
+    _write_binding_record(
+        tmp_path,
+        session_id,
+        {
+            "active": True,
+            "reason": "ctx task bound",
+            "session_id": session_id,
+            "platform": "cli",
+            "workspace_id": "ws-1",
+            "task_id": "task-1",
+            "worktree_id": "wt-1",
+            "worktree_path": str(worktree),
+            "updated_at": updated_at,
+            "source": "ctx-daemon",
+        },
+    )
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session(session_id, source="cli")
+    finally:
+        db.close()
+
+    retired = ctx_runtime.normalize_ctx_bindings()
+    record = json.loads((tmp_path / "ctx" / "session_bindings.json").read_text(encoding="utf-8"))
+
+    assert retired == {session_id: "ctx binding retired: stale active binding (>12h)"}
+    assert record["sessions"][session_id]["active"] is False
 
 
 def test_maybe_bind_ctx_session_skips_inactive_persisted_binding(monkeypatch, tmp_path):

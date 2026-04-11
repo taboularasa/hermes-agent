@@ -24,6 +24,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional
 
+from agent.execution_frame import ExecutionFrame, build_execution_frame
+
 
 # Tools that children must never have access to
 DELEGATE_BLOCKED_TOOLS = frozenset([
@@ -46,13 +48,20 @@ def check_delegate_requirements() -> bool:
     return True
 
 
-def _build_child_system_prompt(goal: str, context: Optional[str] = None) -> str:
+def _build_child_system_prompt(
+    goal: str,
+    context: Optional[str] = None,
+    execution_frame: Optional[ExecutionFrame] = None,
+) -> str:
     """Build a focused system prompt for a child agent."""
     parts = [
         "You are a focused subagent working on a specific delegated task.",
         "",
         f"YOUR TASK:\n{goal}",
     ]
+    if execution_frame:
+        parts.append("")
+        parts.append(execution_frame.to_prompt())
     if context and context.strip():
         parts.append(f"\nCONTEXT:\n{context}")
     parts.append(
@@ -153,6 +162,7 @@ def _build_child_agent(
     task_index: int,
     goal: str,
     context: Optional[str],
+    execution_frame: Optional[ExecutionFrame],
     toolsets: Optional[List[str]],
     model: Optional[str],
     max_iterations: int,
@@ -185,7 +195,7 @@ def _build_child_agent(
     else:
         child_toolsets = _strip_blocked_tools(DEFAULT_TOOLSETS)
 
-    child_prompt = _build_child_system_prompt(goal, context)
+    child_prompt = _build_child_system_prompt(goal, context, execution_frame)
     # Extract parent's API key so subagents inherit auth (e.g. Nous Portal).
     parent_api_key = getattr(parent_agent, "api_key", None)
     if (not parent_api_key) and hasattr(parent_agent, "_client_kwargs"):
@@ -255,6 +265,7 @@ def _run_single_child(
     goal: str,
     child=None,
     parent_agent=None,
+    execution_frame: Optional[ExecutionFrame] = None,
     **_kwargs,
 ) -> Dict[str, Any]:
     """
@@ -364,6 +375,8 @@ def _run_single_child(
             },
             "tool_trace": tool_trace,
         }
+        if execution_frame is not None:
+            entry["execution_frame"] = execution_frame.model_dump()
         if status == "failed":
             entry["error"] = result.get("error", "Subagent did not produce a response.")
 
@@ -408,6 +421,7 @@ def delegate_task(
     toolsets: Optional[List[str]] = None,
     tasks: Optional[List[Dict[str, Any]]] = None,
     max_iterations: Optional[int] = None,
+    execution_frame: Optional[Dict[str, Any]] = None,
     parent_agent=None,
 ) -> str:
     """
@@ -448,10 +462,16 @@ def delegate_task(
         return json.dumps({"error": str(exc)})
 
     # Normalize to task list
-    if tasks and isinstance(tasks, list):
+    batch_mode = bool(tasks and isinstance(tasks, list))
+    if batch_mode:
         task_list = tasks[:MAX_CONCURRENT_CHILDREN]
     elif goal and isinstance(goal, str) and goal.strip():
-        task_list = [{"goal": goal, "context": context, "toolsets": toolsets}]
+        task_list = [{
+            "goal": goal,
+            "context": context,
+            "toolsets": toolsets,
+            "execution_frame": execution_frame,
+        }]
     else:
         return json.dumps({"error": "Provide either 'goal' (single task) or 'tasks' (batch)."})
 
@@ -482,8 +502,16 @@ def delegate_task(
     children = []
     try:
         for i, t in enumerate(task_list):
+            task_context = t.get("context") if batch_mode else (t.get("context") or context)
+            frame = build_execution_frame(
+                goal=t.get("goal"),
+                context=task_context,
+                frame=t.get("execution_frame") or execution_frame,
+                source="delegate_task",
+            )
             child = _build_child_agent(
                 task_index=i, goal=t["goal"], context=t.get("context"),
+                execution_frame=frame,
                 toolsets=t.get("toolsets") or toolsets, model=creds["model"],
                 max_iterations=effective_max_iter, parent_agent=parent_agent,
                 override_provider=creds["provider"], override_base_url=creds["base_url"],
@@ -492,15 +520,15 @@ def delegate_task(
             )
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
-            children.append((i, t, child))
+            children.append((i, t, child, frame))
     finally:
         # Authoritative restore: reset global to parent's tool names after all children built
         _model_tools._last_resolved_tool_names = _parent_tool_names
 
     if n_tasks == 1:
         # Single task -- run directly (no thread pool overhead)
-        _i, _t, child = children[0]
-        result = _run_single_child(0, _t["goal"], child, parent_agent)
+        _i, _t, child, frame = children[0]
+        result = _run_single_child(0, _t["goal"], child, parent_agent, execution_frame=frame)
         results.append(result)
     else:
         # Batch -- run in parallel with per-task progress lines
@@ -509,13 +537,14 @@ def delegate_task(
 
         with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_CHILDREN) as executor:
             futures = {}
-            for i, t, child in children:
+            for i, t, child, frame in children:
                 future = executor.submit(
                     _run_single_child,
                     task_index=i,
                     goal=t["goal"],
                     child=child,
                     parent_agent=parent_agent,
+                    execution_frame=frame,
                 )
                 futures[future] = i
 
@@ -742,6 +771,14 @@ DELEGATE_TASK_SCHEMA = {
                     "full-stack tasks."
                 ),
             },
+            "execution_frame": {
+                "type": "object",
+                "description": (
+                    "Optional execution frame capturing goals, constraints, actors, "
+                    "artifacts, evidence, commitments, and verification targets. "
+                    "If omitted, Hermes will build a minimal typed frame from the goal/context."
+                ),
+            },
             "tasks": {
                 "type": "array",
                 "items": {
@@ -753,6 +790,13 @@ DELEGATE_TASK_SCHEMA = {
                             "type": "array",
                             "items": {"type": "string"},
                             "description": "Toolsets for this specific task",
+                        },
+                        "execution_frame": {
+                            "type": "object",
+                            "description": (
+                                "Per-task execution frame. Overrides the top-level "
+                                "execution_frame when provided."
+                            ),
                         },
                     },
                     "required": ["goal"],
@@ -790,6 +834,7 @@ registry.register(
         toolsets=args.get("toolsets"),
         tasks=args.get("tasks"),
         max_iterations=args.get("max_iterations"),
+        execution_frame=args.get("execution_frame"),
         parent_agent=kw.get("parent_agent")),
     check_fn=check_delegate_requirements,
     emoji="🔀",
