@@ -156,6 +156,7 @@ def _discover_tools():
         "tools.delegate_tool",
         "tools.codex_delegate_tool",
         "tools.linear_issue_tool",
+        "tools.self_improvement_tool",
         "tools.process_registry",
         "tools.send_message_tool",
         "tools.honcho_tools",

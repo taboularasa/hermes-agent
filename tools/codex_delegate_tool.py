@@ -21,13 +21,26 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from hermes_cli.config import get_hermes_home, load_config
-from hermes_cli.ctx_runtime import describe_existing_ctx_binding
+from hermes_cli.ctx_runtime import describe_existing_ctx_binding, maybe_bind_ctx_session
 from tools.process_registry import process_registry
 from tools.registry import registry
 from tools.terminal_tool import get_task_cwd
 from utils import atomic_json_write
 
 logger = logging.getLogger(__name__)
+
+_PROBE_TTL_SECONDS = int(os.getenv("HERMES_CODEX_PROBE_TTL_SECONDS", "600"))
+_CTX_CODEX_TOOLSETS = ("terminal", "file", "code_execution")
+
+
+def _is_probe_phase(phase: Any) -> bool:
+    return str(phase or "").strip().lower() == "probe"
+
+
+def _is_probe_record(record: Dict[str, Any]) -> bool:
+    if str(record.get("run_kind") or "").strip().lower() == "probe":
+        return True
+    return _is_probe_phase(record.get("phase"))
 
 
 def check_codex_delegate_requirements() -> bool:
@@ -86,6 +99,14 @@ CODEX_DELEGATE_SCHEMA = {
                 "description": "Maximum number of runs to return for action=list. Default 10.",
                 "minimum": 1,
             },
+            "include_probes": {
+                "type": "boolean",
+                "description": "When listing, include probe runs inside the main runs list.",
+            },
+            "refresh": {
+                "type": "boolean",
+                "description": "When listing, refresh run status before returning. Default true.",
+            },
         },
         "required": ["action"],
     },
@@ -103,6 +124,12 @@ def _load_codex_config() -> Dict[str, Any]:
         "dangerous_bypass": bool(raw.get("dangerous_bypass", True)),
         "default_model": str(raw.get("model") or "").strip(),
     }
+
+
+def _ctx_enabled() -> bool:
+    cfg = load_config()
+    raw = cfg.get("ctx", {}) if isinstance(cfg, dict) else {}
+    return isinstance(raw, dict) and bool(raw.get("enabled", False))
 
 
 def _runs_path() -> Path:
@@ -138,6 +165,19 @@ def _normalize_path(path: str) -> str:
 def _resolve_workdir(workdir: Optional[str], task_id: Optional[str]) -> str:
     candidate = workdir or get_task_cwd(task_id, os.getcwd()) or os.getcwd()
     return _normalize_path(candidate)
+
+
+def _resolve_repo_root(workdir: str) -> str:
+    result = _run_git(workdir, "rev-parse", "--show-toplevel")
+    if result.returncode != 0:
+        candidate = Path(workdir).expanduser().resolve()
+        if (candidate / ".git").exists():
+            return str(candidate)
+        raise RuntimeError(
+            "codex_delegate requires a git repository. "
+            "Use it from a ctx-managed coding worktree or another git checkout."
+        )
+    return _normalize_path(result.stdout.strip())
 
 
 def _run_git(workdir: str, *args: str) -> subprocess.CompletedProcess[str]:
@@ -183,6 +223,137 @@ def _artifact_paths(workdir: str, run_id: str) -> Dict[str, str]:
 
 def _utc_now() -> float:
     return time.time()
+
+
+def _infer_ctx_platform(task_id: str, binding: Optional[Any] = None) -> str:
+    source = str(os.getenv("HERMES_SESSION_SOURCE") or "").strip().lower()
+    if source:
+        return source
+    binding_platform = str(getattr(binding, "platform", "") or "").strip().lower()
+    if binding_platform:
+        return binding_platform
+    if str(task_id or "").startswith("cron_"):
+        return "cron"
+    return "cli"
+
+
+def _binding_repo_root(binding: Optional[Any]) -> str:
+    for value in (
+        getattr(binding, "workspace_root", None),
+        getattr(binding, "repo_root", None),
+    ):
+        if value:
+            return _normalize_path(str(value))
+    return ""
+
+
+def _map_workdir_to_ctx_worktree(requested_workdir: str, repo_root: str, binding: Any) -> str:
+    worktree_path = _normalize_path(getattr(binding, "worktree_path", None) or "")
+    if not worktree_path:
+        raise RuntimeError("ctx binding did not expose a worktree path")
+
+    requested_path = Path(requested_workdir).resolve()
+    worktree_root = Path(worktree_path).resolve()
+    try:
+        requested_path.relative_to(worktree_root)
+        return str(requested_path)
+    except ValueError:
+        pass
+
+    binding_root = _binding_repo_root(binding)
+    repo_root = _normalize_path(repo_root)
+    if binding_root and repo_root != binding_root:
+        raise RuntimeError(
+            "current Hermes session is already bound to a different ctx workspace "
+            f"({binding_root}) and cannot launch Codex in {repo_root}"
+        )
+
+    relative = requested_path.relative_to(Path(repo_root).resolve())
+    return str((worktree_root / relative).resolve())
+
+
+def _resolve_ctx_workdir(
+    *,
+    requested_workdir: str,
+    task_id: str,
+    prompt: str,
+) -> tuple[Optional[Any], str, str]:
+    repo_root = _resolve_repo_root(requested_workdir)
+    binding = describe_existing_ctx_binding(task_id) if task_id else None
+    if binding and getattr(binding, "active", False):
+        return binding, repo_root, _map_workdir_to_ctx_worktree(requested_workdir, repo_root, binding)
+
+    if not _ctx_enabled():
+        return binding, repo_root, requested_workdir
+
+    if not task_id:
+        raise RuntimeError(
+            "ctx-native Codex delegation requires a Hermes task id so the repo can be bound to a ctx worktree"
+        )
+
+    binding = maybe_bind_ctx_session(
+        session_id=task_id,
+        enabled_toolsets=_CTX_CODEX_TOOLSETS,
+        platform=_infer_ctx_platform(task_id, binding),
+        prompt=prompt,
+        repo_root=repo_root,
+    )
+    if not getattr(binding, "active", False) or not getattr(binding, "worktree_path", None):
+        raise RuntimeError(
+            "ctx-native Codex delegation requires an active ctx worktree for "
+            f"{repo_root}: {getattr(binding, 'reason', 'ctx binding unavailable')}"
+        )
+    return binding, repo_root, _map_workdir_to_ctx_worktree(requested_workdir, repo_root, binding)
+
+
+def _repo_virtualenv(repo_root: str) -> str:
+    root = Path(repo_root)
+    for name in ("venv", ".venv"):
+        candidate = root / name
+        if (candidate / "bin" / "python").exists():
+            return str(candidate)
+    return ""
+
+
+def _codex_prompt(
+    prompt: str,
+    *,
+    repo_root: str,
+    workdir: str,
+    virtualenv: str,
+) -> str:
+    notes = []
+    normalized_repo_root = _normalize_path(repo_root)
+    normalized_workdir = _normalize_path(workdir)
+    if normalized_repo_root and normalized_workdir and normalized_repo_root != normalized_workdir:
+        notes.append(
+            f"Run inside the ctx worktree `{normalized_workdir}` for repo `{normalized_repo_root}`. "
+            "Treat the ctx worktree as the source of truth."
+        )
+    if virtualenv:
+        notes.append(
+            f"The repo virtualenv `{virtualenv}` is exported on PATH. "
+            "Use `python` or `pytest`; do not rely on `./venv/bin/python` inside the worktree."
+        )
+    if not notes:
+        return prompt
+    return "\n\n".join(
+        [
+            "[Local execution note]\n- " + "\n- ".join(notes),
+            prompt.strip(),
+        ]
+    ).strip()
+
+
+def _codex_env_vars(*, repo_root: str, workdir: str, virtualenv: str) -> Dict[str, str]:
+    env_vars: Dict[str, str] = {
+        "HERMES_CODEX_REPO_ROOT": repo_root,
+        "HERMES_CODEX_WORKTREE": workdir,
+    }
+    if virtualenv:
+        env_vars["VIRTUAL_ENV"] = virtualenv
+        env_vars["PATH"] = f"{Path(virtualenv) / 'bin'}:{os.environ.get('PATH', '')}"
+    return env_vars
 
 
 def _read_text(path: Optional[str]) -> str:
@@ -320,7 +491,26 @@ def _normalize_stale_record(record: Dict[str, Any], *, reason: str) -> None:
     record["stale_reason"] = reason
 
 
+def _apply_probe_expiry(record: Dict[str, Any]) -> None:
+    if not _is_probe_record(record):
+        return
+    if record.get("status") not in {"running", "unknown"}:
+        return
+    started_at = record.get("started_at") or record.get("process_started_at") or 0
+    try:
+        started_at = float(started_at)
+    except (TypeError, ValueError):
+        started_at = 0
+    if started_at <= 0:
+        return
+    if _utc_now() - started_at < _PROBE_TTL_SECONDS:
+        return
+    _normalize_stale_record(record, reason="probe_timeout")
+    record["probe_timeout_seconds"] = _PROBE_TTL_SECONDS
+
+
 def _refresh_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    record.setdefault("run_kind", "probe" if _is_probe_phase(record.get("phase")) else "delegated")
     session_id = str(record.get("process_session_id") or "")
     session = process_registry.get(session_id) if session_id else None
     output_buffer = session.output_buffer if session and session.output_buffer else ""
@@ -357,6 +547,7 @@ def _refresh_record(record: Dict[str, Any]) -> Dict[str, Any]:
             record["status"] = "unknown"
         else:
             _normalize_stale_record(record, reason="process_missing")
+    _apply_probe_expiry(record)
     _persist_record(record)
     return record
 
@@ -366,6 +557,8 @@ def _build_response(record: Dict[str, Any], **extra: Any) -> str:
         "run_id": record["run_id"],
         "status": record.get("status"),
         "phase": record.get("phase"),
+        "run_kind": record.get("run_kind"),
+        "is_probe": _is_probe_record(record),
         "external_key": record.get("external_key"),
         "workdir": record.get("workdir"),
         "process_session_id": record.get("process_session_id"),
@@ -415,6 +608,7 @@ def _start_run(
     phase: str,
     model: str,
     workdir: str,
+    repo_root: str,
     task_id: str,
     parent_run_id: str = "",
     codex_session_id: str = "",
@@ -423,10 +617,11 @@ def _start_run(
     run_id = f"codex_{uuid.uuid4().hex[:12]}"
     artifacts = _artifact_paths(workdir, run_id)
     ctx_binding = describe_existing_ctx_binding(task_id) if task_id else None
+    virtualenv = _repo_virtualenv(repo_root)
     command = _build_codex_command(
         subcommand="resume" if parent_run_id else "exec",
         workdir=workdir,
-        prompt=prompt,
+        prompt=_codex_prompt(prompt, repo_root=repo_root, workdir=workdir, virtualenv=virtualenv),
         last_message_path=artifacts["last_message_path"],
         model=model,
         codex_session_id=codex_session_id,
@@ -438,7 +633,7 @@ def _start_run(
         cwd=workdir,
         task_id=task_id,
         session_key=session_key,
-        env_vars=None,
+        env_vars=_codex_env_vars(repo_root=repo_root, workdir=workdir, virtualenv=virtualenv),
         use_pty=False,
     )
     # codex exec treats an open stdin pipe as additional prompt input and can
@@ -454,6 +649,7 @@ def _start_run(
         "run_id": run_id,
         "status": "running",
         "phase": phase,
+        "run_kind": "probe" if _is_probe_phase(phase) else "delegated",
         "external_key": external_key,
         "prompt": prompt,
         "model": model,
@@ -489,6 +685,8 @@ def codex_delegate(
     external_key: str = "",
     timeout: int = 900,
     limit: int = 10,
+    include_probes: bool = False,
+    refresh: bool = True,
     task_id: str = "",
 ) -> str:
     if not check_codex_delegate_requirements():
@@ -505,12 +703,23 @@ def codex_delegate(
         runs = list(data.get("runs", {}).values())
         if task_id:
             runs = [record for record in runs if record.get("task_id") == task_id]
+        refreshed = []
+        if refresh:
+            for record in runs:
+                if not isinstance(record, dict):
+                    continue
+                refreshed.append(_refresh_record(dict(record)))
+        else:
+            refreshed = [record for record in runs if isinstance(record, dict)]
+        runs = refreshed
         runs.sort(key=lambda record: record.get("started_at", 0), reverse=True)
         trimmed = [
             {
                 "run_id": record.get("run_id"),
                 "status": record.get("status"),
                 "phase": record.get("phase"),
+                "run_kind": record.get("run_kind"),
+                "is_probe": _is_probe_record(record),
                 "external_key": record.get("external_key"),
                 "workdir": record.get("workdir"),
                 "process_session_id": record.get("process_session_id"),
@@ -520,14 +729,29 @@ def codex_delegate(
             }
             for record in runs[: max(1, int(limit or 10))]
         ]
-        return json.dumps({"runs": trimmed}, ensure_ascii=False)
+        probe_runs = [record for record in trimmed if record.get("is_probe")]
+        if not include_probes:
+            trimmed = [record for record in trimmed if not record.get("is_probe")]
+        return json.dumps({
+            "runs": trimmed,
+            "probe_runs": probe_runs,
+            "include_probes": bool(include_probes),
+        }, ensure_ascii=False)
 
     if action == "start":
         prompt = str(prompt or "").strip()
         if not prompt:
             return json.dumps({"error": "prompt is required for action=start"}, ensure_ascii=False)
-        resolved_workdir = _resolve_workdir(workdir, task_id)
-        _resolve_git_dir(resolved_workdir)
+        requested_workdir = _resolve_workdir(workdir, task_id)
+        _resolve_git_dir(requested_workdir)
+        try:
+            _ctx_binding, repo_root, resolved_workdir = _resolve_ctx_workdir(
+                requested_workdir=requested_workdir,
+                task_id=task_id,
+                prompt=prompt,
+            )
+        except RuntimeError as exc:
+            return json.dumps({"error": str(exc)}, ensure_ascii=False)
         stable_key = str(external_key or "").strip()
         existing_active = _find_active_record_by_external_key(stable_key, resolved_workdir) if stable_key else None
         if existing_active:
@@ -538,6 +762,7 @@ def codex_delegate(
             phase=str(phase or "implement").strip() or "implement",
             model=effective_model,
             workdir=resolved_workdir,
+            repo_root=repo_root,
             task_id=task_id,
             external_key=stable_key,
         )
@@ -561,6 +786,7 @@ def codex_delegate(
             phase=str(phase or "follow-up").strip() or "follow-up",
             model=effective_model,
             workdir=str(record["workdir"]),
+            repo_root=_resolve_repo_root(str(record["workdir"])),
             task_id=str(record.get("task_id") or task_id),
             parent_run_id=record["run_id"],
             codex_session_id=codex_session_id,
@@ -595,6 +821,8 @@ registry.register(
         external_key=args.get("external_key", ""),
         timeout=args.get("timeout", 900),
         limit=args.get("limit", 10),
+        include_probes=bool(args.get("include_probes", False)),
+        refresh=bool(args.get("refresh", True)),
         task_id=kw.get("task_id", ""),
     ),
     check_fn=check_codex_delegate_requirements,

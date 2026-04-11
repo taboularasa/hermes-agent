@@ -127,6 +127,138 @@ def _load_binding_record(session_id: str) -> Optional[Dict[str, Any]]:
         return dict(record) if isinstance(record, dict) else None
 
 
+def _set_binding_record_inactive(record: Dict[str, Any], *, reason: str) -> bool:
+    updated_at = _utcnow_iso()
+    changed = bool(record.get("active")) or str(record.get("reason") or "") != reason
+    record["active"] = False
+    record["reason"] = reason
+    record["updated_at"] = updated_at
+    if "created_at" not in record:
+        record["created_at"] = updated_at
+    return changed
+
+
+def _open_session_db():
+    db_path = get_hermes_home() / "state.db"
+    if not db_path.exists():
+        return None
+    try:
+        from hermes_state import SessionDB
+
+        return SessionDB(db_path=db_path)
+    except Exception:
+        logger.debug("Failed to open SessionDB while normalizing ctx bindings", exc_info=True)
+        return None
+
+
+def _ctx_binding_retirement_reason(
+    record: Dict[str, Any],
+    *,
+    session_db,
+) -> Optional[str]:
+    if not bool(record.get("active")):
+        return None
+
+    worktree_path = record.get("worktree_path")
+    if worktree_path and not Path(worktree_path).exists():
+        return "ctx binding retired: worktree missing"
+
+    session_id = str(record.get("session_id") or "").strip()
+    if not session_db or not session_id:
+        return None
+
+    try:
+        session = session_db.get_session(session_id)
+    except Exception:
+        logger.debug("Failed to read Hermes session state for ctx session %s", session_id, exc_info=True)
+        return None
+    if not isinstance(session, dict):
+        return None
+
+    if session.get("ended_at") is None:
+        return None
+
+    end_reason = str(session.get("end_reason") or "session ended").strip()
+    return f"ctx binding retired: session ended ({end_reason})"
+
+
+def _clear_binding_overrides(session_ids: Iterable[str]) -> None:
+    ids = [str(session_id or "").strip() for session_id in session_ids if str(session_id or "").strip()]
+    if not ids:
+        return
+    try:
+        from tools.terminal_tool import clear_task_env_overrides
+    except Exception:
+        logger.debug("Failed to import clear_task_env_overrides for ctx cleanup", exc_info=True)
+        return
+
+    for session_id in ids:
+        try:
+            clear_task_env_overrides(session_id)
+        except Exception:
+            logger.debug("Failed to clear task env overrides for ctx session %s", session_id, exc_info=True)
+
+
+def normalize_ctx_bindings(*, session_id: Optional[str] = None) -> Dict[str, str]:
+    """Deactivate persisted ctx bindings that no longer map to live sessions."""
+
+    retired: Dict[str, str] = {}
+    cleared_overrides: list[str] = []
+    session_db = _open_session_db()
+    try:
+        with _BINDINGS_LOCK:
+            data = _load_bindings()
+            sessions = data.setdefault("sessions", {})
+            if not isinstance(sessions, dict):
+                sessions = {}
+                data["sessions"] = sessions
+
+            session_ids = [session_id] if session_id else list(sessions.keys())
+            changed = False
+            for current_session_id in session_ids:
+                record = sessions.get(current_session_id)
+                if not isinstance(record, dict):
+                    continue
+                reason = _ctx_binding_retirement_reason(record, session_db=session_db)
+                if not reason:
+                    continue
+                if _set_binding_record_inactive(record, reason=reason):
+                    changed = True
+                retired[current_session_id] = reason
+                cleared_overrides.append(current_session_id)
+            if changed:
+                _save_bindings(data)
+    finally:
+        if session_db is not None:
+            try:
+                session_db.close()
+            except Exception:
+                logger.debug("Failed to close SessionDB after ctx binding normalization", exc_info=True)
+
+    _clear_binding_overrides(cleared_overrides)
+    return retired
+
+
+def retire_ctx_binding(session_id: str, *, reason: str) -> bool:
+    """Mark a persisted ctx binding inactive and clear its worktree override."""
+
+    session_id = str(session_id or "").strip()
+    reason = str(reason or "").strip()
+    if not session_id or not reason:
+        return False
+
+    changed = False
+    with _BINDINGS_LOCK:
+        data = _load_bindings()
+        record = data.get("sessions", {}).get(session_id)
+        if isinstance(record, dict) and _set_binding_record_inactive(record, reason=reason):
+            _save_bindings(data)
+            changed = True
+
+    _clear_binding_overrides([session_id])
+    return changed
+
+
 def _persist_binding(binding: CtxBinding) -> None:
     with _BINDINGS_LOCK:
         data = _load_bindings()
@@ -143,6 +275,7 @@ def _persist_binding(binding: CtxBinding) -> None:
 
 
 def describe_existing_ctx_binding(session_id: str) -> Optional[CtxBinding]:
+    normalize_ctx_bindings(session_id=session_id)
     record = _load_binding_record(session_id)
     if not record:
         return None
@@ -461,10 +594,11 @@ def maybe_bind_ctx_session(
     if not is_ctx_candidate(enabled_toolsets=enabled_toolsets, platform=platform, config=config):
         return CtxBinding(active=False, reason="ctx disabled for this session", session_id=session_id, platform=platform)
 
+    normalize_ctx_bindings()
     record = _load_binding_record(session_id)
     if record:
         binding = _binding_from_record(record, reason="reused persisted binding")
-        if binding.worktree_path and Path(binding.worktree_path).exists():
+        if binding.active and binding.worktree_path and Path(binding.worktree_path).exists():
             if not dry_run:
                 from tools.terminal_tool import register_task_env_overrides
 

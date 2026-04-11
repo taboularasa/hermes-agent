@@ -65,6 +65,9 @@ Treat the reliability floor as degraded when any of these are true:
 - a client-facing delivery path is broken,
 - the evidence sources used by this loop are clearly stale or contradictory.
 
+Always compute an explicit evidence freshness gate using the `self_improvement_evidence_gate` tool.
+If the gate reports contradictions or stale evidence, treat the reliability floor as degraded.
+
 When a reliability trigger is active:
 
 - do not open speculative `Growth` or `Capability` issues ahead of the repair,
@@ -192,6 +195,8 @@ When starting Codex:
 - pass `external_key="linear:<IDENTIFIER>"`,
 - keep the prompt bounded to one issue,
 - tell Codex to work only in the named repo,
+- when ctx is enabled, Codex delegation must run in a ctx-managed worktree for that repo; if `codex_delegate` refuses because ctx binding failed, stop and fix ctx instead of falling back to the shared checkout,
+- prefer `python` or `pytest` over `./venv/bin/python` because ctx worktrees inherit the repo virtualenv on `PATH` but may not contain a local `venv/` directory,
 - require verification commands,
 - require a concise summary of files changed and results.
 
@@ -206,6 +211,8 @@ On each loop:
 1. Read the charter, the live epoch objective, and the most recent evidence sources.
 2. Extract up to 3 concrete candidates and classify each into `Maintenance`, `Growth`, or `Capability`.
 3. Check reliability-floor triggers. If any are active, discard non-maintenance candidates for this loop.
+   If the `self_improvement_evidence_gate` tool reports a degraded gate, list the reasons and
+   suppress non-maintenance work for this cycle.
 4. Score the remaining candidates with the bundled formula.
 5. Upsert the umbrella Linear project.
 6. Upsert or update the corresponding Linear issues with lane, evidence, and verification context.
@@ -221,6 +228,7 @@ Return only a concise operator summary:
 
 - Project status
 - Issues created or updated
+- Reliability gate status (healthy/degraded) and why
 - One issue chosen for implementation, its lane, and why it won
 - Codex run id / status if delegation happened
 - Next highest-leverage move
