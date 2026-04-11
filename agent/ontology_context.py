@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -89,6 +90,67 @@ PRIORITY_WEIGHTS = {
     "low": 1,
 }
 
+SEARCH_PROVIDER_ENV_KEYS = {
+    "exa": ("EXA_API_KEY",),
+    "parallel": ("PARALLEL_API_KEY",),
+    "tavily": ("TAVILY_API_KEY",),
+    "firecrawl": ("FIRECRAWL_API_KEY", "FIRECRAWL_API_URL"),
+}
+
+TEXTBOOK_STUDY_PATTERNS = {
+    "progress_tracker": "docs/plans/*keet-ontology-engineering-progress-tracker.md",
+    "heartbeat": "docs/plans/*keet-ontology-engineering-heartbeat.md",
+    "governing_issue": "docs/issues/ONT-009-*.md",
+}
+
+TEXTBOOK_BACKLOG_TO_HERMES_CAPABILITY = {
+    "ONT-002": {
+        "title": "Teach Hermes to inspect lifecycle and traceability before ontology changes",
+        "why_now": "Ontology work should start from system problems, use cases, and competency-question traceability instead of jumping straight to classes and properties.",
+        "change_surface": "ontology planning and vertical readiness prompts",
+    },
+    "ONT-004": {
+        "title": "Teach Hermes micro-level ontology authoring governance",
+        "why_now": "Hermes should reason explicitly about modularity, language/profile choice, foundational posture, and authoring quality checks before proposing ontology edits.",
+        "change_surface": "ontology engineering context and proposal prompts",
+    },
+    "ONT-005": {
+        "title": "Prefer explanation-grade ontology debugging",
+        "why_now": "Hermes should ask for clash type, implicated axioms, and repair-oriented debugging evidence instead of accepting flat logical pass/fail output.",
+        "change_surface": "ontology debugging and validation review prompts",
+    },
+    "ONT-006": {
+        "title": "Audit role-vs-kind taxonomy risks during ontology review",
+        "why_now": "Logical consistency is not enough; Hermes should surface metaproperty and role hierarchy risks when evaluating ontology quality.",
+        "change_surface": "ontology review heuristics",
+    },
+    "ONT-007": {
+        "title": "Inspect relation semantics, not just class hierarchies",
+        "why_now": "Ontology engineering needs RBox and property-chain scrutiny so relation semantics do not drift behind green validation.",
+        "change_surface": "ontology review heuristics",
+    },
+    "ONT-008": {
+        "title": "Carry ontology pitfall and TIPS guidance into reviews",
+        "why_now": "Hermes should spot common ontology anti-patterns and offer repair guidance, not just summarize notes about them.",
+        "change_surface": "ontology linting and review prompts",
+    },
+    "ONT-010": {
+        "title": "Prefer query-ready competency-question contracts",
+        "why_now": "Hermes should treat free-form competency questions as incomplete until they map to a reusable template or query-ready contract.",
+        "change_surface": "ontology CQ authoring and research prompts",
+    },
+    "ONT-011": {
+        "title": "Use ontology catalogs and export surfaces as primary evidence",
+        "why_now": "Hermes should gather schema summaries, ORSDs, reports, and runtime exports from a coherent catalog rather than relying on scattered notes.",
+        "change_surface": "ontology evidence gathering",
+    },
+    "ONT-017": {
+        "title": "Apply foundational ontology posture explicitly",
+        "why_now": "Hermes should reason about foundational categories, attribution modeling, and alignment posture instead of treating Layer 0 as a hidden implementation detail.",
+        "change_surface": "ontology modeling prompts and cross-vertical reasoning",
+    },
+}
+
 
 def _parse_timestamp(value: Any) -> Optional[datetime]:
     if value is None:
@@ -137,6 +199,49 @@ def _load_text(path: Path) -> str:
         return path.read_text(encoding="utf-8")
     except Exception:
         return ""
+
+
+def _glob_latest(root: Path, pattern: str) -> Optional[Path]:
+    candidates = sorted(
+        root.glob(pattern),
+        key=lambda item: (_file_timestamp(item) or datetime.min.replace(tzinfo=timezone.utc), str(item)),
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
+def _markdown_section(text: str, heading: str) -> str:
+    if not text:
+        return ""
+    match = re.search(
+        rf"^{re.escape(heading)}\s*$\n(.*?)(?=^##\s+|\Z)",
+        text,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    return match.group(1).strip() if match else ""
+
+
+def _parse_key_value_bullets(text: str) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        match = re.match(r"-\s+([^:]+):\s*(.+)", line)
+        if not match:
+            continue
+        key = match.group(1).strip().lower().replace(" ", "_")
+        parsed[key] = match.group(2).strip()
+    return parsed
+
+
+def _extract_issue_ids(text: str) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for match in re.findall(r"\bONT-\d+\b", text or ""):
+        if match in seen:
+            continue
+        seen.add(match)
+        ordered.append(match)
+    return ordered
 
 
 def _tokenize(text: str) -> list[str]:
@@ -282,6 +387,204 @@ def _count_files(path: Path) -> int:
     if not path.exists():
         return 0
     return sum(1 for entry in path.rglob("*") if entry.is_file())
+
+
+def _find_issue_doc_by_id(root: Path, issue_id: str) -> Optional[Path]:
+    issue_id = str(issue_id).strip().upper()
+    matches = sorted(root.glob(f"docs/issues/{issue_id}-*.md"))
+    return matches[0] if matches else None
+
+
+def _issue_id_from_path(path: Path) -> Optional[str]:
+    match = re.match(r"^(ONT-\d+)\b", path.stem, flags=re.IGNORECASE)
+    return match.group(1).upper() if match else None
+
+
+def _parse_issue_metadata(text: str) -> dict[str, str]:
+    if not text:
+        return {}
+    metadata: dict[str, str] = {}
+    for key in ("id", "title", "status", "type", "owner"):
+        match = re.search(rf"(?m)^{key}:\s*(.+?)\s*$", text)
+        if not match:
+            continue
+        metadata[key] = match.group(1).strip().strip("'\"")
+    return metadata
+
+
+def _summarize_issue_doc(path: Path) -> Optional[dict[str, Any]]:
+    payload = _load_yaml(path)
+    summary_fields = payload if isinstance(payload, dict) else _parse_issue_metadata(_load_text(path))
+    if not isinstance(summary_fields, dict) or not summary_fields:
+        return None
+    return {
+        "id": summary_fields.get("id") or _issue_id_from_path(path),
+        "title": summary_fields.get("title"),
+        "status": summary_fields.get("status"),
+        "type": summary_fields.get("type"),
+        "owner": summary_fields.get("owner"),
+        "path": str(path),
+    }
+
+
+def _parse_study_log_entries(text: str, *, limit: int = 3) -> list[dict[str, Any]]:
+    section = _markdown_section(text, "## Study log")
+    if not section:
+        return []
+    entries: list[dict[str, Any]] = []
+    for raw_block in re.split(r"(?m)^###\s+", section):
+        block = raw_block.strip()
+        if not block:
+            continue
+        lines = block.splitlines()
+        timestamp = lines[0].strip()
+        details = _parse_key_value_bullets("\n".join(lines[1:]))
+        entries.append(
+            {
+                "timestamp": timestamp,
+                "key_lesson": details.get("key_lesson"),
+                "repo_evidence": details.get("repo_evidence"),
+                "backlog_intake": details.get("backlog_intake"),
+                "immediate_rollover": details.get("immediate_rollover"),
+            }
+        )
+        if len(entries) >= limit:
+            break
+    return entries
+
+
+def _load_textbook_study_context(root: Path, *, limit: int = 5) -> dict[str, Any]:
+    tracker_path = _glob_latest(root, TEXTBOOK_STUDY_PATTERNS["progress_tracker"])
+    heartbeat_path = _glob_latest(root, TEXTBOOK_STUDY_PATTERNS["heartbeat"])
+    governing_issue_path = _glob_latest(root, TEXTBOOK_STUDY_PATTERNS["governing_issue"])
+
+    tracker_text = _load_text(tracker_path) if tracker_path else ""
+    tracker_summary = _parse_key_value_bullets(_markdown_section(tracker_text, "## Progress summary"))
+    heartbeat = _parse_key_value_bullets(_load_text(heartbeat_path)) if heartbeat_path else {}
+    governing_issue = _summarize_issue_doc(governing_issue_path) if governing_issue_path else None
+    latest_lessons = _parse_study_log_entries(tracker_text, limit=limit)
+
+    issue_ids = []
+    latest_backlog_items = tracker_summary.get("latest_backlog_items", "")
+    issue_ids.extend(_extract_issue_ids(latest_backlog_items))
+    for lesson in latest_lessons:
+        issue_ids.extend(_extract_issue_ids(" ".join(value or "" for value in lesson.values())))
+    issue_ids.extend(_extract_issue_ids(tracker_text[:6000]))
+
+    seen_ids: set[str] = set()
+    issue_summaries: list[dict[str, Any]] = []
+    for issue_id in issue_ids:
+        if issue_id in {"ONT-009"} or issue_id in seen_ids:
+            continue
+        seen_ids.add(issue_id)
+        issue_path = _find_issue_doc_by_id(root, issue_id)
+        if not issue_path:
+            continue
+        summary = _summarize_issue_doc(issue_path)
+        if summary:
+            issue_summaries.append(summary)
+        if len(issue_summaries) >= limit:
+            break
+
+    upgrade_targets = []
+    for summary in issue_summaries:
+        issue_id = str(summary.get("id") or "").upper()
+        mapping = TEXTBOOK_BACKLOG_TO_HERMES_CAPABILITY.get(issue_id)
+        if not mapping:
+            continue
+        upgrade_targets.append(
+            {
+                "issue_id": issue_id,
+                "title": mapping["title"],
+                "why_now": mapping["why_now"],
+                "change_surface": mapping["change_surface"],
+                "backing_issue": summary,
+            }
+        )
+
+    return {
+        "governing_issue": governing_issue,
+        "progress_summary": {
+            "chapters_completed": tracker_summary.get("chapters_completed"),
+            "current_chapter": tracker_summary.get("current_chapter"),
+            "current_subsection": tracker_summary.get("current_subsection"),
+            "latest_backlog_items": _extract_issue_ids(latest_backlog_items),
+            "total_book_progress_note": tracker_summary.get("total_book_progress_note"),
+        },
+        "heartbeat": heartbeat,
+        "latest_lessons": latest_lessons,
+        "backlog_issues": issue_summaries,
+        "upgrade_targets": upgrade_targets,
+        "paths": {
+            "progress_tracker": str(tracker_path) if tracker_path else None,
+            "heartbeat": str(heartbeat_path) if heartbeat_path else None,
+            "governing_issue": str(governing_issue_path) if governing_issue_path else None,
+        },
+    }
+
+
+def _load_hermes_web_backend() -> Optional[str]:
+    config_path = Path.home() / ".hermes" / "config.yaml"
+    config = _load_yaml(config_path)
+    if not isinstance(config, dict):
+        return None
+    web_config = config.get("web")
+    if not isinstance(web_config, dict):
+        return None
+    backend = str(web_config.get("backend") or "").strip().lower()
+    return backend or None
+
+
+def _web_provider_status() -> dict[str, Any]:
+    configured_backend = _load_hermes_web_backend()
+    providers: dict[str, Any] = {}
+    available: list[str] = []
+    missing: list[str] = []
+    for provider, env_keys in SEARCH_PROVIDER_ENV_KEYS.items():
+        present_keys = [key for key in env_keys if os.getenv(key, "").strip()]
+        entry = {
+            "available": bool(present_keys),
+            "configured": provider == configured_backend,
+            "required_env_keys": list(env_keys),
+            "present_env_keys": present_keys,
+        }
+        providers[provider] = entry
+        if entry["available"]:
+            available.append(provider)
+        else:
+            missing.append(provider)
+    availability = "ready" if len(available) >= 2 else ("limited" if available else "missing")
+    return {
+        "configured_backend": configured_backend,
+        "availability": availability,
+        "available_providers": available,
+        "missing_providers": missing,
+        "providers": providers,
+        "summary": {
+            "available_provider_count": len(available),
+            "missing_provider_count": len(missing),
+        },
+    }
+
+
+def _build_business_domain_research_protocol() -> dict[str, Any]:
+    provider_status = _web_provider_status()
+    if provider_status["available_providers"]:
+        steps = [
+            "Use web_search_matrix first so ontology domain research compares all available search providers instead of trusting one backend.",
+            "Inspect overlap and novelty across providers before extracting pages or forming ontology hypotheses.",
+            "Use web_extract on the strongest URLs and persist durable evidence into the ontology source-material manifests before updating ontology backlog or prompts.",
+        ]
+    else:
+        steps = [
+            "No search-provider credentials are currently available in the Hermes runtime environment.",
+            "Restore at least one provider before treating online ontology domain research as healthy.",
+        ]
+    return {
+        "tool": "web_search_matrix",
+        "provider_status": provider_status,
+        "steps": steps,
+    }
 
 
 def _summarize_agenda(path: Path, *, limit: int = 3) -> Optional[dict[str, Any]]:
@@ -907,6 +1210,39 @@ def _proof_points(snapshot: dict[str, Any], vertical_match: dict[str, Any]) -> l
     return points
 
 
+def build_ontology_engineering_context(
+    repo_root: Path | str = DEFAULT_ONTOLOGY_REPO_ROOT,
+    *,
+    limit: int = 5,
+) -> dict[str, Any]:
+    root = Path(repo_root).expanduser()
+    snapshot = load_ontology_snapshot(root)
+    study_context = _load_textbook_study_context(root, limit=limit)
+    research_protocol = _build_business_domain_research_protocol()
+    platform = snapshot.get("platform", {}) if isinstance(snapshot, dict) else {}
+    return {
+        "mode": "ontology_engineering",
+        "study": study_context,
+        "hermes_upgrade_targets": study_context.get("upgrade_targets", [])[:limit],
+        "research_protocol": research_protocol,
+        "platform_summary": {
+            "generated_at": snapshot.get("generated_at"),
+            "total_cqs": platform.get("total_cqs"),
+            "total_answered": platform.get("total_answered"),
+            "total_cqs_added": platform.get("total_cqs_added"),
+            "total_proposals_generated": platform.get("total_proposals_generated"),
+        },
+        "business_recommendations": snapshot.get("business_recommendations", [])[:3],
+        "evidence": {
+            "repo_root": snapshot.get("repo_root"),
+            "metrics_path": snapshot.get("paths", {}).get("metrics"),
+            "delta_report_path": snapshot.get("paths", {}).get("delta_report"),
+            "study_tracker_path": study_context.get("paths", {}).get("progress_tracker"),
+            "study_heartbeat_path": study_context.get("paths", {}).get("heartbeat"),
+        },
+    }
+
+
 def build_consulting_context(
     *,
     query: str,
@@ -915,6 +1251,8 @@ def build_consulting_context(
     limit: int = 3,
 ) -> dict[str, Any]:
     snapshot = load_ontology_snapshot(repo_root)
+    study_context = _load_textbook_study_context(Path(repo_root).expanduser(), limit=3)
+    research_protocol = _build_business_domain_research_protocol()
     matches = rank_verticals(snapshot, query=query, vertical=vertical, limit=limit)
     contexts = _match_core_contexts(query)
     top_match = matches[0] if matches else None
@@ -946,6 +1284,8 @@ def build_consulting_context(
         "discovery_questions": discovery_questions,
         "proof_points": _proof_points(snapshot, top_match) if top_match else [],
         "recommended_next_steps": recommended_next_steps,
+        "research_protocol": research_protocol,
+        "study_principles": study_context.get("latest_lessons", [])[:2],
         "business_recommendations": snapshot.get("business_recommendations", [])[:3],
         "evidence": {
             "repo_root": snapshot.get("repo_root"),
@@ -964,6 +1304,8 @@ def build_sales_context(
     limit: int = 3,
 ) -> dict[str, Any]:
     snapshot = load_ontology_snapshot(repo_root)
+    study_context = _load_textbook_study_context(Path(repo_root).expanduser(), limit=3)
+    research_protocol = _build_business_domain_research_protocol()
     matches = rank_verticals(snapshot, query=query, vertical=vertical, limit=limit)
     contexts = _match_core_contexts(query)
     top_match = matches[0] if matches else None
@@ -996,6 +1338,8 @@ def build_sales_context(
         "outreach_angles": outreach_angles,
         "discovery_prompts": discovery_prompts,
         "proof_points": _proof_points(snapshot, top_match) if top_match else [],
+        "research_protocol": research_protocol,
+        "study_principles": study_context.get("latest_lessons", [])[:2],
         "business_recommendations": snapshot.get("business_recommendations", [])[:3],
         "evidence": {
             "repo_root": snapshot.get("repo_root"),
@@ -1014,6 +1358,9 @@ def build_self_improvement_context(
     root = Path(repo_root).expanduser()
     snapshot = load_ontology_snapshot(root)
     reliability = summarize_ontology_reliability(snapshot, now=now, freshness_hours=freshness_hours)
+    study_context = _load_textbook_study_context(root, limit=5)
+    research_protocol = _build_business_domain_research_protocol()
+    provider_status = research_protocol.get("provider_status", {})
 
     agenda_dir = root / "research" / "agenda"
     retrospective_dir = root / "research" / "retrospectives"
@@ -1073,6 +1420,26 @@ def build_self_improvement_context(
                 }
             )
 
+    available_provider_count = int(provider_status.get("summary", {}).get("available_provider_count") or 0)
+    if available_provider_count == 0:
+        gaps.append(
+            {
+                "vertical": None,
+                "gap_type": "search_provider_coverage",
+                "detail": "No web search providers are available for ontology business-domain research.",
+                "evidence": "runtime environment",
+            }
+        )
+    elif available_provider_count == 1:
+        gaps.append(
+            {
+                "vertical": None,
+                "gap_type": "search_provider_coverage",
+                "detail": "Only one web search provider is available; ontology domain research cannot compare coverage across providers.",
+                "evidence": "runtime environment",
+            }
+        )
+
     maintenance_candidates = []
     if reliability["status"] != "fresh":
         maintenance_candidates.append(
@@ -1080,6 +1447,14 @@ def build_self_improvement_context(
                 "lane": "Maintenance",
                 "title": "Repair stale ontology intelligence artifacts",
                 "why_now": ", ".join(reliability["reasons"]) or "Required ontology reports are missing or stale.",
+            }
+        )
+    if available_provider_count == 0:
+        maintenance_candidates.append(
+            {
+                "lane": "Maintenance",
+                "title": "Restore ontology research search-provider credentials",
+                "why_now": "Ontology business-domain research has no active Exa, Parallel, Tavily, or Firecrawl coverage in the Hermes runtime.",
             }
         )
 
@@ -1108,6 +1483,14 @@ def build_self_improvement_context(
 
     differentiation = reliability.get("differentiation_candidate")
     capability_candidates = []
+    if available_provider_count == 1:
+        capability_candidates.append(
+            {
+                "lane": "Capability",
+                "title": "Upgrade ontology research to multi-provider search coverage",
+                "why_now": "Hermes currently has only one search provider available for ontology domain research, which weakens evidence quality and novelty detection.",
+            }
+        )
     if isinstance(differentiation, dict) and differentiation.get("vertical"):
         capability_candidates.append(
             {
@@ -1120,6 +1503,16 @@ def build_self_improvement_context(
                 ),
             }
         )
+    for target in study_context.get("upgrade_targets", [])[:3]:
+        capability_candidates.append(
+            {
+                "lane": "Capability",
+                "title": target.get("title"),
+                "why_now": target.get("why_now"),
+                "change_surface": target.get("change_surface"),
+                "backing_issue": target.get("issue_id"),
+            }
+        )
 
     return {
         "mode": "self_improvement",
@@ -1127,6 +1520,8 @@ def build_self_improvement_context(
         "gaps": gaps,
         "agenda": agenda_summaries,
         "retrospectives": retrospective_summaries,
+        "textbook_study": study_context,
+        "research_provider_policy": provider_status,
         "candidates": {
             "maintenance": maintenance_candidates,
             "growth": growth_candidates,

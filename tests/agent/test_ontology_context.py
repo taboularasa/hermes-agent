@@ -1,11 +1,15 @@
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from unittest.mock import patch
 
 import yaml
 
 from agent.ontology_context import (
     build_consulting_context,
+    build_ontology_engineering_context,
     build_self_improvement_context,
     build_sales_context,
     load_ontology_snapshot,
@@ -163,6 +167,73 @@ def _seed_ontology_repo(tmp_path: Path, *, now: datetime) -> Path:
             ],
         },
     )
+    _write_yaml(
+        repo / "docs" / "issues" / "ONT-009-ontology-engineering-textbook-study-program.md",
+        {
+            "id": "ONT-009",
+            "title": "Run continuous ontology-engineering textbook study program",
+            "status": "in_progress",
+            "owner": "Hermes",
+            "type": "ops/research/no-code",
+        },
+    )
+    _write_yaml(
+        repo / "docs" / "issues" / "ONT-004-add-micro-level-ontology-authoring-contract.md",
+        {
+            "id": "ONT-004",
+            "title": "Add micro-level ontology authoring contract",
+            "status": "done",
+            "owner": "Hermes",
+            "type": "code",
+        },
+    )
+    _write_yaml(
+        repo / "docs" / "issues" / "ONT-010-add-competency-question-authoring-templates.md",
+        {
+            "id": "ONT-010",
+            "title": "Add competency-question authoring templates",
+            "status": "in_progress",
+            "owner": "Hermes",
+            "type": "code",
+        },
+    )
+    _write_yaml(
+        repo / "docs" / "issues" / "ONT-017-add-foundational-ontology-contract.md",
+        {
+            "id": "ONT-017",
+            "title": "Add foundational ontology contract",
+            "status": "todo",
+            "owner": "Hermes",
+            "type": "code",
+        },
+    )
+    (repo / "docs" / "plans").mkdir(parents=True, exist_ok=True)
+    (repo / "docs" / "plans" / "2026-03-31-keet-ontology-engineering-progress-tracker.md").write_text(
+        "# Keet Ontology Engineering Progress Tracker\n\n"
+        "## Progress summary\n"
+        "- chapters_completed: 5 / 11\n"
+        "- current_chapter: 6 — Top-down Ontology Development\n"
+        "- current_subsection: 6.1.2 — Foundational ontology choices\n"
+        "- latest_backlog_items: ONT-004, ONT-010, ONT-017\n"
+        "- total_book_progress_note: Hermes translated textbook lessons into ontology backlog items and needs runtime support for those capabilities.\n\n"
+        "## Study log\n"
+        "### 2026-04-11T16:54:22Z\n"
+        "- Key lesson: Hermes should reason explicitly about micro-level ontology authoring governance and foundational ontology posture.\n"
+        "- Repo evidence: ONT-004 and ONT-017 capture the need for explicit modeling posture and foundational alignment.\n"
+        "- Backlog intake: reinforced ONT-004, ONT-010, and ONT-017 as durable ontology-engineering capabilities.\n"
+        "- Immediate rollover: continue Chapter 6 with foundational ontology comparison.\n",
+        encoding="utf-8",
+    )
+    (repo / "docs" / "plans" / "2026-03-31-keet-ontology-engineering-heartbeat.md").write_text(
+        "- timestamp: 2026-04-11T16:54:22Z\n"
+        "- cadence: every 10 minutes\n"
+        "- current_chapter: 6 — Top-down Ontology Development\n"
+        "- current_subsection: 6.1.2 — Foundational ontology choices\n"
+        "- status: in_progress\n"
+        "- last_meaningful_finding: Hermes needs explicit foundational ontology posture and micro-level authoring governance.\n"
+        "- next_action: Continue Chapter 6 and map findings into runtime context.\n",
+        encoding="utf-8",
+    )
     return repo
 
 
@@ -220,3 +291,64 @@ def test_self_improvement_context_surfaces_conversion_bottleneck_without_stalene
     assert reliability["conversion_bottleneck"]["active"] is True
     growth_titles = [item["title"] for item in context["candidates"]["growth"]]
     assert any("proposals" in title.lower() for title in growth_titles)
+    assert context["textbook_study"]["progress_summary"]["current_subsection"] == "6.1.2 — Foundational ontology choices"
+
+
+def test_ontology_engineering_context_reads_textbook_study_and_provider_policy(tmp_path):
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
+    repo = _seed_ontology_repo(tmp_path, now=now)
+
+    with patch.dict(os.environ, {"EXA_API_KEY": "exa-test", "TAVILY_API_KEY": "tvly-test"}, clear=False):
+        context = build_ontology_engineering_context(repo, limit=4)
+
+    assert context["study"]["governing_issue"]["id"] == "ONT-009"
+    assert context["study"]["progress_summary"]["latest_backlog_items"] == ["ONT-004", "ONT-010", "ONT-017"]
+    assert context["hermes_upgrade_targets"]
+    assert any(target["issue_id"] == "ONT-004" for target in context["hermes_upgrade_targets"])
+    assert context["research_protocol"]["provider_status"]["available_providers"] == ["exa", "tavily"]
+
+
+def test_ontology_engineering_context_falls_back_to_issue_metadata_when_yaml_parse_fails(tmp_path):
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
+    repo = _seed_ontology_repo(tmp_path, now=now)
+    (repo / "docs" / "issues" / "ONT-009-ontology-engineering-textbook-study-program.md").write_text(
+        "id: ONT-009\n"
+        "title: Run continuous ontology-engineering textbook study program\n"
+        "status: in_progress\n"
+        "type: ops/research/no-code\n"
+        "owner: Hermes\n"
+        "broken_yaml: [unterminated\n\n"
+        "## Notes\n"
+        "This file should still be discoverable from metadata.\n",
+        encoding="utf-8",
+    )
+    (repo / "docs" / "issues" / "ONT-010-add-competency-question-authoring-templates.md").write_text(
+        "id: ONT-010\n"
+        "title: Add competency-question authoring templates\n"
+        "status: in_progress\n"
+        "type: code\n"
+        "owner: Hermes\n"
+        "broken_yaml: [unterminated\n\n"
+        "## Notes\n"
+        "This file should still seed a Hermes upgrade target.\n",
+        encoding="utf-8",
+    )
+
+    context = build_ontology_engineering_context(repo, limit=4)
+
+    assert context["study"]["governing_issue"]["id"] == "ONT-009"
+    assert any(target["issue_id"] == "ONT-010" for target in context["hermes_upgrade_targets"])
+
+
+def test_consulting_context_includes_multi_provider_research_protocol(tmp_path):
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
+    repo = _seed_ontology_repo(tmp_path, now=now)
+
+    with patch.dict(os.environ, {"EXA_API_KEY": "exa-test", "PARALLEL_API_KEY": "par-test"}, clear=False):
+        context = build_consulting_context(
+            query="HVAC dispatch permit inspection scheduling for field technicians",
+            repo_root=repo,
+        )
+
+    assert context["research_protocol"]["tool"] == "web_search_matrix"
+    assert context["research_protocol"]["provider_status"]["summary"]["available_provider_count"] == 2

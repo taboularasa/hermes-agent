@@ -8,6 +8,7 @@ Coverage:
   check_web_api_key() — unified availability check.
 """
 
+import json
 import os
 import pytest
 from unittest.mock import patch, MagicMock
@@ -130,7 +131,7 @@ class TestBackendSelection:
     setups.
     """
 
-    _ENV_KEYS = ("PARALLEL_API_KEY", "FIRECRAWL_API_KEY", "FIRECRAWL_API_URL", "TAVILY_API_KEY")
+    _ENV_KEYS = ("EXA_API_KEY", "PARALLEL_API_KEY", "FIRECRAWL_API_KEY", "FIRECRAWL_API_URL", "TAVILY_API_KEY")
 
     def setup_method(self):
         for key in self._ENV_KEYS:
@@ -279,7 +280,7 @@ class TestParallelClientConfig:
 class TestCheckWebApiKey:
     """Test suite for check_web_api_key() unified availability check."""
 
-    _ENV_KEYS = ("PARALLEL_API_KEY", "FIRECRAWL_API_KEY", "FIRECRAWL_API_URL", "TAVILY_API_KEY")
+    _ENV_KEYS = ("EXA_API_KEY", "PARALLEL_API_KEY", "FIRECRAWL_API_KEY", "FIRECRAWL_API_URL", "TAVILY_API_KEY")
 
     def setup_method(self):
         for key in self._ENV_KEYS:
@@ -291,6 +292,11 @@ class TestCheckWebApiKey:
 
     def test_parallel_key_only(self):
         with patch.dict(os.environ, {"PARALLEL_API_KEY": "test-key"}):
+            from tools.web_tools import check_web_api_key
+            assert check_web_api_key() is True
+
+    def test_exa_key_only(self):
+        with patch.dict(os.environ, {"EXA_API_KEY": "exa-test"}):
             from tools.web_tools import check_web_api_key
             assert check_web_api_key() is True
 
@@ -329,3 +335,65 @@ class TestCheckWebApiKey:
         }):
             from tools.web_tools import check_web_api_key
             assert check_web_api_key() is True
+
+
+class TestWebProviderStatus:
+    _ENV_KEYS = ("EXA_API_KEY", "PARALLEL_API_KEY", "FIRECRAWL_API_KEY", "FIRECRAWL_API_URL", "TAVILY_API_KEY")
+
+    def setup_method(self):
+        for key in self._ENV_KEYS:
+            os.environ.pop(key, None)
+
+    def teardown_method(self):
+        for key in self._ENV_KEYS:
+            os.environ.pop(key, None)
+
+    def test_reports_available_and_missing_providers(self):
+        with patch.dict(os.environ, {"EXA_API_KEY": "exa-test", "TAVILY_API_KEY": "tvly-test"}):
+            from tools.web_tools import get_web_provider_status
+            status = get_web_provider_status()
+            assert status["available_providers"] == ["exa", "tavily"]
+            assert "parallel" in status["missing_providers"]
+            assert status["providers"]["exa"]["available"] is True
+
+
+class TestWebSearchMatrix:
+    _ENV_KEYS = ("EXA_API_KEY", "PARALLEL_API_KEY", "FIRECRAWL_API_KEY", "FIRECRAWL_API_URL", "TAVILY_API_KEY")
+
+    def setup_method(self):
+        for key in self._ENV_KEYS:
+            os.environ.pop(key, None)
+
+    def teardown_method(self):
+        for key in self._ENV_KEYS:
+            os.environ.pop(key, None)
+
+    def test_fuses_results_across_available_providers(self):
+        exa_payload = {
+            "success": True,
+            "data": {
+                "web": [
+                    {"url": "https://example.com/dental", "title": "Dental Ops", "description": "Exa result", "position": 1},
+                    {"url": "https://example.com/shared", "title": "Shared", "description": "Shared Exa", "position": 2},
+                ]
+            },
+        }
+        tavily_payload = {
+            "success": True,
+            "data": {
+                "web": [
+                    {"url": "https://example.com/shared/", "title": "Shared", "description": "Shared Tavily", "position": 1},
+                ]
+            },
+        }
+        with patch.dict(os.environ, {"EXA_API_KEY": "exa-test", "TAVILY_API_KEY": "tvly-test"}), \
+             patch("tools.web_tools._exa_search", return_value=exa_payload), \
+             patch("tools.web_tools._tavily_search", return_value=tavily_payload), \
+             patch("tools.interrupt.is_interrupted", return_value=False):
+            from tools.web_tools import web_search_matrix_tool
+            payload = json.loads(web_search_matrix_tool("dental practice operations", limit=3))
+
+        assert payload["success"] is True
+        assert payload["providers_used"] == ["exa", "tavily"]
+        assert payload["data"]["web"][0]["provider_hits"] == 2
+        assert payload["data"]["web"][0]["url"] in {"https://example.com/shared", "https://example.com/shared/"}
