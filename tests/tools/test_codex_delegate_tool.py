@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from tools import codex_delegate_tool
 
@@ -326,3 +327,165 @@ def test_codex_delegate_status_normalizes_unknown_run_with_missing_process(monke
     assert saved["status"] == "failed"
     assert saved["stale_reason"] == "process_missing"
     assert saved["completed_at"] > 0
+
+
+def test_codex_delegate_list_separates_probe_runs(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_git_repo(repo)
+
+    fake_registry = _FakeProcessRegistry()
+    fake_registry.sessions["proc_real"] = _FakeSession("proc_real", 9100, output_buffer="", exited=False)
+    monkeypatch.setattr(codex_delegate_tool, "process_registry", fake_registry)
+    monkeypatch.setattr(codex_delegate_tool.shutil, "which", lambda _name: "/usr/bin/codex")
+
+    def fake_kill(pid, sig):
+        if pid in {9002, 9100}:
+            return None
+        raise ProcessLookupError
+
+    monkeypatch.setattr(codex_delegate_tool.os, "kill", fake_kill)
+
+    now = codex_delegate_tool._utc_now()
+    probe_record = {
+        "run_id": "codex_probe",
+        "status": "running",
+        "phase": "probe",
+        "workdir": str(repo),
+        "task_id": "sess-1",
+        "process_session_id": "proc_probe",
+        "pid": 9002,
+        "started_at": now - codex_delegate_tool._PROBE_TTL_SECONDS - 5,
+        "record_path": str(repo / ".git" / "hermes-codex" / "codex_probe.json"),
+        "latest_path": str(repo / ".git" / "hermes-codex" / "latest.json"),
+        "last_message_path": str(repo / ".git" / "hermes-codex" / "codex_probe.last-message.txt"),
+    }
+    real_record = {
+        "run_id": "codex_real",
+        "status": "running",
+        "phase": "implement",
+        "workdir": str(repo),
+        "task_id": "sess-1",
+        "process_session_id": "proc_real",
+        "pid": 9100,
+        "started_at": now,
+        "record_path": str(repo / ".git" / "hermes-codex" / "codex_real.json"),
+        "latest_path": str(repo / ".git" / "hermes-codex" / "latest.json"),
+        "last_message_path": str(repo / ".git" / "hermes-codex" / "codex_real.last-message.txt"),
+    }
+    codex_delegate_tool._persist_record(probe_record)
+    codex_delegate_tool._persist_record(real_record)
+
+    result = json.loads(codex_delegate_tool.codex_delegate(action="list", limit=10))
+
+    assert len(result["runs"]) == 1
+    assert result["runs"][0]["run_id"] == "codex_real"
+    assert result["runs"][0]["is_probe"] is False
+
+    assert len(result["probe_runs"]) == 1
+    assert result["probe_runs"][0]["run_id"] == "codex_probe"
+    assert result["probe_runs"][0]["is_probe"] is True
+    assert result["probe_runs"][0]["status"] == "failed"
+
+    result_with_probe = json.loads(codex_delegate_tool.codex_delegate(action="list", limit=10, include_probes=True))
+    run_ids = {record["run_id"] for record in result_with_probe["runs"]}
+    assert {"codex_real", "codex_probe"} <= run_ids
+
+
+def test_codex_delegate_start_binds_ctx_worktree_for_repo_target(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_git_repo(repo)
+    (repo / "venv" / "bin").mkdir(parents=True)
+    (repo / "venv" / "bin" / "python").write_text("", encoding="utf-8")
+    nested = repo / "nested"
+    nested.mkdir()
+
+    worktree = tmp_path / "ctx-worktree"
+    (worktree / "nested").mkdir(parents=True)
+    _write_git_repo(worktree)
+
+    fake_registry = _FakeProcessRegistry()
+    state = {"binding": None, "bind_calls": []}
+    binding = SimpleNamespace(
+        active=True,
+        reason="ctx task bound",
+        session_id="cron_task_1",
+        platform="cron",
+        repo_root=str(repo),
+        workspace_root=str(repo),
+        task_id="ctx-task-1",
+        worktree_id="wt-1",
+        worktree_path=str(worktree),
+        ctx_session_id="ctx-session-1",
+    )
+
+    monkeypatch.setattr(codex_delegate_tool, "process_registry", fake_registry)
+    monkeypatch.setattr(codex_delegate_tool.shutil, "which", lambda _name: "/usr/bin/codex")
+    monkeypatch.setattr(
+        codex_delegate_tool,
+        "_resolve_git_dir",
+        lambda workdir: worktree / ".git" if str(Path(workdir).resolve()).startswith(str(worktree)) else repo / ".git",
+    )
+    monkeypatch.setattr(codex_delegate_tool, "_resolve_repo_root", lambda _workdir: str(repo))
+    monkeypatch.setattr(codex_delegate_tool, "load_config", lambda: {"ctx": {"enabled": True}, "codex_delegate": {}})
+    monkeypatch.setattr(codex_delegate_tool, "describe_existing_ctx_binding", lambda _task_id: state["binding"])
+
+    def fake_bind(**kwargs):
+        state["bind_calls"].append(kwargs)
+        state["binding"] = binding
+        return binding
+
+    monkeypatch.setattr(codex_delegate_tool, "maybe_bind_ctx_session", fake_bind)
+
+    result = json.loads(
+        codex_delegate_tool.codex_delegate(
+            action="start",
+            prompt="Implement the next slice.",
+            phase="implement",
+            task_id="cron_task_1",
+            workdir=str(nested),
+        )
+    )
+
+    assert result["status"] == "running"
+    assert state["bind_calls"][0]["repo_root"] == str(repo)
+    assert fake_registry.spawn_calls[0]["cwd"] == str(worktree / "nested")
+    assert fake_registry.spawn_calls[0]["env_vars"]["VIRTUAL_ENV"] == str(repo / "venv")
+    assert result["ctx_task_id"] == "ctx-task-1"
+    assert result["ctx_worktree_id"] == "wt-1"
+
+
+def test_codex_delegate_start_refuses_shared_repo_when_ctx_binding_missing(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_git_repo(repo)
+
+    fake_registry = _FakeProcessRegistry()
+    monkeypatch.setattr(codex_delegate_tool, "process_registry", fake_registry)
+    monkeypatch.setattr(codex_delegate_tool.shutil, "which", lambda _name: "/usr/bin/codex")
+    monkeypatch.setattr(codex_delegate_tool, "_resolve_git_dir", lambda workdir: Path(workdir) / ".git")
+    monkeypatch.setattr(codex_delegate_tool, "_resolve_repo_root", lambda _workdir: str(repo))
+    monkeypatch.setattr(codex_delegate_tool, "load_config", lambda: {"ctx": {"enabled": True}, "codex_delegate": {}})
+    monkeypatch.setattr(codex_delegate_tool, "describe_existing_ctx_binding", lambda _task_id: None)
+    monkeypatch.setattr(
+        codex_delegate_tool,
+        "maybe_bind_ctx_session",
+        lambda **_kwargs: SimpleNamespace(active=False, reason="no matching ctx workspace", worktree_path=None),
+    )
+
+    result = json.loads(
+        codex_delegate_tool.codex_delegate(
+            action="start",
+            prompt="Implement the next slice.",
+            phase="implement",
+            task_id="cron_task_2",
+            workdir=str(repo),
+        )
+    )
+
+    assert "ctx-native Codex delegation requires an active ctx worktree" in result["error"]
+    assert fake_registry.spawn_calls == []

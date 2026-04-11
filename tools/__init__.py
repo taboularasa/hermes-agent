@@ -165,6 +165,11 @@ from .linear_issue_tool import (
     check_linear_issue_requirements,
     LINEAR_ISSUE_SCHEMA,
 )
+from .self_improvement_tool import (
+    self_improvement_evidence_gate,
+    evaluate_self_improvement_evidence,
+    SELF_IMPROVEMENT_EVIDENCE_SCHEMA,
+)
 
 # File tools have no external requirements - they use the terminal backend
 def check_file_requirements():
@@ -275,6 +280,9 @@ __all__ = [
     'linear_issue',
     'check_linear_issue_requirements',
     'LINEAR_ISSUE_SCHEMA',
+    'self_improvement_evidence_gate',
+    'evaluate_self_improvement_evidence',
+    'SELF_IMPROVEMENT_EVIDENCE_SCHEMA',
     # Subagent delegation
     'delegate_task',
     'check_delegate_requirements',

@@ -2,6 +2,7 @@ import json
 
 from hermes_cli import ctx_runtime
 from hermes_cli.config import load_config, save_config
+from hermes_state import SessionDB
 from tools.terminal_tool import clear_task_env_overrides, get_task_cwd
 
 
@@ -54,6 +55,16 @@ def _write_ctx_config(tmp_path, **overrides):
     )
     config["ctx"].update(overrides)
     save_config(config)
+
+
+def _write_binding_record(tmp_path, session_id: str, payload: dict):
+    record_path = tmp_path / "ctx" / "session_bindings.json"
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_text(
+        json.dumps({"version": 1, "sessions": {session_id: payload}}),
+        encoding="utf-8",
+    )
+    return record_path
 
 
 def test_is_ctx_candidate_requires_coding_toolsets(monkeypatch, tmp_path):
@@ -208,3 +219,121 @@ def test_guess_repo_root_prefers_process_cwd_over_terminal_default(monkeypatch, 
 
     resolved = ctx_runtime._guess_repo_root(None)
     assert resolved == str(repo_root)
+
+
+def test_normalize_ctx_bindings_deactivates_ended_cron_session(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    worktree = tmp_path / "ctx-data" / "worktrees" / "ws-1" / "wt-1"
+    worktree.mkdir(parents=True, exist_ok=True)
+    session_id = "cron_job-1_20260411_010203"
+    _write_binding_record(
+        tmp_path,
+        session_id,
+        {
+            "active": True,
+            "reason": "ctx task bound",
+            "session_id": session_id,
+            "platform": "cron",
+            "workspace_id": "ws-1",
+            "task_id": "task-1",
+            "worktree_id": "wt-1",
+            "worktree_path": str(worktree),
+            "source": "ctx-daemon",
+        },
+    )
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session(session_id, source="cron")
+        db.end_session(session_id, "cron_complete")
+    finally:
+        db.close()
+
+    retired = ctx_runtime.normalize_ctx_bindings()
+    record = json.loads((tmp_path / "ctx" / "session_bindings.json").read_text(encoding="utf-8"))
+
+    assert retired == {
+        session_id: "ctx binding retired: session ended (cron_complete)"
+    }
+    assert record["sessions"][session_id]["active"] is False
+    assert record["sessions"][session_id]["reason"] == "ctx binding retired: session ended (cron_complete)"
+
+
+def test_normalize_ctx_bindings_deactivates_missing_worktree_and_clears_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("TERMINAL_CWD", raising=False)
+
+    session_id = "sess-missing-worktree"
+    missing_worktree = tmp_path / "ctx-data" / "worktrees" / "ws-1" / "wt-missing"
+    _write_binding_record(
+        tmp_path,
+        session_id,
+        {
+            "active": True,
+            "reason": "ctx task bound",
+            "session_id": session_id,
+            "platform": "cli",
+            "workspace_id": "ws-1",
+            "task_id": "task-1",
+            "worktree_id": "wt-missing",
+            "worktree_path": str(missing_worktree),
+            "source": "ctx-daemon",
+        },
+    )
+    clear_task_env_overrides(session_id)
+    from tools.terminal_tool import register_task_env_overrides
+
+    register_task_env_overrides(session_id, {"cwd": str(missing_worktree)})
+
+    retired = ctx_runtime.normalize_ctx_bindings(session_id=session_id)
+    record = json.loads((tmp_path / "ctx" / "session_bindings.json").read_text(encoding="utf-8"))
+
+    assert retired == {session_id: "ctx binding retired: worktree missing"}
+    assert record["sessions"][session_id]["active"] is False
+    assert record["sessions"][session_id]["reason"] == "ctx binding retired: worktree missing"
+    assert get_task_cwd(session_id, default="fallback") == "fallback"
+
+
+def test_maybe_bind_ctx_session_skips_inactive_persisted_binding(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _write_ctx_config(tmp_path)
+
+    stale_worktree = tmp_path / "ctx-data" / "worktrees" / "ws-1" / "wt-stale"
+    stale_worktree.mkdir(parents=True, exist_ok=True)
+    _write_binding_record(
+        tmp_path,
+        "sess-1",
+        {
+            "active": False,
+            "reason": "ctx binding retired: cron job finished",
+            "session_id": "sess-1",
+            "platform": "cli",
+            "workspace_id": "ws-1",
+            "task_id": "task-stale",
+            "worktree_id": "wt-stale",
+            "worktree_path": str(stale_worktree),
+            "source": "ctx-daemon",
+        },
+    )
+
+    fake_client = _FakeCtxClient()
+    monkeypatch.setattr(ctx_runtime, "_CtxDaemonClient", lambda *_args, **_kwargs: fake_client)
+    monkeypatch.setattr(ctx_runtime, "_find_auth_material", lambda _cfg: ("http://ctx.local", "token"))
+    monkeypatch.setattr(ctx_runtime, "_guess_repo_root", lambda _candidate: "/tmp/project")
+
+    binding = ctx_runtime.maybe_bind_ctx_session(
+        session_id="sess-1",
+        enabled_toolsets=["terminal"],
+        platform="cli",
+        prompt="Fix the failing tests again",
+    )
+
+    try:
+        assert binding.active
+        assert binding.task_id == "task-1"
+        assert fake_client.created_tasks == [
+            ("ws-1", "Fix the failing tests again", "Fix the failing tests again")
+        ]
+    finally:
+        clear_task_env_overrides("sess-1")
