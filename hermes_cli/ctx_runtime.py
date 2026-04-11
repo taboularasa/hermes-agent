@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 _BINDINGS_LOCK = threading.Lock()
 _DEFAULT_DAEMON_URL = "http://127.0.0.1:19876"
 _DEFAULT_DATA_DIR = "~/.ctx-data"
+_DEFAULT_CTX_BINDING_STALE_HOURS = 12
 
 
 @dataclass
@@ -94,6 +95,28 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _parse_timestamp(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value))
+        except Exception:
+            return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _ctx_binding_age_hours(record: Dict[str, Any], *, now: datetime) -> Optional[float]:
+    ts = _parse_timestamp(record.get("updated_at") or record.get("created_at"))
+    if not ts:
+        return None
+    return (now - ts).total_seconds() / 3600
+
+
 def _ctx_bindings_path() -> Path:
     return get_hermes_home() / "ctx" / "session_bindings.json"
 
@@ -155,6 +178,8 @@ def _ctx_binding_retirement_reason(
     record: Dict[str, Any],
     *,
     session_db,
+    now: Optional[datetime] = None,
+    stale_hours: int = _DEFAULT_CTX_BINDING_STALE_HOURS,
 ) -> Optional[str]:
     if not bool(record.get("active")):
         return None
@@ -164,22 +189,21 @@ def _ctx_binding_retirement_reason(
         return "ctx binding retired: worktree missing"
 
     session_id = str(record.get("session_id") or "").strip()
-    if not session_db or not session_id:
-        return None
+    if session_db and session_id:
+        try:
+            session = session_db.get_session(session_id)
+        except Exception:
+            logger.debug("Failed to read Hermes session state for ctx session %s", session_id, exc_info=True)
+            session = None
+        if isinstance(session, dict) and session.get("ended_at") is not None:
+            end_reason = str(session.get("end_reason") or "session ended").strip()
+            return f"ctx binding retired: session ended ({end_reason})"
 
-    try:
-        session = session_db.get_session(session_id)
-    except Exception:
-        logger.debug("Failed to read Hermes session state for ctx session %s", session_id, exc_info=True)
-        return None
-    if not isinstance(session, dict):
-        return None
-
-    if session.get("ended_at") is None:
-        return None
-
-    end_reason = str(session.get("end_reason") or "session ended").strip()
-    return f"ctx binding retired: session ended ({end_reason})"
+    now = now or datetime.now(timezone.utc)
+    age_hours = _ctx_binding_age_hours(record, now=now)
+    if age_hours is not None and age_hours >= stale_hours:
+        return f"ctx binding retired: stale active binding (>{stale_hours}h)"
+    return None
 
 
 def _clear_binding_overrides(session_ids: Iterable[str]) -> None:
@@ -205,6 +229,7 @@ def normalize_ctx_bindings(*, session_id: Optional[str] = None) -> Dict[str, str
     retired: Dict[str, str] = {}
     cleared_overrides: list[str] = []
     session_db = _open_session_db()
+    now = datetime.now(timezone.utc)
     try:
         with _BINDINGS_LOCK:
             data = _load_bindings()
@@ -219,7 +244,11 @@ def normalize_ctx_bindings(*, session_id: Optional[str] = None) -> Dict[str, str
                 record = sessions.get(current_session_id)
                 if not isinstance(record, dict):
                     continue
-                reason = _ctx_binding_retirement_reason(record, session_db=session_db)
+                reason = _ctx_binding_retirement_reason(
+                    record,
+                    session_db=session_db,
+                    now=now,
+                )
                 if not reason:
                     continue
                 if _set_binding_record_inactive(record, reason=reason):

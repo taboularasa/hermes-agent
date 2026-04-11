@@ -48,6 +48,8 @@ evidence_sources:
   - journal_entries
   - codex_runs
   - ctx_bindings
+  - ontology_intelligence
+  - ontology_source_materials
   - ci_and_logs
   - linear_history
   - slack_or_client_signals

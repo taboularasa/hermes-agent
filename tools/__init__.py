@@ -165,6 +165,11 @@ from .linear_issue_tool import (
     check_linear_issue_requirements,
     LINEAR_ISSUE_SCHEMA,
 )
+from .ontology_context_tool import (
+    ontology_context,
+    check_ontology_context_requirements,
+    ONTOLOGY_CONTEXT_SCHEMA,
+)
 from .self_improvement_tool import (
     self_improvement_evidence_gate,
     evaluate_self_improvement_evidence,
@@ -280,6 +285,9 @@ __all__ = [
     'linear_issue',
     'check_linear_issue_requirements',
     'LINEAR_ISSUE_SCHEMA',
+    'ontology_context',
+    'check_ontology_context_requirements',
+    'ONTOLOGY_CONTEXT_SCHEMA',
     'self_improvement_evidence_gate',
     'evaluate_self_improvement_evidence',
     'SELF_IMPROVEMENT_EVIDENCE_SCHEMA',

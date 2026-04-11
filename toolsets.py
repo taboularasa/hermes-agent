@@ -49,13 +49,13 @@ _HERMES_CORE_TOOLS = [
     # Text-to-speech
     "text_to_speech",
     # Planning & memory
-    "todo", "memory",
+    "todo", "memory", "ontology_context",
     # Session history search
     "session_search",
     # Clarifying questions
     "clarify",
     # Code execution + delegation
-    "execute_code", "delegate_task", "codex_delegate", "linear_issue", "self_improvement_evidence_gate",
+    "execute_code", "delegate_task", "codex_delegate", "linear_issue", "ontology_context", "self_improvement_evidence_gate",
     # Cronjob management
     "cronjob",
     # Cross-platform messaging (gated on gateway running via check_fn)
@@ -171,6 +171,12 @@ TOOLSETS = {
         "tools": ["memory"],
         "includes": []
     },
+
+    "ontology": {
+        "description": "Ontology context packs from the SMB ontology platform (snapshot, readiness, provenance)",
+        "tools": ["ontology_context"],
+        "includes": []
+    },
     
     "session_search": {
         "description": "Search and recall past conversations with summarization",
@@ -208,9 +214,15 @@ TOOLSETS = {
         "includes": []
     },
 
+    "ontology": {
+        "description": "Read Hadto ontology platform artifacts into compact reasoning context",
+        "tools": ["ontology_context"],
+        "includes": []
+    },
+
     "self_improvement": {
         "description": "Evaluate evidence freshness for the Hermes self-improvement loop",
-        "tools": ["self_improvement_evidence_gate"],
+        "tools": ["self_improvement_evidence_gate", "ontology_context"],
         "includes": []
     },
 
@@ -262,7 +274,7 @@ TOOLSETS = {
             "browser_vision", "browser_console",
             "todo", "memory",
             "session_search",
-            "execute_code", "delegate_task",
+            "execute_code", "delegate_task", "ontology_context",
         ],
         "includes": []
     },
@@ -292,7 +304,7 @@ TOOLSETS = {
             # Session history search
             "session_search",
             # Code execution + delegation
-            "execute_code", "delegate_task",
+            "execute_code", "delegate_task", "ontology_context",
             # Cronjob management
             "cronjob",
             # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
