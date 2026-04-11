@@ -276,6 +276,50 @@ def _find_active_record_by_external_key(external_key: str, workdir: str) -> Opti
     return None
 
 
+def _pid_is_running(pid: Any) -> bool:
+    try:
+        normalized_pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if normalized_pid <= 0:
+        return False
+    try:
+        os.kill(normalized_pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _infer_terminal_state(record: Dict[str, Any]) -> tuple[str, Optional[int]]:
+    exit_code = record.get("exit_code")
+    try:
+        normalized_exit_code = int(exit_code) if exit_code is not None else None
+    except (TypeError, ValueError):
+        normalized_exit_code = None
+
+    if normalized_exit_code == 0:
+        return "completed", 0
+    if normalized_exit_code is not None:
+        return "failed", normalized_exit_code
+
+    if str(record.get("final_message") or "").strip():
+        return "completed", 0
+    if int(record.get("completed_turns") or 0) > 0 and str(record.get("last_agent_message") or "").strip():
+        return "completed", 0
+    return "failed", None
+
+
+def _normalize_stale_record(record: Dict[str, Any], *, reason: str) -> None:
+    status, exit_code = _infer_terminal_state(record)
+    record["status"] = status
+    if exit_code is not None:
+        record["exit_code"] = exit_code
+    record["completed_at"] = record.get("completed_at") or _utc_now()
+    record["stale_reason"] = reason
+
+
 def _refresh_record(record: Dict[str, Any]) -> Dict[str, Any]:
     session_id = str(record.get("process_session_id") or "")
     session = process_registry.get(session_id) if session_id else None
@@ -291,6 +335,10 @@ def _refresh_record(record: Dict[str, Any]) -> Dict[str, Any]:
     record["recent_event_types"] = parsed["recent_event_types"]
     record["completed_turns"] = parsed["completed_turns"]
 
+    final_message = _read_text(record.get("last_message_path"))
+    if final_message:
+        record["final_message"] = final_message.strip()
+
     if session:
         record["pid"] = session.pid
         record["process_started_at"] = session.started_at
@@ -299,15 +347,16 @@ def _refresh_record(record: Dict[str, Any]) -> Dict[str, Any]:
             record["status"] = "completed" if session.exit_code == 0 else "failed"
             record["exit_code"] = session.exit_code
             record["completed_at"] = record.get("completed_at") or _utc_now()
+        elif not _pid_is_running(session.pid):
+            _normalize_stale_record(record, reason="process_missing")
         else:
             record["status"] = "running"
             record["exit_code"] = None
-    elif record.get("status") == "running":
-        record["status"] = "unknown"
-
-    final_message = _read_text(record.get("last_message_path"))
-    if final_message:
-        record["final_message"] = final_message.strip()
+    elif record.get("status") in {"running", "unknown"}:
+        if _pid_is_running(record.get("pid")):
+            record["status"] = "unknown"
+        else:
+            _normalize_stale_record(record, reason="process_missing")
     _persist_record(record)
     return record
 
