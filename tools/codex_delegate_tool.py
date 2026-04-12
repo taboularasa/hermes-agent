@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -132,12 +133,14 @@ def _ctx_enabled() -> bool:
     return isinstance(raw, dict) and bool(raw.get("enabled", False))
 
 
-def _runs_path() -> Path:
+def _runs_path(runs_path: Optional[Path] = None) -> Path:
+    if runs_path is not None:
+        return Path(runs_path).expanduser()
     return get_hermes_home() / "codex" / "runs.json"
 
 
-def _load_runs() -> Dict[str, Any]:
-    path = _runs_path()
+def _load_runs(runs_path: Optional[Path] = None) -> Dict[str, Any]:
+    path = _runs_path(runs_path)
     if not path.exists():
         return {"version": 1, "runs": {}}
     try:
@@ -154,8 +157,8 @@ def _load_runs() -> Dict[str, Any]:
     return data
 
 
-def _save_runs(data: Dict[str, Any]) -> None:
-    atomic_json_write(_runs_path(), data)
+def _save_runs(data: Dict[str, Any], runs_path: Optional[Path] = None) -> None:
+    atomic_json_write(_runs_path(runs_path), data)
 
 
 def _normalize_path(path: str) -> str:
@@ -223,6 +226,17 @@ def _artifact_paths(workdir: str, run_id: str) -> Dict[str, str]:
 
 def _utc_now() -> float:
     return time.time()
+
+
+def _coerce_now_epoch(now: Optional[Any] = None) -> float:
+    if now is None:
+        return _utc_now()
+    if isinstance(now, datetime):
+        return now.timestamp()
+    try:
+        return float(now)
+    except (TypeError, ValueError):
+        return _utc_now()
 
 
 def _infer_ctx_platform(task_id: str, binding: Optional[Any] = None) -> str:
@@ -405,11 +419,11 @@ def _parse_codex_events(text: str) -> Dict[str, Any]:
     }
 
 
-def _persist_record(record: Dict[str, Any]) -> None:
-    data = _load_runs()
+def _persist_record(record: Dict[str, Any], runs_path: Optional[Path] = None) -> None:
+    data = _load_runs(runs_path)
     runs = data.setdefault("runs", {})
     runs[record["run_id"]] = record
-    _save_runs(data)
+    _save_runs(data, runs_path)
 
     record_path = record.get("record_path")
     latest_path = record.get("latest_path")
@@ -419,19 +433,23 @@ def _persist_record(record: Dict[str, Any]) -> None:
         atomic_json_write(latest_path, record)
 
 
-def _load_record(run_id: str) -> Dict[str, Any]:
-    data = _load_runs()
+def _load_record(run_id: str, runs_path: Optional[Path] = None) -> Dict[str, Any]:
+    data = _load_runs(runs_path)
     record = data.get("runs", {}).get(run_id)
     if not isinstance(record, dict):
         raise RuntimeError(f"No Codex supervisor run found for {run_id}")
     return dict(record)
 
 
-def _find_active_record_by_external_key(external_key: str, workdir: str) -> Optional[Dict[str, Any]]:
+def _find_active_record_by_external_key(
+    external_key: str,
+    workdir: str,
+    runs_path: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
     if not external_key:
         return None
     normalized_workdir = _normalize_path(workdir)
-    data = _load_runs()
+    data = _load_runs(runs_path)
     records = list(data.get("runs", {}).values())
     records.sort(key=lambda item: item.get("started_at", 0), reverse=True)
     for raw_record in records:
@@ -441,7 +459,7 @@ def _find_active_record_by_external_key(external_key: str, workdir: str) -> Opti
             continue
         if _normalize_path(str(raw_record.get("workdir") or "")) != normalized_workdir:
             continue
-        refreshed = _refresh_record(dict(raw_record))
+        refreshed = _refresh_record(dict(raw_record), runs_path=runs_path)
         if refreshed.get("status") == "running":
             return refreshed
     return None
@@ -482,16 +500,16 @@ def _infer_terminal_state(record: Dict[str, Any]) -> tuple[str, Optional[int]]:
     return "failed", None
 
 
-def _normalize_stale_record(record: Dict[str, Any], *, reason: str) -> None:
+def _normalize_stale_record(record: Dict[str, Any], *, reason: str, now: Optional[Any] = None) -> None:
     status, exit_code = _infer_terminal_state(record)
     record["status"] = status
     if exit_code is not None:
         record["exit_code"] = exit_code
-    record["completed_at"] = record.get("completed_at") or _utc_now()
+    record["completed_at"] = record.get("completed_at") or _coerce_now_epoch(now)
     record["stale_reason"] = reason
 
 
-def _apply_probe_expiry(record: Dict[str, Any]) -> None:
+def _apply_probe_expiry(record: Dict[str, Any], *, now: Optional[Any] = None) -> None:
     if not _is_probe_record(record):
         return
     if record.get("status") not in {"running", "unknown"}:
@@ -503,18 +521,24 @@ def _apply_probe_expiry(record: Dict[str, Any]) -> None:
         started_at = 0
     if started_at <= 0:
         return
-    if _utc_now() - started_at < _PROBE_TTL_SECONDS:
+    current_time = _coerce_now_epoch(now)
+    if current_time - started_at < _PROBE_TTL_SECONDS:
         return
-    _normalize_stale_record(record, reason="probe_timeout")
+    _normalize_stale_record(record, reason="probe_timeout", now=current_time)
     record["probe_timeout_seconds"] = _PROBE_TTL_SECONDS
 
 
-def _refresh_record(record: Dict[str, Any]) -> Dict[str, Any]:
+def _refresh_record(
+    record: Dict[str, Any],
+    runs_path: Optional[Path] = None,
+    now: Optional[Any] = None,
+) -> Dict[str, Any]:
     record.setdefault("run_kind", "probe" if _is_probe_phase(record.get("phase")) else "delegated")
     session_id = str(record.get("process_session_id") or "")
     session = process_registry.get(session_id) if session_id else None
     output_buffer = session.output_buffer if session and session.output_buffer else ""
     parsed = _parse_codex_events(output_buffer)
+    current_time = _coerce_now_epoch(now)
 
     if parsed["codex_session_id"]:
         record["codex_session_id"] = parsed["codex_session_id"]
@@ -532,13 +556,13 @@ def _refresh_record(record: Dict[str, Any]) -> Dict[str, Any]:
     if session:
         record["pid"] = session.pid
         record["process_started_at"] = session.started_at
-        record["uptime_seconds"] = int(time.time() - session.started_at)
+        record["uptime_seconds"] = int(current_time - session.started_at)
         if session.exited:
             record["status"] = "completed" if session.exit_code == 0 else "failed"
             record["exit_code"] = session.exit_code
-            record["completed_at"] = record.get("completed_at") or _utc_now()
+            record["completed_at"] = record.get("completed_at") or current_time
         elif not _pid_is_running(session.pid):
-            _normalize_stale_record(record, reason="process_missing")
+            _normalize_stale_record(record, reason="process_missing", now=current_time)
         else:
             record["status"] = "running"
             record["exit_code"] = None
@@ -546,10 +570,32 @@ def _refresh_record(record: Dict[str, Any]) -> Dict[str, Any]:
         if _pid_is_running(record.get("pid")):
             record["status"] = "unknown"
         else:
-            _normalize_stale_record(record, reason="process_missing")
-    _apply_probe_expiry(record)
-    _persist_record(record)
+            _normalize_stale_record(record, reason="process_missing", now=current_time)
+    _apply_probe_expiry(record, now=current_time)
+    _persist_record(record, runs_path=runs_path)
     return record
+
+
+def normalize_codex_runs(
+    *,
+    run_id: str = "",
+    runs_path: Optional[Path] = None,
+    now: Optional[Any] = None,
+) -> Dict[str, str]:
+    data = _load_runs(runs_path)
+    runs = data.get("runs", {})
+    if not isinstance(runs, dict):
+        return {}
+    wanted_run_id = str(run_id or "").strip()
+    run_ids = [wanted_run_id] if wanted_run_id else list(runs.keys())
+    statuses: Dict[str, str] = {}
+    for current_run_id in run_ids:
+        record = runs.get(current_run_id)
+        if not isinstance(record, dict):
+            continue
+        refreshed = _refresh_record(dict(record), runs_path=runs_path, now=now)
+        statuses[current_run_id] = str(refreshed.get("status") or "")
+    return statuses
 
 
 def _build_response(record: Dict[str, Any], **extra: Any) -> str:

@@ -124,12 +124,21 @@ def _ctx_binding_age_hours(record: Dict[str, Any], *, now: datetime) -> Optional
     return (now - ts).total_seconds() / 3600
 
 
-def _ctx_bindings_path() -> Path:
+def _ctx_bindings_path(bindings_path: Optional[Path] = None) -> Path:
+    if bindings_path is not None:
+        return Path(bindings_path).expanduser()
     return get_hermes_home() / "ctx" / "session_bindings.json"
 
 
-def _load_bindings() -> Dict[str, Any]:
-    path = _ctx_bindings_path()
+def _default_state_db_path(bindings_path: Optional[Path] = None) -> Path:
+    resolved_bindings_path = _ctx_bindings_path(bindings_path)
+    if resolved_bindings_path.name == "session_bindings.json" and resolved_bindings_path.parent.name == "ctx":
+        return resolved_bindings_path.parent.parent / "state.db"
+    return resolved_bindings_path.parent / "state.db"
+
+
+def _load_bindings(bindings_path: Optional[Path] = None) -> Dict[str, Any]:
+    path = _ctx_bindings_path(bindings_path)
     if not path.exists():
         return {"version": 1, "sessions": {}}
     try:
@@ -146,19 +155,24 @@ def _load_bindings() -> Dict[str, Any]:
     return data
 
 
-def _save_bindings(data: Dict[str, Any]) -> None:
-    atomic_json_write(_ctx_bindings_path(), data)
+def _save_bindings(data: Dict[str, Any], bindings_path: Optional[Path] = None) -> None:
+    atomic_json_write(_ctx_bindings_path(bindings_path), data)
 
 
-def _load_binding_record(session_id: str) -> Optional[Dict[str, Any]]:
+def _load_binding_record(session_id: str, bindings_path: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     with _BINDINGS_LOCK:
-        data = _load_bindings()
+        data = _load_bindings(bindings_path)
         record = data.get("sessions", {}).get(session_id)
         return dict(record) if isinstance(record, dict) else None
 
 
-def _set_binding_record_inactive(record: Dict[str, Any], *, reason: str) -> bool:
-    updated_at = _utcnow_iso()
+def _set_binding_record_inactive(
+    record: Dict[str, Any],
+    *,
+    reason: str,
+    updated_at: Optional[str] = None,
+) -> bool:
+    updated_at = updated_at or _utcnow_iso()
     changed = bool(record.get("active")) or str(record.get("reason") or "") != reason
     record["active"] = False
     record["reason"] = reason
@@ -168,8 +182,8 @@ def _set_binding_record_inactive(record: Dict[str, Any], *, reason: str) -> bool
     return changed
 
 
-def _open_session_db():
-    db_path = get_hermes_home() / "state.db"
+def _open_session_db(*, state_db_path: Optional[Path] = None, bindings_path: Optional[Path] = None):
+    db_path = Path(state_db_path).expanduser() if state_db_path is not None else _default_state_db_path(bindings_path)
     if not db_path.exists():
         return None
     try:
@@ -230,16 +244,24 @@ def _clear_binding_overrides(session_ids: Iterable[str]) -> None:
             logger.debug("Failed to clear task env overrides for ctx session %s", session_id, exc_info=True)
 
 
-def normalize_ctx_bindings(*, session_id: Optional[str] = None) -> Dict[str, str]:
+def normalize_ctx_bindings(
+    *,
+    session_id: Optional[str] = None,
+    bindings_path: Optional[Path] = None,
+    state_db_path: Optional[Path] = None,
+    stale_hours: int = _DEFAULT_CTX_BINDING_STALE_HOURS,
+    now: Optional[datetime] = None,
+) -> Dict[str, str]:
     """Deactivate persisted ctx bindings that no longer map to live sessions."""
 
     retired: Dict[str, str] = {}
     cleared_overrides: list[str] = []
-    session_db = _open_session_db()
-    now = datetime.now(timezone.utc)
+    bindings_path = _ctx_bindings_path(bindings_path)
+    session_db = _open_session_db(state_db_path=state_db_path, bindings_path=bindings_path)
+    now = now or datetime.now(timezone.utc)
     try:
         with _BINDINGS_LOCK:
-            data = _load_bindings()
+            data = _load_bindings(bindings_path)
             sessions = data.setdefault("sessions", {})
             if not isinstance(sessions, dict):
                 sessions = {}
@@ -255,15 +277,16 @@ def normalize_ctx_bindings(*, session_id: Optional[str] = None) -> Dict[str, str
                     record,
                     session_db=session_db,
                     now=now,
+                    stale_hours=stale_hours,
                 )
                 if not reason:
                     continue
-                if _set_binding_record_inactive(record, reason=reason):
+                if _set_binding_record_inactive(record, reason=reason, updated_at=now.isoformat()):
                     changed = True
                 retired[current_session_id] = reason
                 cleared_overrides.append(current_session_id)
             if changed:
-                _save_bindings(data)
+                _save_bindings(data, bindings_path)
     finally:
         if session_db is not None:
             try:

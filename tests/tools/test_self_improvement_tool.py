@@ -4,6 +4,7 @@ from pathlib import Path
 
 import yaml
 
+from tools import codex_delegate_tool
 from tools import linear_issue_tool
 from tools import self_improvement_tool
 
@@ -431,7 +432,52 @@ def test_evaluate_self_improvement_evidence_reports_healthy_sources(tmp_path):
     assert gate["suppression"]["suppress_non_maintenance"] is False
 
 
-def test_evaluate_self_improvement_evidence_flags_freshness_mismatch_and_stale_activity(tmp_path):
+def test_evaluate_self_improvement_evidence_keeps_gate_healthy_after_retiring_stale_ctx_binding(tmp_path):
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+    stale_active = (now - timedelta(hours=18)).isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    _write_json(journal_path, {"entries": [{"occurredAt": recent}]})
+    _write_json(codex_path, {"runs": {"codex_1": {"run_id": "codex_1", "status": "completed", "completed_at": recent}}})
+    _write_json(
+        ctx_path,
+        {
+            "sessions": {
+                "ctx_stale": {
+                    "session_id": "ctx_stale",
+                    "task_id": "task-1",
+                    "active": True,
+                    "updated_at": stale_active,
+                    "worktree_path": str(worktree),
+                }
+            }
+        },
+    )
+
+    gate = self_improvement_tool.evaluate_self_improvement_evidence(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        now=now,
+    )
+    persisted_ctx = json.loads(ctx_path.read_text(encoding="utf-8"))
+
+    assert gate["status"] == "healthy"
+    assert gate["reasons"] == []
+    assert gate["stale_active_ctx"] == []
+    assert persisted_ctx["sessions"]["ctx_stale"]["active"] is False
+    assert persisted_ctx["sessions"]["ctx_stale"]["updated_at"] == recent
+
+
+def test_evaluate_self_improvement_evidence_retires_stale_ctx_bindings_before_scoring(tmp_path):
     now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
     recent = (now - timedelta(hours=1)).isoformat()
     stale = (now - timedelta(hours=96)).isoformat()
@@ -480,11 +526,17 @@ def test_evaluate_self_improvement_evidence_flags_freshness_mismatch_and_stale_a
         ontology_root=ontology_root,
         now=now,
     )
+    persisted_codex = json.loads(codex_path.read_text(encoding="utf-8"))
+    persisted_ctx = json.loads(ctx_path.read_text(encoding="utf-8"))
 
     assert gate["status"] == "degraded"
     assert "evidence freshness mismatch across sources" in gate["contradictions"]
-    assert gate["stale_active_codex"][0]["run_id"] == "codex_stale"
-    assert gate["stale_active_ctx"][0]["session_id"] == "ctx_stale"
+    assert gate["stale_active_codex"] == []
+    assert persisted_codex["runs"]["codex_stale"]["status"] == "failed"
+    assert persisted_codex["runs"]["codex_stale"]["stale_reason"] == "process_missing"
+    assert gate["stale_active_ctx"] == []
+    assert persisted_ctx["sessions"]["ctx_stale"]["active"] is False
+    assert persisted_ctx["sessions"]["ctx_stale"]["reason"] == "ctx binding retired: stale active binding (>12h)"
     assert gate["suppression"]["suppress_non_maintenance"] is True
 
 
@@ -543,6 +595,62 @@ def test_evaluate_self_improvement_evidence_detects_planning_contradictions(tmp_
     assert gate["status"] == "degraded"
     assert "planning contradictions detected" in gate["contradictions"]
     assert gate["planning_contradictions"]
+
+
+def test_evaluate_self_improvement_evidence_normalizes_dead_codex_run_before_scoring(
+    monkeypatch, tmp_path
+):
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+    last_message_path = tmp_path / "codex-final.txt"
+    last_message_path.write_text("Implemented the fix.", encoding="utf-8")
+
+    _write_json(journal_path, {"entries": [{"occurredAt": recent}]})
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_dead": {
+                    "run_id": "codex_dead",
+                    "status": "running",
+                    "pid": 8181,
+                    "started_at": recent,
+                    "workdir": str(tmp_path),
+                    "last_message_path": str(last_message_path),
+                    "record_path": str(tmp_path / "codex_dead.json"),
+                    "latest_path": str(tmp_path / "latest.json"),
+                }
+            }
+        },
+    )
+    _write_json(
+        ctx_path,
+        {"sessions": {"ctx_inactive": {"session_id": "ctx_inactive", "active": False, "updated_at": recent}}},
+    )
+
+    def fake_kill(_pid, _sig):
+        raise ProcessLookupError
+
+    monkeypatch.setattr(codex_delegate_tool.os, "kill", fake_kill)
+
+    gate = self_improvement_tool.evaluate_self_improvement_evidence(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        now=now,
+    )
+    persisted_codex = json.loads(codex_path.read_text(encoding="utf-8"))
+
+    assert gate["status"] == "healthy"
+    assert gate["planning_contradictions"] == []
+    assert persisted_codex["runs"]["codex_dead"]["status"] == "completed"
+    assert persisted_codex["runs"]["codex_dead"]["stale_reason"] == "process_missing"
 
 
 def test_evidence_provenance_contract_includes_source_tags(tmp_path):

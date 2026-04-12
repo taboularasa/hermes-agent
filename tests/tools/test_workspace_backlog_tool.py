@@ -2,6 +2,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from tools import codex_delegate_tool
 from tools import workspace_backlog_tool
 
 
@@ -59,6 +60,79 @@ def test_parse_time_accepts_epoch_seconds_string():
     assert parsed is not None
     assert parsed.tzinfo == timezone.utc
     assert parsed.year == 2026
+
+
+def test_load_active_ctx_bindings_normalizes_stale_records(tmp_path):
+    now = datetime(2026, 4, 12, 16, 0, 0, tzinfo=timezone.utc)
+    stale = (now - timedelta(hours=13)).isoformat()
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    ctx_bindings_path = tmp_path / "session_bindings.json"
+    ctx_bindings_path.write_text(
+        json.dumps(
+            {
+                "sessions": {
+                    "sess-stale": {
+                        "session_id": "sess-stale",
+                        "task_id": "task-1",
+                        "active": True,
+                        "reason": "ctx task bound",
+                        "updated_at": stale,
+                        "worktree_path": str(worktree),
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    active = workspace_backlog_tool._load_active_ctx_bindings(ctx_bindings_path, now=now)
+    persisted = json.loads(ctx_bindings_path.read_text(encoding="utf-8"))
+
+    assert active == {}
+    assert persisted["sessions"]["sess-stale"]["active"] is False
+    assert persisted["sessions"]["sess-stale"]["reason"] == "ctx binding retired: stale active binding (>12h)"
+
+
+def test_load_codex_run_indexes_normalizes_dead_running_records(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    last_message_path = tmp_path / "codex-final.txt"
+    last_message_path.write_text("Completed the work.", encoding="utf-8")
+    codex_runs_path = tmp_path / "runs.json"
+    codex_runs_path.write_text(
+        json.dumps(
+            {
+                "runs": {
+                    "codex_dead": {
+                        "run_id": "codex_dead",
+                        "status": "running",
+                        "pid": 8181,
+                        "started_at": "2026-04-12T16:00:00+00:00",
+                        "external_key": "linear:HAD-271",
+                        "workdir": str(repo),
+                        "last_message_path": str(last_message_path),
+                        "record_path": str(tmp_path / "codex_dead.json"),
+                        "latest_path": str(tmp_path / "latest.json"),
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_kill(_pid, _sig):
+        raise ProcessLookupError
+
+    monkeypatch.setattr(codex_delegate_tool.os, "kill", fake_kill)
+
+    indexes = workspace_backlog_tool._load_codex_run_indexes(codex_runs_path)
+    persisted = json.loads(codex_runs_path.read_text(encoding="utf-8"))
+
+    assert str(repo.resolve()) not in indexes["active_by_workdir"]
+    assert indexes["by_issue"]["HAD-271"]["status"] == "completed"
+    assert persisted["runs"]["codex_dead"]["status"] == "completed"
+    assert persisted["runs"]["codex_dead"]["stale_reason"] == "process_missing"
 
 
 def test_workspace_backlog_orchestrator_selects_actionable_started_issue_and_persists_state(
