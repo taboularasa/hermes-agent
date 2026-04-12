@@ -1,6 +1,9 @@
 # Self-Improvement Benchmark
 
 Hermes now has a first-class self-improvement benchmark surface in `tools/self_improvement_tool.py`.
+It also has a control-plane wrapper, `self_improvement_pipeline`, which is the preferred
+way for the scheduled self-improvement loop to apply the benchmark without relying on
+prompt-only discipline.
 
 ## Purpose
 
@@ -39,7 +42,7 @@ Critical failures on `reliability_gate`, `linear_planning_surface`, `delegate_as
 
 ## Output contract
 
-The tool returns:
+`self_improvement_benchmark` returns:
 
 - an overall score out of 100
 - a current direction: `positive`, `mixed`, or `negative`
@@ -47,9 +50,17 @@ The tool returns:
 - per-check scores, details, and recommendations
 - a persisted history record under `HERMES_HOME/self_improvement/benchmark_history.json`
 
+`self_improvement_pipeline` wraps that benchmark and also returns:
+
+- any safe Linear repairs it applied automatically
+- benchmark-generated issue upserts or auto-closures
+- the current top benchmark-driven Linear candidate
+- a deduplicated status comment on that top candidate
+
 ## Intended use
 
-Hermes should run the benchmark before self-improvement prioritization.
+Hermes should run `self_improvement_pipeline` before self-improvement prioritization.
+Use the raw benchmark directly when you need to inspect detailed check output.
 
 If the benchmark reports:
 
