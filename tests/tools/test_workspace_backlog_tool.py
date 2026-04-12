@@ -350,6 +350,8 @@ def test_workspace_backlog_orchestrator_prefers_git_hygiene_and_comments_on_link
                     "repo_root": "/home/david/stacks/hermes-agent",
                     "worktree_path": "/tmp/worktree",
                     "deletion_blockers": ["linked Linear issue HAD-300 still open"],
+                    "preempts_backlog": True,
+                    "actionable": True,
                 }
             ],
             "selected": {
@@ -364,6 +366,8 @@ def test_workspace_backlog_orchestrator_prefers_git_hygiene_and_comments_on_link
                 "repo_root": "/home/david/stacks/hermes-agent",
                 "worktree_path": "/tmp/worktree",
                 "deletion_blockers": ["linked Linear issue HAD-300 still open"],
+                "preempts_backlog": True,
+                "actionable": True,
             },
         },
     )
@@ -453,3 +457,186 @@ def test_git_hygiene_incident_is_conservative_for_orphaned_dirty_state(monkeypat
     assert incident["deletion_candidate"] is False
     assert "HEAD not merged into main" in incident["deletion_blockers"]
     assert "tracked file modifications still present" in incident["deletion_blockers"]
+
+
+def test_workspace_backlog_orchestrator_backs_off_repeated_orphaned_git_hygiene_preemption(
+    monkeypatch, tmp_path
+):
+    now = datetime(2026, 4, 12, 16, 10, 0, tzinfo=timezone.utc)
+    hermes_user = {
+        "id": "user-hermes",
+        "name": "Hermes",
+        "displayName": "hermes",
+        "email": "hermes@oauthapp.linear.app",
+        "active": True,
+    }
+
+    monkeypatch.setattr(workspace_backlog_tool.linear_tool, "_list_users", lambda: [hermes_user])
+    monkeypatch.setattr(
+        workspace_backlog_tool.linear_tool,
+        "_list_issues",
+        lambda *, limit=100, filter_input=None: [
+            _issue(
+                "HAD-301",
+                title="Fresh backlog item",
+                project_name="Hermes Self-Improvement",
+                state_name="Todo",
+                state_type="unstarted",
+                updated_at=now - timedelta(hours=1),
+                priority=1,
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        workspace_backlog_tool,
+        "_collect_git_hygiene",
+        lambda **_kw: {
+            "counts": {
+                "incidents": 1,
+                "orphaned_dirty": 1,
+                "linked_wip": 0,
+                "cleanup_candidates": 0,
+                "active_owned": 0,
+            },
+            "incidents": [
+                {
+                    "kind": "git_hygiene",
+                    "identifier": "git:/tmp/orphaned-worktree",
+                    "title": "Reconcile repo hygiene for feat/orphaned",
+                    "repo_root": "/home/david/stacks/hermes-journal",
+                    "worktree_path": "/tmp/orphaned-worktree",
+                    "branch": "feat/orphaned",
+                    "default_branch": "main",
+                    "tracked_dirty": 4,
+                    "untracked": 1,
+                    "dirty": True,
+                    "active_ctx": False,
+                    "active_codex": None,
+                    "latest_codex": {
+                        "run_id": "codex_dead",
+                        "status": "failed",
+                        "completed_at": (now - timedelta(hours=30)).isoformat(),
+                    },
+                    "linked_issue_identifier": "",
+                    "linked_issue_open": None,
+                    "linked_issue_state_name": "",
+                    "linked_issue_state_type": "",
+                    "linked_issue_ownership": "",
+                    "branch_divergence": {"ahead": 0, "behind": 1, "error": ""},
+                    "upstream_ahead": 0,
+                    "upstream_behind": 1,
+                    "head_merged_to_default": True,
+                    "evidence_age_hours": 30.0,
+                    "selection_bucket": "resolve_orphaned_dirty_wip",
+                    "execution_mode": "investigate_merge_or_delete",
+                    "recommended_action": "investigate_unowned_dirty_state",
+                    "selection_reason": "Dirty orphaned worktree still needs durable linkage.",
+                    "deletion_candidate": False,
+                    "deletion_blockers": ["tracked file modifications still present"],
+                    "preempts_backlog": True,
+                    "actionable": True,
+                    "severity_rank": 0,
+                    "sort_key": (0, 0, 0, 0, -30.0, "/tmp/orphaned-worktree"),
+                }
+            ],
+            "selected": {
+                "kind": "git_hygiene",
+                "identifier": "git:/tmp/orphaned-worktree",
+                "title": "Reconcile repo hygiene for feat/orphaned",
+                "repo_root": "/home/david/stacks/hermes-journal",
+                "worktree_path": "/tmp/orphaned-worktree",
+                "branch": "feat/orphaned",
+                "default_branch": "main",
+                "tracked_dirty": 4,
+                "untracked": 1,
+                "dirty": True,
+                "active_ctx": False,
+                "active_codex": None,
+                "latest_codex": {
+                    "run_id": "codex_dead",
+                    "status": "failed",
+                    "completed_at": (now - timedelta(hours=30)).isoformat(),
+                },
+                "linked_issue_identifier": "",
+                "linked_issue_open": None,
+                "linked_issue_state_name": "",
+                "linked_issue_state_type": "",
+                "linked_issue_ownership": "",
+                "branch_divergence": {"ahead": 0, "behind": 1, "error": ""},
+                "upstream_ahead": 0,
+                "upstream_behind": 1,
+                "head_merged_to_default": True,
+                "evidence_age_hours": 30.0,
+                "selection_bucket": "resolve_orphaned_dirty_wip",
+                "execution_mode": "investigate_merge_or_delete",
+                "recommended_action": "investigate_unowned_dirty_state",
+                "selection_reason": "Dirty orphaned worktree still needs durable linkage.",
+                "deletion_candidate": False,
+                "deletion_blockers": ["tracked file modifications still present"],
+                "preempts_backlog": True,
+                "actionable": True,
+                "severity_rank": 0,
+                "sort_key": (0, 0, 0, 0, -30.0, "/tmp/orphaned-worktree"),
+            },
+        },
+    )
+
+    config_path = tmp_path / "config.yaml"
+    state_path = tmp_path / "state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "evaluated_at": (now - timedelta(minutes=10)).isoformat(),
+                "selected_work": {
+                    "kind": "git_hygiene",
+                    "identifier": "git:/tmp/orphaned-worktree",
+                },
+                "git_hygiene_history": {
+                    "git:/tmp/orphaned-worktree": {
+                        "identifier": "git:/tmp/orphaned-worktree",
+                        "first_seen_at": (now - timedelta(hours=2)).isoformat(),
+                        "last_seen_at": (now - timedelta(minutes=10)).isoformat(),
+                        "last_selected_at": (now - timedelta(minutes=10)).isoformat(),
+                        "consecutive_preemptions": 2,
+                        "backoff_active": False,
+                        "backoff_until": None,
+                        "backoff_reason": None,
+                        "backoff_count": 0,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    codex_runs_path = tmp_path / "runs.json"
+    codex_runs_path.write_text(json.dumps({"runs": {}}), encoding="utf-8")
+    ctx_bindings_path = tmp_path / "session_bindings.json"
+    ctx_bindings_path.write_text(json.dumps({"sessions": {}}), encoding="utf-8")
+
+    result = workspace_backlog_tool.evaluate_workspace_backlog(
+        team_key="HAD",
+        config_path=config_path,
+        state_path=state_path,
+        codex_runs_path=codex_runs_path,
+        ctx_bindings_path=ctx_bindings_path,
+        git_hygiene_preemption_limit=3,
+        git_hygiene_backoff_hours=6,
+        persist=True,
+        now=now,
+    )
+
+    incident = result["git_hygiene"]["incidents"][0]
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+
+    assert result["selected_issue"]["identifier"] == "HAD-301"
+    assert result["selected_work"]["kind"] == "linear_issue"
+    assert result["selected_work"]["identifier"] == "HAD-301"
+    assert incident["identifier"] == "git:/tmp/orphaned-worktree"
+    assert incident["backoff_active"] is True
+    assert incident["preempts_backlog"] is False
+    assert result["git_hygiene"]["counts"]["backoff_active"] == 1
+    assert "Preemption backoff active until" in incident["selection_reason"]
+    assert (
+        persisted["git_hygiene_history"]["git:/tmp/orphaned-worktree"]["backoff_until"]
+        is not None
+    )
