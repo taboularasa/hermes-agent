@@ -179,6 +179,18 @@ ONTOLOGY_TOOL_GUIDANCE = (
     "the user explicitly wants a single-provider search or the matrix tool is unavailable."
 )
 
+WORK_STATUS_GUIDANCE = (
+    "When the user asks what Hermes is currently working on, what is active, what is next, "
+    "or whether there is any work left, distinguish between three states: "
+    "(1) live execution right now (active Codex/ctx/process work), "
+    "(2) the currently selected backlog item from workspace coordination, and "
+    "(3) recurring scheduled jobs. "
+    "If workspace_backlog_orchestrator is available, inspect its current state or rerun it "
+    "before claiming there is no work. Never say there is no active work when there is an "
+    "actionable selected_work item or recent coordinator activity; instead say there may be "
+    "no live process at this instant, but the selected backlog item is still the active focus."
+)
+
 TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "# Tool-use enforcement\n"
     "You MUST use your tools to take action — do not describe what you would do "

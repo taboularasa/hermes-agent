@@ -8,6 +8,8 @@ The canonical backlog owner is now one global coordinator that looks across the 
 - One active cron job with `role=coordinate` and `scope=global` owns backlog selection.
 - Scoped `role=implement` jobs stay paused while the coordinator is active.
 - Reports, study loops, and publishing jobs may remain active because they do not own backlog selection.
+- The coordinator should run at high cadence when the workspace has open work. Hourly cadence is too sparse for a backlog that is expected to move continuously; prefer `every 10m` or tighter unless token pressure forces a slower loop.
+- “Current work” reporting must include the selected backlog item from the coordinator state, not just currently-running processes.
 
 ## Tooling
 
@@ -81,6 +83,12 @@ default_branches:
    - only remove stale worktrees when the tool marks them as cleanup candidates and blockers are absent
 5. Write a deduplicated Linear status comment for the selected work item's linked issue when possible.
 6. Keep scoped implementers paused so there is one backlog owner.
+7. Do not stop after a lightweight inspection or status write if the workspace still has actionable backlog. Prefer leaving the system with either an active local Codex run, a clearly blocked item recorded in Linear, or a resolved hygiene incident.
+8. When reporting status to a user, distinguish:
+   - live execution in flight now
+   - the selected backlog item Hermes is actively advancing
+   - recurring jobs that remain scheduled
+   Saying “no active work” is incorrect when `selected_work` is actionable.
 
 ## Verification
 
@@ -94,5 +102,6 @@ After topology changes:
 Healthy output should show:
 
 - one active `coordinate/global` job
+- the coordinator scheduled `every 10m` or tighter unless an operator has intentionally slowed it down
 - no active scoped implementers
 - no topology conflicts
