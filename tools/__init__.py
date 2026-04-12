@@ -174,7 +174,10 @@ from .ontology_context_tool import (
 from .self_improvement_tool import (
     self_improvement_evidence_gate,
     evaluate_self_improvement_evidence,
+    self_improvement_benchmark,
+    evaluate_self_improvement_benchmark,
     SELF_IMPROVEMENT_EVIDENCE_SCHEMA,
+    SELF_IMPROVEMENT_BENCHMARK_SCHEMA,
 )
 
 # File tools have no external requirements - they use the terminal backend
@@ -292,7 +295,10 @@ __all__ = [
     'ONTOLOGY_CONTEXT_SCHEMA',
     'self_improvement_evidence_gate',
     'evaluate_self_improvement_evidence',
+    'self_improvement_benchmark',
+    'evaluate_self_improvement_benchmark',
     'SELF_IMPROVEMENT_EVIDENCE_SCHEMA',
+    'SELF_IMPROVEMENT_BENCHMARK_SCHEMA',
     # Subagent delegation
     'delegate_task',
     'check_delegate_requirements',

@@ -32,6 +32,9 @@ identifier
 title
 description
 url
+createdAt
+updatedAt
+completedAt
 priority
 assignee { id name displayName email }
 delegate { id name displayName email }
@@ -57,6 +60,9 @@ identifier
 title
 description
 url
+createdAt
+updatedAt
+completedAt
 priority
 assignee { id name displayName email }
 delegate { id name displayName email }
