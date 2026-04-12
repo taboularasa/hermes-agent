@@ -783,10 +783,11 @@ def evaluate_self_improvement_evidence(
         spread_seconds = (max(latest_timestamps) - min(latest_timestamps)).total_seconds()
         freshness_spread_hours = round(spread_seconds / 3600, 2)
     contradictions = []
+    warnings = []
     if "fresh" in statuses and ("stale" in statuses or "missing" in statuses):
         contradictions.append("evidence freshness mismatch across sources")
     elif freshness_spread_hours is not None and freshness_spread_hours >= active_stale_hours:
-        contradictions.append("evidence freshness mismatch across sources")
+        warnings.append("evidence freshness skew across sources")
     if stale_active_codex:
         contradictions.append("stale active Codex runs detected")
     if stale_active_ctx:
@@ -818,14 +819,19 @@ def evaluate_self_improvement_evidence(
         reasons.extend(contradictions)
 
     degraded = bool(reasons or contradictions)
-    gate_status = "degraded" if degraded else "healthy"
+    warning_only = not degraded and bool(warnings)
+    gate_status = "degraded" if degraded else ("warning" if warning_only else "healthy")
 
     suppression = {
         "suppress_non_maintenance": degraded,
         "message": (
             "Reliability floor degraded: non-maintenance work suppressed."
             if degraded
-            else "Reliability floor healthy: normal lane selection permitted."
+            else (
+                "Reliability floor warning: normal lane selection permitted, but evidence cadence is uneven."
+                if warning_only
+                else "Reliability floor healthy: normal lane selection permitted."
+            )
         ),
     }
 
@@ -860,6 +866,7 @@ def evaluate_self_improvement_evidence(
         "stale_active_codex": stale_active_codex,
         "stale_active_ctx": stale_active_ctx,
         "planning_contradictions": planning_contradictions,
+        "warnings": warnings,
         "ontology": ontology_summary,
         "ontology_alerts": ontology_alerts,
         "contradictions": contradictions,
@@ -1239,7 +1246,7 @@ def _select_strategic_conversation(
         "selected": None,
     }
 
-    if str((benchmark.get("gate") or {}).get("status") or "").strip().casefold() != "healthy":
+    if str((benchmark.get("gate") or {}).get("status") or "").strip().casefold() == "degraded":
         result["suppressed_reason"] = "reliability_gate_degraded"
         return result
 
@@ -2046,14 +2053,18 @@ def evaluate_self_improvement_benchmark(
         if isinstance(entry, dict)
     ]
     stale_source_count = sum(status in {"stale", "missing"} for status in source_statuses)
+    freshness_warning_count = len(gate.get("warnings") or [])
     reliability_score = 1.0
     reliability_score -= 0.2 * stale_source_count
     reliability_score -= 0.15 if gate.get("stale_active_codex") else 0.0
     reliability_score -= 0.15 if gate.get("stale_active_ctx") else 0.0
     reliability_score -= 0.15 if gate.get("planning_contradictions") else 0.0
     reliability_score -= 0.15 if str((gate.get("ontology") or {}).get("status") or "") in {"stale", "missing"} else 0.0
-    if gate.get("status") != "healthy":
+    reliability_score -= 0.1 if freshness_warning_count else 0.0
+    if gate.get("status") == "degraded":
         reliability_score = min(reliability_score, 0.45)
+    elif gate.get("status") == "warning":
+        reliability_score = min(reliability_score, 0.8)
 
     execution_loop_score = (
         0.6 * min(len(recent_completed_codex) / 2.0, 1.0)
@@ -2138,7 +2149,12 @@ def evaluate_self_improvement_benchmark(
             detail=(
                 "Reliability floor is healthy."
                 if gate.get("status") == "healthy"
-                else "; ".join(gate.get("reasons") or gate.get("contradictions") or ["Reliability floor degraded."])
+                else "; ".join(
+                    gate.get("reasons")
+                    or gate.get("warnings")
+                    or gate.get("contradictions")
+                    or ["Reliability floor degraded."]
+                )
             ),
             evidence_tags=["journal", "codex", "ctx", "ontology"],
             critical=True,
@@ -2146,7 +2162,9 @@ def evaluate_self_improvement_benchmark(
             metrics={
                 "gate_status": gate.get("status"),
                 "stale_source_count": stale_source_count,
+                "warning_count": freshness_warning_count,
                 "contradiction_count": len(gate.get("contradictions") or []),
+                "freshness_spread_hours": gate.get("freshness_spread_hours"),
             },
         ),
         _build_benchmark_item(
