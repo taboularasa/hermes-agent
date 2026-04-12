@@ -14,7 +14,8 @@ When working on the Hadto automation installed under `~/.hermes/cron/jobs.json`,
 
 Current operating model:
 
-- repo delivery is owned by scoped implementation jobs, not by one global implementer
+- one `role=coordinate` / `scope=global` job owns workspace-wide backlog selection
+- scoped `role=implement` jobs should stay paused unless the coordinator model is explicitly retired
 - `role=implement` jobs should be unique per `scope`
 - paused legacy jobs must not keep the same name as an active successor
 - if you pause or retire a job, record the reason
@@ -28,8 +29,9 @@ Before and after changing cron automation, run:
 
 For the Hadto setup specifically:
 
-- keep the scoped implementers active for `ontology`, `pipeline`, and `workbench`
-- do not re-enable the legacy cross-repo meta executor alongside scoped implementers
+- keep exactly one active global coordinator for backlog selection and WIP rescue
+- do not run scoped implementers alongside the global coordinator
+- if scoped implementers are reintroduced, pause the global coordinator first and document why
 - if you keep legacy jobs for history, rename them with a `legacy-` prefix so name-based inspection is unambiguous
 
 ## Project Structure

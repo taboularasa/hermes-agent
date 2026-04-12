@@ -210,7 +210,7 @@ TOOLSETS = {
 
     "linear": {
         "description": "Inspect and update Linear issues directly from Hermes",
-        "tools": ["linear_issue"],
+        "tools": ["linear_issue", "workspace_backlog_orchestrator"],
         "includes": []
     },
 

@@ -151,6 +151,64 @@ query LinearProjectIssues($projectId: String!, $limit: Int!) {{
 }}
 """
 
+_ISSUE_LIST_FIELDS = """
+id
+identifier
+title
+description
+url
+createdAt
+updatedAt
+startedAt
+completedAt
+dueDate
+priority
+assignee { id name displayName email }
+delegate { id name displayName email }
+state { id name type }
+team { id key name }
+project { id name }
+labels(first: 20) { nodes { id name color } }
+relations(first: 20) {
+  nodes {
+    id
+    type
+    relatedIssue {
+      id
+      identifier
+      title
+      url
+      state { id name type }
+      project { id name }
+    }
+  }
+}
+inverseRelations(first: 20) {
+  nodes {
+    id
+    type
+    issue {
+      id
+      identifier
+      title
+      url
+      state { id name type }
+      project { id name }
+    }
+  }
+}
+"""
+
+_LIST_ISSUES_QUERY = f"""
+query LinearIssues($limit: Int!, $filter: IssueFilter) {{
+  issues(first: $limit, filter: $filter) {{
+    nodes {{
+{_ISSUE_LIST_FIELDS}
+    }}
+  }}
+}}
+"""
+
 _WORKFLOW_STATES_QUERY = """
 query WorkflowStates($teamKey: String!) {
   workflowStates(filter: { team: { key: { eq: $teamKey } } }) {
@@ -290,6 +348,7 @@ LINEAR_ISSUE_SCHEMA = {
                     "list_teams",
                     "list_users",
                     "list_projects",
+                    "list_issues",
                     "project_upsert",
                     "issue_upsert",
                     "issue_relation",
@@ -342,6 +401,11 @@ LINEAR_ISSUE_SCHEMA = {
                 "description": "Maximum number of recent comments to return for action=get. Default 10.",
                 "minimum": 1,
             },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of results to return for list actions. Default 100.",
+                "minimum": 1,
+            },
             "name": {
                 "type": "string",
                 "description": "Project name for action=project_upsert.",
@@ -369,6 +433,14 @@ LINEAR_ISSUE_SCHEMA = {
             "project_name": {
                 "type": "string",
                 "description": "Project name fallback for issue_upsert when project_id is omitted.",
+            },
+            "state_types": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional workflow state types for action=list_issues, such as "
+                    "`backlog`, `unstarted`, `started`, `completed`, or `canceled`."
+                ),
             },
             "lead_id": {
                 "type": "string",
@@ -487,9 +559,19 @@ def _normalize_issue(issue: dict[str, Any], *, comment_limit: int = 10) -> dict[
     normalized_comments = comment_nodes[:comment_limit] if comment_limit > 0 else comment_nodes
     labels = issue.get("labels", {})
     label_nodes = labels.get("nodes", []) if isinstance(labels, dict) else labels
+    relations = issue.get("relations", {})
+    relation_nodes = relations.get("nodes", []) if isinstance(relations, dict) else relations
+    inverse_relations = issue.get("inverseRelations", {})
+    inverse_relation_nodes = (
+        inverse_relations.get("nodes", []) if isinstance(inverse_relations, dict) else inverse_relations
+    )
     result = dict(issue)
     result["comments"] = normalized_comments
     result["labels"] = [label for label in label_nodes if isinstance(label, dict)]
+    result["relations"] = [relation for relation in relation_nodes if isinstance(relation, dict)]
+    result["inverseRelations"] = [
+        relation for relation in inverse_relation_nodes if isinstance(relation, dict)
+    ]
     return result
 
 
@@ -534,6 +616,19 @@ def _project_issues(project_id: str, *, limit: int = 250) -> list[dict[str, Any]
     if not isinstance(project, dict):
         raise RuntimeError(f"Linear project not found: {project_id}")
     issues = project.get("issues", {})
+    nodes = issues.get("nodes", []) if isinstance(issues, dict) else []
+    return [_normalize_issue(issue, comment_limit=0) for issue in nodes if isinstance(issue, dict)]
+
+
+def _list_issues(*, limit: int = 100, filter_input: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    data = _graphql(
+        _LIST_ISSUES_QUERY,
+        {
+            "limit": max(1, int(limit or 100)),
+            "filter": filter_input or None,
+        },
+    )
+    issues = data.get("issues", {})
     nodes = issues.get("nodes", []) if isinstance(issues, dict) else []
     return [_normalize_issue(issue, comment_limit=0) for issue in nodes if isinstance(issue, dict)]
 
@@ -782,6 +877,38 @@ def linear_issue(args: dict[str, Any], **_kw) -> str:
         limit = max(1, int(args.get("limit") or 100))
         return json.dumps({"success": True, "projects": _list_projects(limit=limit)}, ensure_ascii=False)
 
+    if action == "list_issues":
+        limit = max(1, int(args.get("limit") or 100))
+        filter_input: dict[str, Any] = {}
+
+        raw_team_id = str(args.get("team_id") or "").strip()
+        raw_team_key = str(args.get("team_key") or "").strip()
+        if raw_team_id:
+            filter_input["team"] = {"id": {"eq": raw_team_id}}
+        elif raw_team_key:
+            filter_input["team"] = {"key": {"eq": raw_team_key}}
+
+        raw_project_id = str(args.get("project_id") or "").strip()
+        raw_project_name = str(args.get("project_name") or "").strip()
+        if raw_project_id:
+            filter_input["project"] = {"id": {"eq": raw_project_id}}
+        elif raw_project_name:
+            filter_input["project"] = {"name": {"eq": raw_project_name}}
+
+        raw_state_types = args.get("state_types")
+        if isinstance(raw_state_types, list):
+            state_types = [str(item).strip() for item in raw_state_types if str(item).strip()]
+            if state_types:
+                filter_input["state"] = {"type": {"in": state_types}}
+
+        return json.dumps(
+            {
+                "success": True,
+                "issues": _list_issues(limit=limit, filter_input=filter_input or None),
+            },
+            ensure_ascii=False,
+        )
+
     if action == "project_upsert":
         name = str(args.get("name") or "").strip()
         if not name:
@@ -855,12 +982,13 @@ def linear_issue(args: dict[str, Any], **_kw) -> str:
         )
 
     if action == "issue_upsert":
-        title = str(args.get("title") or "").strip()
-        if not title:
-            return json.dumps({"error": "title is required for action=issue_upsert"}, ensure_ascii=False)
-
         issue_ref = str(args.get("issue_id") or "").strip() or str(args.get("identifier") or "").strip()
         explicit_issue = _fetch_issue(issue_ref, comment_limit=1) if issue_ref else None
+        title = str(args.get("title") or "").strip()
+        if not title and explicit_issue:
+            title = str(explicit_issue.get("title") or "").strip()
+        if not title:
+            return json.dumps({"error": "title is required for action=issue_upsert"}, ensure_ascii=False)
         project_id = str(args.get("project_id") or "").strip()
         if not project_id and not explicit_issue:
             try:
@@ -868,6 +996,7 @@ def linear_issue(args: dict[str, Any], **_kw) -> str:
             except RuntimeError:
                 project_id = ""
 
+        description_present = "description" in args
         description = str(args.get("description") or "").strip()
         dedupe_key = str(args.get("dedupe_key") or "").strip() or None
         priority = args.get("priority")
@@ -916,7 +1045,7 @@ def linear_issue(args: dict[str, Any], **_kw) -> str:
             input_data: dict[str, Any] = {}
             if str(existing_issue.get("title") or "").strip() != title:
                 input_data["title"] = title
-            if _strip_marker(str(existing_issue.get("description") or "")).strip() != description:
+            if description_present and _strip_marker(str(existing_issue.get("description") or "")).strip() != description:
                 input_data["description"] = desired_description
             current_priority = existing_issue.get("priority")
             if priority is not None and int(priority) != (int(current_priority) if current_priority is not None else None):

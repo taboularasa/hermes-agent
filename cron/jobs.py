@@ -587,6 +587,38 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
             }
         )
 
+    global_coordinators = [
+        job
+        for job in active_jobs
+        if job.get("role") == "coordinate" and job.get("scope") == "global"
+    ]
+    if len(global_coordinators) > 1:
+        issues.append(
+            {
+                "severity": "error",
+                "code": "duplicate_global_coordinator",
+                "job_ids": [job["id"] for job in global_coordinators],
+                "message": (
+                    "Multiple global coordinator jobs are active. Keep exactly one "
+                    "workspace-wide orchestrator so backlog selection remains deterministic."
+                ),
+            }
+        )
+
+    if global_coordinators and scoped_implementers:
+        issues.append(
+            {
+                "severity": "error",
+                "code": "global_coordinator_with_scoped_implementers",
+                "job_ids": [job["id"] for job in global_coordinators + scoped_implementers],
+                "message": (
+                    "A global coordinator is active alongside scoped implementation jobs. "
+                    "Pause the scoped implementers or retire the coordinator so Hermes has "
+                    "one clear backlog owner."
+                ),
+            }
+        )
+
     return {
         "ok": not any(issue["severity"] == "error" for issue in issues),
         "summary": {
