@@ -1,0 +1,64 @@
+# Self-Improvement Benchmark
+
+Hermes now has a first-class self-improvement benchmark surface in `tools/self_improvement_tool.py`.
+
+## Purpose
+
+The benchmark is the answer to a simple question:
+
+> Is Hermes self-evolution moving in a positive direction, or are we just creating more activity?
+
+It complements the existing `self_improvement_evidence_gate`:
+
+- the evidence gate decides whether the reliability floor is degraded right now,
+- the benchmark turns that and the surrounding execution/planning signals into a persisted scorecard that can be compared across runs.
+
+## What it reads
+
+- journal evidence
+- Codex run metadata
+- ctx session bindings
+- ontology self-improvement context
+- the Hermes self-improvement Linear project
+- the live epoch objective / reward policy
+
+## Benchmark checks
+
+The benchmark currently scores these areas:
+
+- `reliability_gate`
+- `execution_loop`
+- `stale_execution_records`
+- `linear_planning_surface`
+- `delegate_assignment_hygiene`
+- `reward_policy_alignment`
+- `recent_delivery_outcomes`
+- `ontology_readiness`
+
+Critical failures on `reliability_gate`, `linear_planning_surface`, `delegate_assignment_hygiene`, or `reward_policy_alignment` make the overall direction negative even if other checks are strong.
+
+## Output contract
+
+The tool returns:
+
+- an overall score out of 100
+- a current direction: `positive`, `mixed`, or `negative`
+- a trend versus the previous recorded run: `baseline`, `improving`, `flat`, or `regressing`
+- per-check scores, details, and recommendations
+- a persisted history record under `HERMES_HOME/self_improvement/benchmark_history.json`
+
+## Intended use
+
+Hermes should run the benchmark before self-improvement prioritization.
+
+If the benchmark reports:
+
+- `negative`: fix the highest-weight failing benchmark first
+- `mixed`: continue, but prefer work that removes warnings or improves delivery outcomes
+- `positive`: normal self-improvement prioritization is allowed
+
+## Verification
+
+- `pytest tests/tools/test_self_improvement_tool.py -q`
+- `pytest tests/tools/test_linear_issue_tool.py -q`
+- `pytest tests/agent/test_ontology_context.py -q`

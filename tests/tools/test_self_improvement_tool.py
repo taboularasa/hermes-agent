@@ -4,6 +4,7 @@ from pathlib import Path
 
 import yaml
 
+from tools import linear_issue_tool
 from tools import self_improvement_tool
 
 
@@ -80,6 +81,82 @@ def _seed_ontology_repo(tmp_path: Path, *, generated_at: str) -> Path:
         },
     )
     return repo
+
+
+def _seed_reward_policy(path: Path) -> Path:
+    _write_yaml(
+        path,
+        {
+            "epoch": {
+                "name": "Client Revenue and Social Proof",
+                "review_question": "Does this help Hadto win or retain business?",
+            },
+            "guardrails": {
+                "max_active_issues_per_lane": 1,
+                "capability_budget_percent": 20,
+            },
+            "lanes": {
+                "capability": {"default_budget_percent": 20},
+            },
+        },
+    )
+    return path
+
+
+def _linear_issue(
+    identifier: str,
+    *,
+    state_type: str,
+    state_name: str,
+    lane: str,
+    delegate_name: str = "Hermes",
+    assignee: dict | None = None,
+    include_verification: bool = True,
+    include_status_comment: bool = False,
+    updated_at: str | None = None,
+    completed_at: str | None = None,
+) -> dict:
+    description = [
+        f"Lane: {lane}",
+        "",
+        "Capability gap:",
+        "Durable self-improvement work item.",
+        "",
+        "Why now:",
+        "Needed to improve Hermes execution quality.",
+    ]
+    if include_verification:
+        description.extend(
+            [
+                "",
+                "Verification expectation:",
+                "Run the focused test suite and verify the output.",
+            ]
+        )
+    issue = {
+        "id": f"issue-{identifier.lower()}",
+        "identifier": identifier,
+        "title": f"{identifier} title",
+        "description": "\n".join(description),
+        "state": {"id": f"state-{state_type}", "name": state_name, "type": state_type},
+        "delegate": {"id": "user-hermes", "name": delegate_name, "displayName": delegate_name, "email": "hermes@hadto.net"},
+        "assignee": assignee,
+        "comments": [],
+        "createdAt": updated_at,
+        "updatedAt": updated_at,
+        "completedAt": completed_at,
+    }
+    if include_status_comment:
+        issue["comments"] = [
+            {
+                "id": f"comment-{identifier.lower()}",
+                "body": linear_issue_tool._format_comment_body(
+                    "In progress",
+                    f"status:{identifier}",
+                ),
+            }
+        ]
+    return issue
 
 
 def test_evaluate_self_improvement_evidence_reports_healthy_sources(tmp_path):
@@ -300,3 +377,234 @@ def test_evaluate_self_improvement_evidence_flags_stale_ontology_artifacts(tmp_p
     assert gate["status"] == "degraded"
     assert "ontology intelligence artifacts are stale or missing" in gate["contradictions"]
     assert "ontology_metrics stale" in " ".join(gate["reasons"])
+
+
+def test_self_improvement_benchmark_scores_positive_and_persists_history(monkeypatch, tmp_path):
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
+    recent = (now - timedelta(hours=2)).isoformat()
+    older = (now - timedelta(days=1)).isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+    objective_path = _seed_reward_policy(tmp_path / "epoch.yaml")
+    history_path = tmp_path / "benchmarks.json"
+    worktree_a = tmp_path / "worktree-a"
+    worktree_b = tmp_path / "worktree-b"
+    worktree_a.mkdir()
+    worktree_b.mkdir()
+
+    _write_json(journal_path, {"entries": [{"occurredAt": recent}, {"occurredAt": older}]})
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_1": {"run_id": "codex_1", "status": "completed", "completed_at": recent},
+                "codex_2": {"run_id": "codex_2", "status": "completed", "completed_at": recent},
+            }
+        },
+    )
+    _write_json(
+        ctx_path,
+        {
+            "sessions": {
+                "sess_1": {"session_id": "sess_1", "active": False, "updated_at": recent, "worktree_path": str(worktree_a)},
+                "sess_2": {"session_id": "sess_2", "active": False, "updated_at": recent, "worktree_path": str(worktree_b)},
+            }
+        },
+    )
+
+    monkeypatch.setattr(
+        self_improvement_tool,
+        "build_self_improvement_context",
+        lambda *args, **kwargs: {
+            "reliability": {"status": "fresh"},
+            "research_provider_policy": {"summary": {"available_provider_count": 2}},
+            "textbook_study": {"upgrade_targets": [{"title": "Typed execution frame"}]},
+            "business_recommendations": ["Prioritize contract-facing reliability work."],
+        },
+    )
+    monkeypatch.setattr(
+        self_improvement_tool,
+        "_load_linear_benchmark_surface",
+        lambda **kwargs: {
+            "available": True,
+            "project": {"id": "project-1", "name": "Hermes Self-Improvement"},
+            "issues": [
+                _linear_issue(
+                    "HAD-201",
+                    state_type="started",
+                    state_name="In Progress",
+                    lane="Maintenance",
+                    include_status_comment=True,
+                    updated_at=recent,
+                ),
+                _linear_issue(
+                    "HAD-202",
+                    state_type="completed",
+                    state_name="Done",
+                    lane="Growth",
+                    updated_at=recent,
+                    completed_at=recent,
+                ),
+            ],
+            "error": None,
+        },
+    )
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        objective_path=objective_path,
+        history_path=history_path,
+        now=now,
+        persist=True,
+    )
+
+    assert benchmark["direction"] == "positive"
+    assert benchmark["trend"] == "baseline"
+    assert benchmark["positive_direction"] is True
+    assert benchmark["critical_failures"] == []
+    assert benchmark["history"]["evaluation_count_after_run"] == 1
+    assert benchmark["score"] >= 90.0
+
+    persisted = json.loads(history_path.read_text(encoding="utf-8"))
+    assert persisted["evaluations"][0]["score"] == benchmark["score"]
+    assert "delegate_assignment_hygiene" in persisted["evaluations"][0]["checks"]
+
+
+def test_self_improvement_benchmark_detects_regression_and_delegate_conflicts(monkeypatch, tmp_path):
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
+    recent = (now - timedelta(hours=2)).isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+    objective_path = _seed_reward_policy(tmp_path / "epoch.yaml")
+    history_path = tmp_path / "benchmarks.json"
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    _write_json(journal_path, {"entries": [{"occurredAt": recent}]})
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_1": {"run_id": "codex_1", "status": "completed", "completed_at": recent},
+                "codex_2": {"run_id": "codex_2", "status": "completed", "completed_at": recent},
+            }
+        },
+    )
+    _write_json(
+        ctx_path,
+        {
+            "sessions": {
+                "sess_1": {"session_id": "sess_1", "active": False, "updated_at": recent, "worktree_path": str(worktree)},
+                "sess_2": {"session_id": "sess_2", "active": False, "updated_at": recent, "worktree_path": str(worktree)},
+            }
+        },
+    )
+
+    monkeypatch.setattr(
+        self_improvement_tool,
+        "build_self_improvement_context",
+        lambda *args, **kwargs: {
+            "reliability": {"status": "fresh"},
+            "research_provider_policy": {"summary": {"available_provider_count": 2}},
+            "textbook_study": {"upgrade_targets": [{"title": "Typed execution frame"}]},
+            "business_recommendations": ["Prioritize contract-facing reliability work."],
+        },
+    )
+
+    clean_surface = {
+        "available": True,
+        "project": {"id": "project-1", "name": "Hermes Self-Improvement"},
+        "issues": [
+            _linear_issue(
+                "HAD-301",
+                state_type="started",
+                state_name="In Progress",
+                lane="Maintenance",
+                include_status_comment=True,
+                updated_at=recent,
+            ),
+            _linear_issue(
+                "HAD-302",
+                state_type="completed",
+                state_name="Done",
+                lane="Growth",
+                updated_at=recent,
+                completed_at=recent,
+            ),
+        ],
+        "error": None,
+    }
+    dirty_surface = {
+        "available": True,
+        "project": {"id": "project-1", "name": "Hermes Self-Improvement"},
+        "issues": [
+            _linear_issue(
+                "HAD-303",
+                state_type="started",
+                state_name="In Progress",
+                lane="Capability",
+                assignee={"id": "user-human", "name": "david"},
+                include_status_comment=False,
+                updated_at=recent,
+            ),
+            _linear_issue(
+                "HAD-304",
+                state_type="started",
+                state_name="In Progress",
+                lane="Capability",
+                assignee={"id": "user-human", "name": "david"},
+                include_status_comment=False,
+                updated_at=recent,
+            ),
+        ],
+        "error": None,
+    }
+
+    state = {"surface": clean_surface}
+    monkeypatch.setattr(
+        self_improvement_tool,
+        "_load_linear_benchmark_surface",
+        lambda **kwargs: state["surface"],
+    )
+
+    first = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        objective_path=objective_path,
+        history_path=history_path,
+        now=now,
+        persist=True,
+    )
+    state["surface"] = dirty_surface
+    second = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        objective_path=objective_path,
+        history_path=history_path,
+        now=now + timedelta(hours=1),
+        persist=True,
+    )
+
+    assert first["direction"] == "positive"
+    assert second["trend"] == "regressing"
+    assert second["direction"] == "negative"
+    assert "delegate_assignment_hygiene" in second["critical_failures"]
+    assert "reward_policy_alignment" in second["critical_failures"]
+    assert second["history"]["delta_vs_previous"] < 0
+    assert second["linear_surface"]["delegate_conflict_count"] == 2
+
+    persisted = json.loads(history_path.read_text(encoding="utf-8"))
+    assert len(persisted["evaluations"]) == 2

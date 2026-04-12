@@ -75,6 +75,8 @@ Treat the reliability floor as degraded when any of these are true:
 - the evidence sources used by this loop are clearly stale or contradictory.
 
 Always compute an explicit evidence freshness gate using the `self_improvement_evidence_gate` tool.
+Also run `self_improvement_benchmark` so Hermes can compare the current scorecard with prior runs
+and detect whether self-evolution is improving, flat, or regressing.
 Also compute `ontology_context(action="self_improvement")` so ontology bottlenecks and business recommendations
 show up in the candidate set instead of being treated as blog-only side effects.
 When ontology engineering or ontology-domain research is in scope, also compute
@@ -111,11 +113,12 @@ Minimum flow:
 1. `linear_issue(action="list_users")`
 2. `linear_issue(action="list_projects")`
 3. `ontology_context(action="self_improvement")`
-4. `ontology_context(action="ontology_engineering")` when ontology work is relevant
-5. `linear_issue(action="project_upsert", ...)`
-6. `linear_issue(action="issue_upsert", ...)` for each durable gap
-7. `linear_issue(action="comment", ...)` for machine-readable status
-8. `linear_issue(action="update_state", ...)` when work starts or finishes
+4. `self_improvement_benchmark(...)`
+5. `ontology_context(action="ontology_engineering")` when ontology work is relevant
+6. `linear_issue(action="project_upsert", ...)`
+7. `linear_issue(action="issue_upsert", ...)` for each durable gap
+8. `linear_issue(action="comment", ...)` for machine-readable status
+9. `linear_issue(action="update_state", ...)` when work starts or finishes
 
 Prefer `delegateId` for Hermes-owned work.
 Leave `assigneeId` empty unless a human operator is explicitly needed.
@@ -249,11 +252,13 @@ verbatim in both the operator summary and Linear status comment.
 On each loop:
 
 1. Read the charter, the live epoch objective, and the most recent evidence sources.
-2. Run `self_improvement_evidence_gate` and `ontology_context(action="self_improvement")` before scoring anything.
+2. Run `self_improvement_evidence_gate`, `self_improvement_benchmark`, and `ontology_context(action="self_improvement")` before scoring anything.
 3. Extract up to 3 concrete candidates and classify each into `Maintenance`, `Growth`, or `Capability`.
 4. Check reliability-floor triggers. If any are active, discard non-maintenance candidates for this loop.
    If the `self_improvement_evidence_gate` tool reports a degraded gate, list the reasons and
    suppress non-maintenance work for this cycle.
+   If `self_improvement_benchmark` reports critical failures or a regressing trend, prioritize the
+   highest-weight failed benchmark unless a more urgent reliability incident dominates.
 5. Use ontology business recommendations and conversion bottlenecks as candidate evidence when they are grounded in machine-readable artifacts.
 6. If ontology work is part of the loop, call `ontology_context(action="ontology_engineering")` directly.
    Do not reconstruct the same context by grepping repo files or shelling into Python.
@@ -276,6 +281,7 @@ Return only a concise operator summary:
 - Project status
 - Issues created or updated
 - Reliability gate status (healthy/degraded) and why
+- Benchmark score, direction, and trend
 - One issue chosen for implementation, its lane, and why it won
 - Codex run id / status if delegation happened
 - Next highest-leverage move
