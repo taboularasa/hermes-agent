@@ -1096,19 +1096,14 @@ def _format_strategic_slack_message(candidate: dict[str, Any]) -> str:
 
 
 def _top_candidate_needs_immediate_execution(benchmark: dict[str, Any], top_candidate: Optional[dict[str, Any]]) -> bool:
-    if str((benchmark.get("gate") or {}).get("status") or "").strip().casefold() != "healthy":
+    if str((benchmark.get("gate") or {}).get("status") or "").strip().casefold() == "degraded":
         return True
     if benchmark.get("critical_failures"):
         return True
     if not isinstance(top_candidate, dict) or not top_candidate:
         return False
-    lane = str(top_candidate.get("lane") or "").strip().casefold()
     status = str(top_candidate.get("status") or "").strip().casefold()
-    if lane == "maintenance":
-        return True
     if status == "fail":
-        return True
-    if lane == "growth" and status in {"fail", "warn"}:
         return True
     return False
 

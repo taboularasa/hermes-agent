@@ -1625,6 +1625,137 @@ def test_self_improvement_pipeline_surfaces_strategic_conversation_when_healthy(
     assert history["conversations"][0]["last_proposed_at"] == now.isoformat()
 
 
+def test_self_improvement_pipeline_allows_strategic_conversation_when_gate_is_warning(monkeypatch, tmp_path):
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+    older_but_fresh = (now - timedelta(hours=20)).isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=older_but_fresh)
+    objective_path = _seed_reward_policy(tmp_path / "epoch.yaml")
+    history_path = tmp_path / "benchmarks.json"
+    discussion_history_path = tmp_path / "strategic_conversations.json"
+    discussion_notes_dir = tmp_path / "strategic_notes"
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    _write_json(journal_path, {"entries": [{"occurredAt": older_but_fresh}]})
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_1": {"run_id": "codex_1", "status": "completed", "completed_at": recent},
+                "codex_2": {"run_id": "codex_2", "status": "completed", "completed_at": recent},
+            }
+        },
+    )
+    _write_json(
+        ctx_path,
+        {
+            "sessions": {
+                "sess_1": {"session_id": "sess_1", "active": False, "updated_at": recent, "worktree_path": str(worktree)},
+                "sess_2": {"session_id": "sess_2", "active": False, "updated_at": recent, "worktree_path": str(worktree)},
+            }
+        },
+    )
+
+    monkeypatch.setattr(
+        self_improvement_tool,
+        "build_self_improvement_context",
+        lambda *args, **kwargs: {
+            "reliability": {"status": "fresh"},
+            "research_provider_policy": {"summary": {"available_provider_count": 2}},
+            "textbook_study": {"upgrade_targets": []},
+            "candidates": {
+                "maintenance": [],
+                "growth": [
+                    {
+                        "lane": "Growth",
+                        "title": "Develop a strategic sounding-board loop with David",
+                        "why_now": "Hermes should still surface future-direction discussions even when evidence cadence is uneven but execution is healthy.",
+                    }
+                ],
+                "capability": [],
+            },
+            "business_recommendations": [
+                "Keep strategic discussion flow available when the reliability gate is only warning-level."
+            ],
+            "evidence": {
+                "metrics_path": str(ontology_root / "evolution" / "metrics.json"),
+                "delta_report_path": str(ontology_root / "evolution" / "delta_report.json"),
+                "daily_report_path": str(ontology_root / "evolution" / "daily_report.md"),
+            },
+        },
+    )
+
+    store = {
+        "project": {
+            "id": "project-1",
+            "name": "Hermes Self-Improvement",
+            "description": linear_issue_tool._format_project_description(
+                "Track capability gaps and implementation follow-through.",
+                "project:hermes-self-improvement",
+            ),
+            "teams": [{"id": "team-1", "key": "HAD", "name": "Hadto"}],
+            "url": "https://linear.app/hadto/project/hermes-self-improvement",
+        },
+        "issues": [
+            _linear_issue(
+                "HAD-532",
+                state_type="completed",
+                state_name="Done",
+                lane="Growth",
+                updated_at=recent,
+                completed_at=recent,
+            ),
+            _linear_issue(
+                "HAD-533",
+                state_type="completed",
+                state_name="Done",
+                lane="Maintenance",
+                updated_at=recent,
+                completed_at=recent,
+            ),
+        ],
+        "states": [
+            {"id": "state-backlog", "name": "Backlog", "type": "backlog"},
+            {"id": "state-progress", "name": "In Progress", "type": "started"},
+            {"id": "state-done", "name": "Done", "type": "completed"},
+        ],
+        "users": {
+            "hermes": {"id": "user-hermes", "name": "Hermes", "displayName": "Hermes", "email": "hermes@hadto.net", "active": True},
+            "human": {"id": "user-human", "name": "David", "displayName": "David", "email": "david@hadto.net", "active": True},
+        },
+        "next_issue": 609,
+        "timestamp": recent,
+    }
+    _install_fake_linear_surface(monkeypatch, store)
+
+    pipeline = self_improvement_tool.evaluate_self_improvement_pipeline(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        objective_path=objective_path,
+        history_path=history_path,
+        discussion_history_path=discussion_history_path,
+        discussion_notes_dir=discussion_notes_dir,
+        now=now,
+        persist=True,
+    )
+
+    assert pipeline["benchmark"]["gate"]["status"] == "warning"
+    assert pipeline["top_candidate"]["benchmark_id"] == "reliability_gate"
+    assert pipeline["top_candidate"]["status"] == "warn"
+    selected = pipeline["strategic_conversation"]["selected"]
+    assert selected is not None
+    assert selected["should_reach_out"] is True
+    assert selected["slack_target"] == "slack"
+    assert Path(selected["note_path"]).exists()
+
+
 def test_self_improvement_pipeline_respects_strategic_conversation_cooldown(monkeypatch, tmp_path):
     now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
     recent = (now - timedelta(hours=2)).isoformat()
