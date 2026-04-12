@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 _TELEGRAM_TOPIC_TARGET_RE = re.compile(r"^\s*(-?\d+)(?::(\d+))?\s*$")
 _FEISHU_TARGET_RE = re.compile(r"^\s*((?:oc|ou|on|chat|open)_[-A-Za-z0-9]+)(?::([-A-Za-z0-9_]+))?\s*$")
+_SLACK_TARGET_RE = re.compile(r"^\s*([CDG][A-Z0-9]{8,})\s*$")
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".3gp"}
 _AUDIO_EXTS = {".ogg", ".opus", ".mp3", ".wav", ".m4a"}
@@ -233,6 +234,10 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         match = _FEISHU_TARGET_RE.fullmatch(target_ref)
         if match:
             return match.group(1), match.group(2), True
+    if platform_name == "slack":
+        match = _SLACK_TARGET_RE.fullmatch(target_ref)
+        if match:
+            return match.group(1), None, True
     if target_ref.lstrip("-").isdigit():
         return target_ref, None, True
     return None, None, False
