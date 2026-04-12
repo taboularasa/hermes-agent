@@ -15,7 +15,9 @@ from agent.ontology_context import (
     load_ontology_snapshot,
     summarize_ontology_reliability,
 )
+from hermes_cli.ctx_runtime import normalize_ctx_bindings
 from hermes_constants import display_hermes_home, get_hermes_home
+from tools.codex_delegate_tool import normalize_codex_runs
 from tools.registry import registry
 from utils import atomic_json_write
 
@@ -735,6 +737,12 @@ def evaluate_self_improvement_evidence(
     active_stale_hours: int = DEFAULT_ACTIVE_STALE_HOURS,
 ) -> Dict[str, Any]:
     current = now or datetime.now(tz=timezone.utc)
+    normalize_ctx_bindings(
+        bindings_path=ctx_bindings_path,
+        stale_hours=active_stale_hours,
+        now=current,
+    )
+    normalize_codex_runs(runs_path=codex_runs_path, now=current)
     journal_payload = _load_json(journal_path)
     codex_payload = _load_json(codex_runs_path)
     ctx_payload = _load_json(ctx_bindings_path)

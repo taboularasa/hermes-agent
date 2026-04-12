@@ -11,7 +11,9 @@ from typing import Any, Iterable, Optional
 
 import yaml
 
+from hermes_cli.ctx_runtime import normalize_ctx_bindings
 from hermes_constants import display_hermes_home, get_hermes_home
+from tools.codex_delegate_tool import normalize_codex_runs
 from tools import linear_issue_tool as linear_tool
 from tools.registry import registry
 from utils import atomic_json_write
@@ -275,8 +277,9 @@ def _parse_run_timestamp(record: dict[str, Any]) -> Optional[datetime]:
     return None
 
 
-def _load_latest_codex_runs(path: Path) -> dict[str, dict[str, Any]]:
+def _load_latest_codex_runs(path: Path, *, now: Optional[datetime] = None) -> dict[str, dict[str, Any]]:
     latest_by_issue: dict[str, dict[str, Any]] = {}
+    normalize_codex_runs(runs_path=path, now=now)
     runs = _load_json(path).get("runs", {})
     if not isinstance(runs, dict):
         return latest_by_issue
@@ -309,7 +312,8 @@ def _is_active_codex_status(value: Any) -> bool:
     return str(value or "").strip().casefold() in ACTIVE_CODEX_STATUSES
 
 
-def _load_codex_run_indexes(path: Path) -> dict[str, dict[str, dict[str, Any]]]:
+def _load_codex_run_indexes(path: Path, *, now: Optional[datetime] = None) -> dict[str, dict[str, dict[str, Any]]]:
+    normalize_codex_runs(runs_path=path, now=now)
     payload = _load_json(path)
     indexes: dict[str, dict[str, dict[str, Any]]] = {
         "by_issue": {},
@@ -346,7 +350,8 @@ def _load_codex_run_indexes(path: Path) -> dict[str, dict[str, dict[str, Any]]]:
     return indexes
 
 
-def _load_active_ctx_bindings(path: Path) -> dict[str, list[dict[str, Any]]]:
+def _load_active_ctx_bindings(path: Path, *, now: Optional[datetime] = None) -> dict[str, list[dict[str, Any]]]:
+    normalize_ctx_bindings(bindings_path=path, now=now)
     payload = _load_json(path)
     sessions = payload.get("sessions", {}) if isinstance(payload, dict) else {}
     if not isinstance(sessions, dict):
@@ -1187,9 +1192,9 @@ def evaluate_workspace_backlog(
             "state": {"type": {"nin": ["completed", "canceled"]}},
         },
     )
-    codex_indexes = _load_codex_run_indexes(codex_runs_path)
+    codex_indexes = _load_codex_run_indexes(codex_runs_path, now=current)
     latest_codex_runs = codex_indexes["by_issue"]
-    ctx_active_by_worktree = _load_active_ctx_bindings(ctx_bindings_path)
+    ctx_active_by_worktree = _load_active_ctx_bindings(ctx_bindings_path, now=current)
     open_issue_index = {
         str(issue.get("identifier") or "").strip().upper(): issue
         for issue in raw_issues

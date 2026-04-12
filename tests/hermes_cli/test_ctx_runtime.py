@@ -471,6 +471,45 @@ def test_normalize_ctx_bindings_deactivates_stale_active_binding(monkeypatch, tm
     assert record["sessions"][session_id]["reason"] == "ctx binding retired: stale active binding (>12h)"
 
 
+def test_normalize_ctx_bindings_accepts_explicit_bindings_path(tmp_path):
+    now = datetime(2026, 4, 12, 16, 0, 0, tzinfo=timezone.utc)
+    session_id = "sess-explicit-path"
+    updated_at = (now - timedelta(hours=13)).isoformat()
+    worktree = tmp_path / "worktree"
+    worktree.mkdir(parents=True, exist_ok=True)
+    bindings_path = tmp_path / "session_bindings.json"
+    bindings_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "sessions": {
+                    session_id: {
+                        "active": True,
+                        "reason": "ctx task bound",
+                        "session_id": session_id,
+                        "platform": "cli",
+                        "workspace_id": "ws-1",
+                        "task_id": "task-1",
+                        "worktree_id": "wt-1",
+                        "worktree_path": str(worktree),
+                        "updated_at": updated_at,
+                        "source": "ctx-daemon",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    retired = ctx_runtime.normalize_ctx_bindings(bindings_path=bindings_path, now=now)
+    record = json.loads(bindings_path.read_text(encoding="utf-8"))
+
+    assert retired == {session_id: "ctx binding retired: stale active binding (>12h)"}
+    assert record["sessions"][session_id]["active"] is False
+    assert record["sessions"][session_id]["reason"] == "ctx binding retired: stale active binding (>12h)"
+    assert record["sessions"][session_id]["updated_at"] == now.isoformat()
+
+
 def test_normalize_ctx_bindings_deactivates_stale_active_session(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
