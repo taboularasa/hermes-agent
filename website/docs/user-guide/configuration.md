@@ -985,6 +985,37 @@ memory:
   user_char_limit: 1375     # ~500 tokens
 ```
 
+## ctx Runtime
+
+Hermes can bind coding-capable sessions to a ctx-managed task and worktree instead of creating its own nested git worktree:
+
+```yaml
+ctx:
+  enabled: true
+  coding_mode: auto
+  coding_toolsets:
+    - terminal
+    - file
+    - code_execution
+```
+
+When the ctx daemon is healthy, Hermes creates or reuses the ctx task binding and points the session cwd at the daemon-managed worktree. If the daemon returns the specific transient failure `attempted to acquire a connection on a closed pool`, Hermes automatically restarts the user service once, waits for the daemon to become ready again, and retries the request.
+
+For long-running home-server installs, cap the daemon lifetime so it is periodically refreshed before the database pool goes stale:
+
+```ini
+# ~/.config/systemd/user/ctx-daemon.service.d/recovery.conf
+[Service]
+RuntimeMaxSec=8h
+```
+
+Then reload and restart the user service:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user restart ctx-daemon.service
+```
+
 ## Git Worktree Isolation
 
 Enable isolated git worktrees for running multiple agents in parallel on the same repo:

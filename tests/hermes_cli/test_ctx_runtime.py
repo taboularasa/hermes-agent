@@ -1,5 +1,9 @@
+import io
 import json
+import subprocess
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from hermes_cli import ctx_runtime
 from hermes_cli.config import load_config, save_config
@@ -42,6 +46,21 @@ class _FakeCtxClient:
             "task_id": task_id,
             "worktree_id": "wt-1",
         }
+
+
+class _FakeHTTPResponse:
+    def __init__(self, status: int, payload):
+        self.status = status
+        self._payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self):
+        return json.dumps(self._payload).encode("utf-8")
 
 
 def _write_ctx_config(tmp_path, **overrides):
@@ -220,6 +239,130 @@ def test_guess_repo_root_prefers_process_cwd_over_terminal_default(monkeypatch, 
 
     resolved = ctx_runtime._guess_repo_root(None)
     assert resolved == str(repo_root)
+
+
+def test_ctx_client_retries_after_closed_pool_error(monkeypatch):
+    client = ctx_runtime._CtxDaemonClient("http://ctx.local", "token")
+    restart_calls = []
+    requests = []
+    responses = iter(
+        [
+            ctx_runtime.error.HTTPError(
+                "http://ctx.local/api/workspaces/ws-1/tasks",
+                500,
+                "Internal Server Error",
+                hdrs=None,
+                fp=io.BytesIO(
+                    b'{"error":"attempted to acquire a connection on a closed pool"}'
+                ),
+            ),
+            _FakeHTTPResponse(200, {"id": "task-1"}),
+        ]
+    )
+
+    def _fake_urlopen(req, timeout=20):
+        requests.append(
+            {
+                "url": req.full_url,
+                "method": req.get_method(),
+                "payload": json.loads(req.data.decode("utf-8")),
+                "timeout": timeout,
+            }
+        )
+        response = next(responses)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    monkeypatch.setattr(ctx_runtime.request, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(
+        ctx_runtime,
+        "_restart_ctx_daemon_service",
+        lambda daemon_url, token: restart_calls.append((daemon_url, token)),
+    )
+
+    task = client.create_task("ws-1", "Fix the failing tests", "Fix the failing tests")
+
+    assert task == {"id": "task-1"}
+    assert restart_calls == [("http://ctx.local", "token")]
+    assert requests == [
+        {
+            "url": "http://ctx.local/api/workspaces/ws-1/tasks",
+            "method": "POST",
+            "payload": {
+                "title": "Fix the failing tests",
+                "prompt": "Fix the failing tests",
+            },
+            "timeout": 20,
+        },
+        {
+            "url": "http://ctx.local/api/workspaces/ws-1/tasks",
+            "method": "POST",
+            "payload": {
+                "title": "Fix the failing tests",
+                "prompt": "Fix the failing tests",
+            },
+            "timeout": 20,
+        },
+    ]
+
+
+def test_ctx_client_does_not_retry_non_recoverable_http_error(monkeypatch):
+    client = ctx_runtime._CtxDaemonClient("http://ctx.local", "token")
+    restart_calls = []
+
+    def _fake_urlopen(_req, timeout=20):
+        raise ctx_runtime.error.HTTPError(
+            "http://ctx.local/api/workspaces",
+            500,
+            "Internal Server Error",
+            hdrs=None,
+            fp=io.BytesIO(b'{"error":"database unavailable"}'),
+        )
+
+    monkeypatch.setattr(ctx_runtime.request, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(
+        ctx_runtime,
+        "_restart_ctx_daemon_service",
+        lambda daemon_url, token: restart_calls.append((daemon_url, token)),
+    )
+
+    with pytest.raises(RuntimeError, match="HTTP 500"):
+        client.list_workspaces()
+
+    assert restart_calls == []
+
+
+def test_restart_ctx_daemon_service_restarts_and_waits(monkeypatch):
+    calls = []
+    waits = []
+
+    def _fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(ctx_runtime.subprocess, "run", _fake_run)
+    monkeypatch.setattr(
+        ctx_runtime,
+        "_wait_for_ctx_daemon_ready",
+        lambda daemon_url, token: waits.append((daemon_url, token)),
+    )
+    monkeypatch.setattr(ctx_runtime, "_last_ctx_recovery_attempt", 0.0)
+
+    ctx_runtime._restart_ctx_daemon_service("http://ctx.local", "token")
+
+    assert calls == [
+        (
+            ["systemctl", "--user", "restart", "ctx-daemon.service"],
+            {
+                "capture_output": True,
+                "text": True,
+                "timeout": 30,
+            },
+        )
+    ]
+    assert waits == [("http://ctx.local", "token")]
+    assert ctx_runtime._last_ctx_recovery_attempt > 0.0
 
 
 def test_normalize_ctx_bindings_deactivates_ended_cron_session(monkeypatch, tmp_path):
