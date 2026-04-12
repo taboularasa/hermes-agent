@@ -588,6 +588,28 @@ class TestInspectJobTopology:
         assert issue["severity"] == "error"
         assert snapshot["ok"] is False
 
+    def test_duplicate_global_coordinators_are_flagged(self, tmp_cron_dir):
+        create_job(prompt="A", schedule="every 1h", name="coord-a", role="coordinate", scope="global")
+        create_job(prompt="B", schedule="every 2h", name="coord-b", role="coordinate", scope="global")
+
+        snapshot = inspect_job_topology(include_disabled=True)
+
+        issue = next(issue for issue in snapshot["issues"] if issue["code"] == "duplicate_global_coordinator")
+        assert issue["severity"] == "error"
+        assert snapshot["ok"] is False
+
+    def test_global_coordinator_overlapping_scoped_implementers_is_error(self, tmp_cron_dir):
+        create_job(prompt="A", schedule="every 1h", name="coord-global", role="coordinate", scope="global")
+        create_job(prompt="B", schedule="every 2h", name="impl-pipeline", role="implement", scope="pipeline")
+
+        snapshot = inspect_job_topology(include_disabled=True)
+
+        issue = next(
+            issue for issue in snapshot["issues"] if issue["code"] == "global_coordinator_with_scoped_implementers"
+        )
+        assert issue["severity"] == "error"
+        assert snapshot["ok"] is False
+
 
 class TestSaveJobOutput:
     def test_creates_output_file(self, tmp_cron_dir):

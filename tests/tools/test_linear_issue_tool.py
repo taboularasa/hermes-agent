@@ -366,3 +366,85 @@ def test_normalize_issue_keeps_newest_comments_first():
         "comment-newest",
         "comment-middle",
     ]
+
+
+def test_linear_issue_issue_upsert_explicit_issue_preserves_existing_description_when_omitted(monkeypatch):
+    update_calls = []
+
+    monkeypatch.setattr(
+        linear_issue_tool,
+        "_fetch_issue",
+        lambda issue_ref, comment_limit=10: {
+            "id": "issue-1",
+            "identifier": "HAD-283",
+            "title": "Harden Hermes Linear webhooks against transient agent-session bootstrap failures",
+            "description": "Keep existing description",
+            "priority": 1,
+            "project": {"id": "project-1", "name": "Hermes Self-Improvement"},
+            "team": {"id": "team-1", "key": "HAD", "name": "Hadto"},
+            "state": {"id": "state-1", "name": "Todo", "type": "unstarted"},
+            "delegate": None,
+            "assignee": None,
+            "labels": [],
+            "comments": [],
+        },
+    )
+    monkeypatch.setattr(
+        linear_issue_tool,
+        "_update_issue",
+        lambda issue_id, input_data: update_calls.append((issue_id, input_data)) or {
+            "id": issue_id,
+            "identifier": "HAD-283",
+        },
+    )
+
+    result = json.loads(
+        linear_issue_tool.linear_issue(
+            {
+                "action": "issue_upsert",
+                "identifier": "HAD-283",
+                "delegate_id": "user-hermes",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["updated_existing"] is True
+    assert update_calls == [("issue-1", {"delegateId": "user-hermes"})]
+
+
+def test_linear_issue_list_issues_builds_filter_and_returns_items(monkeypatch):
+    seen: list[tuple[int, dict[str, object] | None]] = []
+
+    monkeypatch.setattr(
+        linear_issue_tool,
+        "_list_issues",
+        lambda *, limit=100, filter_input=None: seen.append((limit, filter_input)) or [
+            {"identifier": "HAD-271", "title": "Repair self-improvement reliability floor"}
+        ],
+    )
+
+    result = json.loads(
+        linear_issue_tool.linear_issue(
+            {
+                "action": "list_issues",
+                "team_key": "HAD",
+                "project_name": "Hermes Self-Improvement",
+                "state_types": ["started", "unstarted"],
+                "limit": 25,
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["issues"][0]["identifier"] == "HAD-271"
+    assert seen == [
+        (
+            25,
+            {
+                "team": {"key": {"eq": "HAD"}},
+                "project": {"name": {"eq": "Hermes Self-Improvement"}},
+                "state": {"type": {"in": ["started", "unstarted"]}},
+            },
+        )
+    ]
