@@ -477,6 +477,54 @@ def test_evaluate_self_improvement_evidence_keeps_gate_healthy_after_retiring_st
     assert persisted_ctx["sessions"]["ctx_stale"]["updated_at"] == recent
 
 
+def test_evaluate_self_improvement_evidence_downgrades_freshness_skew_to_warning(tmp_path):
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+    older_but_fresh = (now - timedelta(hours=20)).isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=older_but_fresh)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    _write_json(journal_path, {"entries": [{"occurredAt": older_but_fresh}]})
+    _write_json(
+        codex_path,
+        {"runs": {"codex_1": {"run_id": "codex_1", "status": "completed", "completed_at": recent}}},
+    )
+    _write_json(
+        ctx_path,
+        {
+            "sessions": {
+                "ctx_1": {
+                    "session_id": "ctx_1",
+                    "task_id": "task-1",
+                    "active": False,
+                    "updated_at": recent,
+                    "worktree_path": str(worktree),
+                }
+            }
+        },
+    )
+
+    gate = self_improvement_tool.evaluate_self_improvement_evidence(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        now=now,
+    )
+
+    assert gate["status"] == "warning"
+    assert gate["reasons"] == []
+    assert gate["contradictions"] == []
+    assert gate["warnings"] == ["evidence freshness skew across sources"]
+    assert gate["freshness_spread_hours"] == 20.0
+    assert gate["suppression"]["suppress_non_maintenance"] is False
+
+
 def test_evaluate_self_improvement_evidence_retires_stale_ctx_bindings_before_scoring(tmp_path):
     now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
     recent = (now - timedelta(hours=1)).isoformat()
@@ -814,6 +862,82 @@ def test_self_improvement_benchmark_scores_positive_and_persists_history(monkeyp
     persisted = json.loads(history_path.read_text(encoding="utf-8"))
     assert persisted["evaluations"][0]["score"] == benchmark["score"]
     assert "delegate_assignment_hygiene" in persisted["evaluations"][0]["checks"]
+
+
+def test_self_improvement_benchmark_treats_freshness_skew_as_warning(monkeypatch, tmp_path):
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+    older_but_fresh = (now - timedelta(hours=20)).isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=older_but_fresh)
+
+    _write_json(journal_path, {"entries": [{"occurredAt": older_but_fresh}]})
+    _write_json(
+        codex_path,
+        {"runs": {"codex_1": {"run_id": "codex_1", "status": "completed", "completed_at": recent}}},
+    )
+    _write_json(
+        ctx_path,
+        {"sessions": {"ctx_1": {"session_id": "ctx_1", "active": False, "updated_at": recent}}},
+    )
+
+    monkeypatch.setattr(
+        self_improvement_tool,
+        "build_self_improvement_context",
+        lambda *args, **kwargs: {
+            "reliability": {"status": "fresh"},
+            "research_provider_policy": {"summary": {"available_provider_count": 2}},
+            "textbook_study": {"upgrade_targets": [{"title": "Typed execution frame"}]},
+            "business_recommendations": ["Keep backlog flow while evidence cadence catches up."],
+        },
+    )
+    monkeypatch.setattr(
+        self_improvement_tool,
+        "_load_linear_benchmark_surface",
+        lambda **kwargs: {
+            "available": True,
+            "project": {"id": "project-1", "name": "Hermes Self-Improvement"},
+            "issues": [
+                _linear_issue(
+                    "HAD-205",
+                    state_type="started",
+                    state_name="In Progress",
+                    lane="Growth",
+                    include_status_comment=True,
+                    updated_at=recent,
+                ),
+                _linear_issue(
+                    "HAD-206",
+                    state_type="completed",
+                    state_name="Done",
+                    lane="Maintenance",
+                    updated_at=recent,
+                    completed_at=recent,
+                ),
+            ],
+            "error": None,
+        },
+    )
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        now=now,
+        persist=False,
+    )
+    items = {item["id"]: item for item in benchmark["benchmarks"]}
+
+    assert benchmark["gate"]["status"] == "warning"
+    assert "reliability_gate" not in benchmark["critical_failures"]
+    assert items["reliability_gate"]["status"] == "warn"
+    assert items["reliability_gate"]["detail"] == "evidence freshness skew across sources"
+    assert items["reliability_gate"]["metrics"]["warning_count"] == 1
+    assert items["reliability_gate"]["metrics"]["contradiction_count"] == 0
 
 
 def test_self_improvement_benchmark_detects_regression_and_delegate_conflicts(monkeypatch, tmp_path):
