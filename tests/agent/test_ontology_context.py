@@ -168,7 +168,7 @@ def _seed_ontology_repo(tmp_path: Path, *, now: datetime) -> Path:
         },
     )
     _write_yaml(
-        repo / "docs" / "issues" / "ONT-009-ontology-engineering-textbook-study-program.md",
+        repo / "docs" / "operations" / "ontology-backlog" / "ONT-009-ontology-engineering-textbook-study-program.md",
         {
             "id": "ONT-009",
             "title": "Run continuous ontology-engineering textbook study program",
@@ -178,7 +178,7 @@ def _seed_ontology_repo(tmp_path: Path, *, now: datetime) -> Path:
         },
     )
     _write_yaml(
-        repo / "docs" / "issues" / "ONT-004-add-micro-level-ontology-authoring-contract.md",
+        repo / "docs" / "operations" / "ontology-backlog" / "ONT-004-add-micro-level-ontology-authoring-contract.md",
         {
             "id": "ONT-004",
             "title": "Add micro-level ontology authoring contract",
@@ -188,7 +188,7 @@ def _seed_ontology_repo(tmp_path: Path, *, now: datetime) -> Path:
         },
     )
     _write_yaml(
-        repo / "docs" / "issues" / "ONT-010-add-competency-question-authoring-templates.md",
+        repo / "docs" / "operations" / "ontology-backlog" / "ONT-010-add-competency-question-authoring-templates.md",
         {
             "id": "ONT-010",
             "title": "Add competency-question authoring templates",
@@ -198,7 +198,7 @@ def _seed_ontology_repo(tmp_path: Path, *, now: datetime) -> Path:
         },
     )
     _write_yaml(
-        repo / "docs" / "issues" / "ONT-017-add-foundational-ontology-contract.md",
+        repo / "docs" / "operations" / "ontology-backlog" / "ONT-017-add-foundational-ontology-contract.md",
         {
             "id": "ONT-017",
             "title": "Add foundational ontology contract",
@@ -311,7 +311,7 @@ def test_ontology_engineering_context_reads_textbook_study_and_provider_policy(t
 def test_ontology_engineering_context_falls_back_to_issue_metadata_when_yaml_parse_fails(tmp_path):
     now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
     repo = _seed_ontology_repo(tmp_path, now=now)
-    (repo / "docs" / "issues" / "ONT-009-ontology-engineering-textbook-study-program.md").write_text(
+    (repo / "docs" / "operations" / "ontology-backlog" / "ONT-009-ontology-engineering-textbook-study-program.md").write_text(
         "id: ONT-009\n"
         "title: Run continuous ontology-engineering textbook study program\n"
         "status: in_progress\n"
@@ -322,7 +322,7 @@ def test_ontology_engineering_context_falls_back_to_issue_metadata_when_yaml_par
         "This file should still be discoverable from metadata.\n",
         encoding="utf-8",
     )
-    (repo / "docs" / "issues" / "ONT-010-add-competency-question-authoring-templates.md").write_text(
+    (repo / "docs" / "operations" / "ontology-backlog" / "ONT-010-add-competency-question-authoring-templates.md").write_text(
         "id: ONT-010\n"
         "title: Add competency-question authoring templates\n"
         "status: in_progress\n"
@@ -338,6 +338,52 @@ def test_ontology_engineering_context_falls_back_to_issue_metadata_when_yaml_par
 
     assert context["study"]["governing_issue"]["id"] == "ONT-009"
     assert any(target["issue_id"] == "ONT-010" for target in context["hermes_upgrade_targets"])
+
+
+def test_ontology_engineering_context_supports_legacy_issue_doc_paths(tmp_path):
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
+    repo = _seed_ontology_repo(tmp_path, now=now)
+
+    backlog_dir = repo / "docs" / "operations" / "ontology-backlog"
+    legacy_dir = repo / "docs" / "issues"
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+    for path in backlog_dir.glob("ONT-*.md"):
+        path.replace(legacy_dir / path.name)
+
+    context = build_ontology_engineering_context(repo, limit=4)
+
+    assert context["study"]["governing_issue"]["id"] == "ONT-009"
+    assert any(target["issue_id"] == "ONT-017" for target in context["hermes_upgrade_targets"])
+
+
+def test_ontology_engineering_context_uses_provider_inventory_when_env_missing(tmp_path):
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
+    repo = _seed_ontology_repo(tmp_path, now=now)
+    _write_yaml(
+        repo / "docs" / "operations" / "ontology-research-provider-coverage.yaml",
+        {
+            "configured_backend": "tavily",
+            "providers": [
+                {"id": "exa", "status": "ready"},
+                {"id": "tavily", "status": "declared"},
+            ],
+        },
+    )
+
+    with patch.dict(os.environ, {}, clear=True):
+        context = build_ontology_engineering_context(repo, limit=4)
+
+    provider_status = context["research_protocol"]["provider_status"]
+    assert provider_status["available_providers"] == ["exa", "tavily"]
+    assert provider_status["configured_backend"] == "tavily"
+    assert provider_status["coverage_source"] == "inventory"
+    assert provider_status["inventory_path"].endswith(
+        "docs/operations/ontology-research-provider-coverage.yaml"
+    )
+    assert any(
+        "Provider coverage is declared in the ontology repo" in step
+        for step in context["research_protocol"]["steps"]
+    )
 
 
 def test_consulting_context_includes_multi_provider_research_protocol(tmp_path):
