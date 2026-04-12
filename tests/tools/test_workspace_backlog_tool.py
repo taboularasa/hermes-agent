@@ -39,6 +39,20 @@ def _issue(
     }
 
 
+def _empty_git_hygiene() -> dict:
+    return {
+        "counts": {
+            "incidents": 0,
+            "orphaned_dirty": 0,
+            "linked_wip": 0,
+            "cleanup_candidates": 0,
+            "active_owned": 0,
+        },
+        "incidents": [],
+        "selected": None,
+    }
+
+
 def test_parse_time_accepts_epoch_seconds_string():
     parsed = workspace_backlog_tool._parse_time("1775937402.8603923")
 
@@ -67,6 +81,7 @@ def test_workspace_backlog_orchestrator_selects_actionable_started_issue_and_per
     }
 
     monkeypatch.setattr(workspace_backlog_tool.linear_tool, "_list_users", lambda: [hermes_user, david_user])
+    monkeypatch.setattr(workspace_backlog_tool, "_collect_git_hygiene", lambda **_kw: _empty_git_hygiene())
     monkeypatch.setattr(
         workspace_backlog_tool.linear_tool,
         "_list_issues",
@@ -118,12 +133,15 @@ def test_workspace_backlog_orchestrator_selects_actionable_started_issue_and_per
     )
 
     assert result["selected_issue"]["identifier"] == "HAD-271"
+    assert result["selected_work"]["identifier"] == "HAD-271"
+    assert result["selected_work"]["kind"] == "linear_issue"
     assert result["selected_issue"]["ownership"] == "hermes"
     assert result["selected_issue"]["repo_root"] == "/home/david/stacks/hermes-agent"
     assert result["counts"]["human_owned"] == 1
     assert state_path.exists() is True
     persisted = json.loads(state_path.read_text(encoding="utf-8"))
     assert persisted["selected"]["identifier"] == "HAD-271"
+    assert persisted["selected_work"]["identifier"] == "HAD-271"
 
 
 def test_workspace_backlog_orchestrator_can_claim_unowned_issue_and_write_comment(monkeypatch, tmp_path):
@@ -138,6 +156,7 @@ def test_workspace_backlog_orchestrator_can_claim_unowned_issue_and_write_commen
     calls: list[dict] = []
 
     monkeypatch.setattr(workspace_backlog_tool.linear_tool, "_list_users", lambda: [hermes_user])
+    monkeypatch.setattr(workspace_backlog_tool, "_collect_git_hygiene", lambda **_kw: _empty_git_hygiene())
     monkeypatch.setattr(
         workspace_backlog_tool.linear_tool,
         "_list_issues",
@@ -186,6 +205,7 @@ def test_workspace_backlog_orchestrator_can_claim_unowned_issue_and_write_commen
     )
 
     assert result["selected_issue"]["identifier"] == "HAD-283"
+    assert result["selected_work"]["identifier"] == "HAD-283"
     assert calls[0] == {
         "action": "issue_upsert",
         "identifier": "HAD-283",
@@ -194,3 +214,168 @@ def test_workspace_backlog_orchestrator_can_claim_unowned_issue_and_write_commen
     assert calls[1]["action"] == "comment"
     assert calls[1]["identifier"] == "HAD-283"
     assert calls[1]["dedupe_key"] == "workspace-orchestrator:HAD-283"
+
+
+def test_workspace_backlog_orchestrator_prefers_git_hygiene_and_comments_on_linked_issue(monkeypatch, tmp_path):
+    now = datetime(2026, 4, 12, 16, 0, 0, tzinfo=timezone.utc)
+    hermes_user = {
+        "id": "user-hermes",
+        "name": "Hermes",
+        "displayName": "hermes",
+        "email": "hermes@oauthapp.linear.app",
+        "active": True,
+    }
+    calls: list[dict] = []
+
+    monkeypatch.setattr(workspace_backlog_tool.linear_tool, "_list_users", lambda: [hermes_user])
+    monkeypatch.setattr(
+        workspace_backlog_tool.linear_tool,
+        "_list_issues",
+        lambda *, limit=100, filter_input=None: [
+            _issue(
+                "HAD-300",
+                title="Recover linked dirty worktree",
+                project_name="Hermes Self-Improvement",
+                state_name="In Progress",
+                state_type="started",
+                updated_at=now - timedelta(hours=3),
+                priority=1,
+                delegate=hermes_user,
+            ),
+            _issue(
+                "HAD-301",
+                title="Fresh backlog item",
+                project_name="Hermes Self-Improvement",
+                state_name="Todo",
+                state_type="unstarted",
+                updated_at=now - timedelta(hours=1),
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        workspace_backlog_tool,
+        "_collect_git_hygiene",
+        lambda **_kw: {
+            "counts": {
+                "incidents": 1,
+                "orphaned_dirty": 0,
+                "linked_wip": 1,
+                "cleanup_candidates": 0,
+                "active_owned": 0,
+            },
+            "incidents": [
+                {
+                    "kind": "git_hygiene",
+                    "identifier": "HAD-300",
+                    "selection_bucket": "reconcile_linked_wip",
+                    "execution_mode": "investigate_merge_or_delete",
+                    "recommended_action": "resume_or_merge_linked_wip",
+                    "selection_reason": "Dirty linked worktree is unowned.",
+                    "linked_issue_identifier": "HAD-300",
+                    "linked_issue_open": True,
+                    "repo_root": "/home/david/stacks/hermes-agent",
+                    "worktree_path": "/tmp/worktree",
+                    "deletion_blockers": ["linked Linear issue HAD-300 still open"],
+                }
+            ],
+            "selected": {
+                "kind": "git_hygiene",
+                "identifier": "HAD-300",
+                "selection_bucket": "reconcile_linked_wip",
+                "execution_mode": "investigate_merge_or_delete",
+                "recommended_action": "resume_or_merge_linked_wip",
+                "selection_reason": "Dirty linked worktree is unowned.",
+                "linked_issue_identifier": "HAD-300",
+                "linked_issue_open": True,
+                "repo_root": "/home/david/stacks/hermes-agent",
+                "worktree_path": "/tmp/worktree",
+                "deletion_blockers": ["linked Linear issue HAD-300 still open"],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        workspace_backlog_tool.linear_tool,
+        "linear_issue",
+        lambda args, **_kw: calls.append(args) or json.dumps({"success": True, "comment": {"id": "comment-1"}}),
+    )
+
+    codex_runs_path = tmp_path / "runs.json"
+    codex_runs_path.write_text(json.dumps({"runs": {}}), encoding="utf-8")
+    ctx_bindings_path = tmp_path / "session_bindings.json"
+    ctx_bindings_path.write_text(json.dumps({"sessions": {}}), encoding="utf-8")
+
+    result = workspace_backlog_tool.evaluate_workspace_backlog(
+        team_key="HAD",
+        config_path=tmp_path / "config.yaml",
+        state_path=tmp_path / "state.json",
+        codex_runs_path=codex_runs_path,
+        ctx_bindings_path=ctx_bindings_path,
+        write_status_comment=True,
+        persist=False,
+        now=now,
+    )
+
+    assert result["selected_issue"]["identifier"] == "HAD-300"
+    assert result["selected_work"]["kind"] == "git_hygiene"
+    assert result["selected_work"]["linked_issue_identifier"] == "HAD-300"
+    assert calls == [
+        {
+            "action": "comment",
+            "identifier": "HAD-300",
+            "body": workspace_backlog_tool._format_git_hygiene_comment(
+                selected=result["selected_work"],
+                counts=result["counts"],
+                hygiene_counts=result["git_hygiene"]["counts"],
+            ),
+            "dedupe_key": "workspace-orchestrator:git-hygiene:HAD-300",
+        }
+    ]
+
+
+def test_git_hygiene_incident_is_conservative_for_orphaned_dirty_state(monkeypatch):
+    now = datetime(2026, 4, 12, 16, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        workspace_backlog_tool,
+        "_git_branch_divergence",
+        lambda *_args, **_kw: {"ahead": 3, "behind": 0, "error": ""},
+    )
+    monkeypatch.setattr(
+        workspace_backlog_tool,
+        "_git_head_merged_to_default",
+        lambda *_args, **_kw: False,
+    )
+
+    incident = workspace_backlog_tool._git_hygiene_incident(
+        repo_root="/repo",
+        worktree={"worktree_path": "/repo", "branch": "feat/test"},
+        status={
+            "available": True,
+            "worktree_path": "/repo",
+            "branch": "feat/test",
+            "upstream": "",
+            "ahead": 0,
+            "behind": 0,
+            "tracked_dirty": 2,
+            "untracked": 1,
+            "dirty": True,
+        },
+        default_branch="main",
+        active_ctx_records=[],
+        active_codex=None,
+        latest_codex={
+            "run_id": "codex_1",
+            "status": "completed",
+            "completed_at": (now - timedelta(hours=36)).isoformat(),
+        },
+        linked_issue=None,
+        now=now,
+        dirty_stale_hours=24,
+    )
+
+    assert incident is not None
+    assert incident["selection_bucket"] == "resolve_orphaned_dirty_wip"
+    assert incident["recommended_action"] == "investigate_unowned_dirty_state"
+    assert incident["preempts_backlog"] is True
+    assert incident["deletion_candidate"] is False
+    assert "HEAD not merged into main" in incident["deletion_blockers"]
+    assert "tracked file modifications still present" in incident["deletion_blockers"]
