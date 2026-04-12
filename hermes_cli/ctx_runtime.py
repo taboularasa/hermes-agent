@@ -16,6 +16,7 @@ import logging
 import os
 import subprocess
 import threading
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,9 +29,15 @@ from utils import atomic_json_write
 logger = logging.getLogger(__name__)
 
 _BINDINGS_LOCK = threading.Lock()
+_CTX_DAEMON_RECOVERY_LOCK = threading.Lock()
 _DEFAULT_DAEMON_URL = "http://127.0.0.1:19876"
 _DEFAULT_DATA_DIR = "~/.ctx-data"
 _DEFAULT_CTX_BINDING_STALE_HOURS = 12
+_CTX_DAEMON_SERVICE_CANDIDATES = ("ctx-daemon.service", "ctx.service")
+_CTX_CLOSED_POOL_SIGNATURE = "attempted to acquire a connection on a closed pool"
+_CTX_RECOVERY_COOLDOWN_SECONDS = 10.0
+_CTX_RECOVERY_WAIT_TIMEOUT_SECONDS = 20.0
+_last_ctx_recovery_attempt = 0.0
 
 
 @dataclass
@@ -458,6 +465,63 @@ def _find_auth_material(ctx_cfg: Dict[str, Any]) -> tuple[str, str]:
     return daemon_url.rstrip("/"), token
 
 
+def _ctx_error_is_closed_pool(detail: str) -> bool:
+    return _CTX_CLOSED_POOL_SIGNATURE in str(detail or "").lower()
+
+
+def _wait_for_ctx_daemon_ready(daemon_url: str, token: str) -> None:
+    deadline = time.monotonic() + _CTX_RECOVERY_WAIT_TIMEOUT_SECONDS
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    url = f"{daemon_url.rstrip('/')}/api/workspaces"
+
+    last_error: Optional[Exception] = None
+    while time.monotonic() < deadline:
+        req = request.Request(url, headers=headers, method="GET")
+        try:
+            with request.urlopen(req, timeout=2) as resp:
+                if resp.status < 500:
+                    return
+        except Exception as exc:
+            last_error = exc
+        time.sleep(0.5)
+
+    raise RuntimeError(
+        f"ctx daemon did not become ready after restart at {daemon_url}: {last_error}"
+    )
+
+
+def _restart_ctx_daemon_service(daemon_url: str, token: str) -> None:
+    global _last_ctx_recovery_attempt
+
+    with _CTX_DAEMON_RECOVERY_LOCK:
+        now = time.monotonic()
+        if now - _last_ctx_recovery_attempt < _CTX_RECOVERY_COOLDOWN_SECONDS:
+            logger.info("ctx daemon recovery already attempted recently; waiting for readiness")
+            _wait_for_ctx_daemon_ready(daemon_url, token)
+            return
+
+        last_failure = None
+        for service_name in _CTX_DAEMON_SERVICE_CANDIDATES:
+            result = subprocess.run(
+                ["systemctl", "--user", "restart", service_name],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode == 0:
+                _last_ctx_recovery_attempt = time.monotonic()
+                logger.warning("Restarted %s after ctx closed-pool error", service_name)
+                _wait_for_ctx_daemon_ready(daemon_url, token)
+                return
+            last_failure = RuntimeError(
+                f"{service_name} restart failed: {result.stderr.strip() or result.stdout.strip()}"
+            )
+
+    raise last_failure or RuntimeError("No ctx daemon service restart command succeeded")
+
+
 class _CtxDaemonClient:
     def __init__(self, daemon_url: str, token: str):
         self.daemon_url = daemon_url.rstrip("/")
@@ -469,6 +533,7 @@ class _CtxDaemonClient:
         path: str,
         *,
         payload: Optional[Dict[str, Any]] = None,
+        _allow_closed_pool_recovery: bool = True,
     ) -> Any:
         url = f"{self.daemon_url}{path}"
         headers = {"Accept": "application/json"}
@@ -484,6 +549,23 @@ class _CtxDaemonClient:
                 body = resp.read()
         except error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
+            if (
+                _allow_closed_pool_recovery
+                and exc.code >= 500
+                and _ctx_error_is_closed_pool(detail)
+            ):
+                logger.warning(
+                    "ctx daemon reported a closed pool on %s %s; restarting daemon and retrying once",
+                    method.upper(),
+                    path,
+                )
+                _restart_ctx_daemon_service(self.daemon_url, self.token)
+                return self._request_json(
+                    method,
+                    path,
+                    payload=payload,
+                    _allow_closed_pool_recovery=False,
+                )
             raise RuntimeError(f"ctx daemon {method.upper()} {path} -> HTTP {exc.code}: {detail}") from exc
         except error.URLError as exc:
             raise RuntimeError(f"ctx daemon unreachable at {url}: {exc}") from exc
