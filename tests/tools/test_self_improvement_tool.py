@@ -159,6 +159,29 @@ def _linear_issue(
     return issue
 
 
+def _ctx_state_comment(
+    *,
+    ctx_task_id: str,
+    phase: str = "running",
+    latest_turn_status: str = "queued",
+    awaiting_new_assistant: bool = True,
+    created_at: str | None = None,
+) -> dict:
+    payload = {
+        "ctx_task_id": ctx_task_id,
+        "phase": phase,
+        "latest_turn_status": latest_turn_status,
+        "awaiting_new_assistant": awaiting_new_assistant,
+    }
+    body = f"<!-- hermes-ctx-state:v1 {json.dumps(payload)} -->\n\n## Hermes ctx status"
+    return {
+        "id": f"ctx-{ctx_task_id}",
+        "body": body,
+        "createdAt": created_at,
+        "updatedAt": created_at,
+    }
+
+
 def _clone(payload):
     return json.loads(json.dumps(payload))
 
@@ -910,6 +933,231 @@ def test_self_improvement_pipeline_repairs_delegate_conflicts_and_upserts_top_is
         == f"status:{reliability_issue['identifier']}"
         for comment in reliability_issue["comments"]
     )
+
+
+def test_self_improvement_pipeline_demotes_started_issue_without_live_execution(monkeypatch, tmp_path):
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
+    recent = (now - timedelta(hours=2)).isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+    objective_path = _seed_reward_policy(tmp_path / "epoch.yaml")
+    history_path = tmp_path / "benchmarks.json"
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    _write_json(journal_path, {"entries": [{"occurredAt": recent}]})
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_1": {"run_id": "codex_1", "status": "completed", "completed_at": recent},
+                "codex_2": {"run_id": "codex_2", "status": "completed", "completed_at": recent},
+            }
+        },
+    )
+    _write_json(
+        ctx_path,
+        {
+            "sessions": {
+                "sess_1": {
+                    "session_id": "sess_1",
+                    "task_id": "task-1",
+                    "active": False,
+                    "updated_at": recent,
+                    "worktree_path": str(worktree),
+                },
+                "sess_2": {
+                    "session_id": "sess_2",
+                    "task_id": "task-2",
+                    "active": False,
+                    "updated_at": recent,
+                    "worktree_path": str(worktree),
+                },
+            }
+        },
+    )
+
+    monkeypatch.setattr(
+        self_improvement_tool,
+        "build_self_improvement_context",
+        lambda *args, **kwargs: {
+            "reliability": {"status": "fresh"},
+            "research_provider_policy": {"summary": {"available_provider_count": 2}},
+            "textbook_study": {"upgrade_targets": [{"title": "Typed execution frame"}]},
+            "business_recommendations": ["Prioritize contract-facing reliability work."],
+        },
+    )
+
+    store = {
+        "project": {
+            "id": "project-1",
+            "name": "Hermes Self-Improvement",
+            "description": linear_issue_tool._format_project_description(
+                "Track capability gaps and implementation follow-through.",
+                "project:hermes-self-improvement",
+            ),
+            "teams": [{"id": "team-1", "key": "HAD", "name": "Hadto"}],
+            "url": "https://linear.app/hadto/project/hermes-self-improvement",
+        },
+        "issues": [
+            _linear_issue(
+                "HAD-510",
+                state_type="started",
+                state_name="In Progress",
+                lane="Maintenance",
+                include_status_comment=True,
+                updated_at=recent,
+            ),
+            _linear_issue(
+                "HAD-511",
+                state_type="started",
+                state_name="In Progress",
+                lane="Maintenance",
+                include_status_comment=True,
+                updated_at=recent,
+            ),
+            _linear_issue(
+                "HAD-512",
+                state_type="completed",
+                state_name="Done",
+                lane="Growth",
+                updated_at=recent,
+                completed_at=recent,
+            ),
+        ],
+        "states": [
+            {"id": "state-backlog", "name": "Backlog", "type": "backlog"},
+            {"id": "state-todo", "name": "Todo", "type": "unstarted"},
+            {"id": "state-progress", "name": "In Progress", "type": "started"},
+            {"id": "state-done", "name": "Done", "type": "completed"},
+        ],
+        "users": {
+            "hermes": {"id": "user-hermes", "name": "Hermes", "displayName": "Hermes", "email": "hermes@hadto.net", "active": True},
+            "human": {"id": "user-human", "name": "David", "displayName": "David", "email": "david@hadto.net", "active": True},
+        },
+        "next_issue": 599,
+        "timestamp": recent,
+    }
+    _install_fake_linear_surface(monkeypatch, store)
+
+    pipeline = self_improvement_tool.evaluate_self_improvement_pipeline(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        objective_path=objective_path,
+        history_path=history_path,
+        now=now,
+        persist=False,
+    )
+
+    assert pipeline["top_candidate"] is None
+    assert pipeline["benchmark"]["linear_surface"]["active_issue_count"] == 0
+    assert pipeline["benchmark"]["linear_surface"]["overflow_lanes"] == {}
+    demoted = [item for item in pipeline["linear"]["repairs"] if item["action"] == "demoted_without_live_execution"]
+    assert len(demoted) == 2
+    assert all(
+        issue["state"]["type"] in {"backlog", "unstarted"}
+        for issue in store["issues"]
+        if issue["identifier"] in {"HAD-510", "HAD-511"}
+    )
+
+
+def test_self_improvement_pipeline_preserves_started_issue_with_live_ctx_execution(monkeypatch, tmp_path):
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
+    recent = (now - timedelta(hours=2)).isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+    objective_path = _seed_reward_policy(tmp_path / "epoch.yaml")
+    history_path = tmp_path / "benchmarks.json"
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    _write_json(journal_path, {"entries": [{"occurredAt": recent}]})
+    _write_json(codex_path, {"runs": {"codex_1": {"run_id": "codex_1", "status": "completed", "completed_at": recent}}})
+    _write_json(
+        ctx_path,
+        {
+            "sessions": {
+                "sess_1": {
+                    "session_id": "sess_1",
+                    "task_id": "task-running",
+                    "active": True,
+                    "updated_at": recent,
+                    "worktree_path": str(worktree),
+                }
+            }
+        },
+    )
+
+    monkeypatch.setattr(
+        self_improvement_tool,
+        "build_self_improvement_context",
+        lambda *args, **kwargs: {
+            "reliability": {"status": "fresh"},
+            "research_provider_policy": {"summary": {"available_provider_count": 2}},
+            "textbook_study": {"upgrade_targets": [{"title": "Typed execution frame"}]},
+            "business_recommendations": ["Prioritize contract-facing reliability work."],
+        },
+    )
+
+    live_issue = _linear_issue(
+        "HAD-520",
+        state_type="started",
+        state_name="In Progress",
+        lane="Maintenance",
+        include_status_comment=True,
+        updated_at=recent,
+    )
+    live_issue["comments"].insert(0, _ctx_state_comment(ctx_task_id="task-running", created_at=recent))
+
+    store = {
+        "project": {
+            "id": "project-1",
+            "name": "Hermes Self-Improvement",
+            "description": linear_issue_tool._format_project_description(
+                "Track capability gaps and implementation follow-through.",
+                "project:hermes-self-improvement",
+            ),
+            "teams": [{"id": "team-1", "key": "HAD", "name": "Hadto"}],
+            "url": "https://linear.app/hadto/project/hermes-self-improvement",
+        },
+        "issues": [live_issue],
+        "states": [
+            {"id": "state-backlog", "name": "Backlog", "type": "backlog"},
+            {"id": "state-todo", "name": "Todo", "type": "unstarted"},
+            {"id": "state-progress", "name": "In Progress", "type": "started"},
+            {"id": "state-done", "name": "Done", "type": "completed"},
+        ],
+        "users": {
+            "hermes": {"id": "user-hermes", "name": "Hermes", "displayName": "Hermes", "email": "hermes@hadto.net", "active": True},
+            "human": {"id": "user-human", "name": "David", "displayName": "David", "email": "david@hadto.net", "active": True},
+        },
+        "next_issue": 599,
+        "timestamp": recent,
+    }
+    _install_fake_linear_surface(monkeypatch, store)
+
+    pipeline = self_improvement_tool.evaluate_self_improvement_pipeline(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        objective_path=objective_path,
+        history_path=history_path,
+        now=now,
+        persist=False,
+    )
+
+    assert pipeline["linear"]["repairs"] == []
+    assert pipeline["benchmark"]["linear_surface"]["active_issue_count"] == 1
+    assert store["issues"][0]["state"]["type"] == "started"
 
 
 def test_self_improvement_pipeline_auto_closes_resolved_benchmark_issue(monkeypatch, tmp_path):

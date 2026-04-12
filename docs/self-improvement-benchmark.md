@@ -57,10 +57,17 @@ Critical failures on `reliability_gate`, `linear_planning_surface`, `delegate_as
 - the current top benchmark-driven Linear candidate
 - a deduplicated status comment on that top candidate
 
+Today those safe Linear repairs include:
+
+- clearing human assignees from Hermes-delegated issues
+- demoting self-improvement issues out of active states when no live Codex run or running Hermes ctx session is attached to that issue anymore
+
 ## Intended use
 
 Hermes should run `self_improvement_pipeline` before self-improvement prioritization.
 Use the raw benchmark directly when you need to inspect detailed check output.
+
+Within the self-improvement project, `In Progress` should mean there is current machine-observable execution behind the issue. If that execution disappears, the pipeline is expected to move the issue back to a non-active state instead of leaving ghost WIP behind.
 
 If the benchmark reports:
 
