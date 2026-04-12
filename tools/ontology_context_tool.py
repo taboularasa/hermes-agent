@@ -25,7 +25,8 @@ ONTOLOGY_CONTEXT_SCHEMA = {
     "name": "ontology_context",
     "description": (
         "Read Hadto ontology platform artifacts and return compact reasoning context for "
-        "snapshot, ontology-engineering, self-improvement, consulting, sales, source-material, or vertical detail use cases."
+        "snapshot, ontology-engineering, self-improvement, consulting, sales, source-material, or vertical detail use cases. "
+        "Use this instead of manually grepping ontology files or shelling into Python to reconstruct the same context."
     ),
     "parameters": {
         "type": "object",
@@ -42,7 +43,7 @@ ONTOLOGY_CONTEXT_SCHEMA = {
                     "source_materials",
                     "vertical_detail",
                 ],
-                "description": "Which ontology context pack to build.",
+                "description": "Which ontology context pack to build. Use ontology_engineering for textbook-driven ontology upgrade work.",
             },
             "query": {
                 "type": "string",

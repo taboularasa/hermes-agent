@@ -255,13 +255,16 @@ On each loop:
    If the `self_improvement_evidence_gate` tool reports a degraded gate, list the reasons and
    suppress non-maintenance work for this cycle.
 5. Use ontology business recommendations and conversion bottlenecks as candidate evidence when they are grounded in machine-readable artifacts.
-6. If ontology business-domain research is part of the work, require `web_search_matrix` before source capture or ontology changes so Hermes compares all configured providers instead of silently trusting one backend.
-7. Score the remaining candidates with the bundled formula.
-8. Upsert the umbrella Linear project.
-9. Upsert or update the corresponding Linear issues with lane, evidence, and verification context.
-10. Pick the highest-leverage unblocked issue that fits the guardrails.
-11. Delegate that issue to local Codex if the repo surface is clear.
-12. Write a concise status comment back to Linear explaining the chosen issue and why it outranked the others.
+6. If ontology work is part of the loop, call `ontology_context(action="ontology_engineering")` directly.
+   Do not reconstruct the same context by grepping repo files or shelling into Python.
+7. If ontology business-domain research is part of the work, require `web_search_matrix` before source capture or ontology changes so Hermes compares all configured providers instead of silently trusting one backend.
+   Do not substitute plain `web_search` unless the matrix tool is unavailable or the user explicitly asked for a single-provider search.
+8. Score the remaining candidates with the bundled formula.
+9. Upsert the umbrella Linear project.
+10. Upsert or update the corresponding Linear issues with lane, evidence, and verification context.
+11. Pick the highest-leverage unblocked issue that fits the guardrails.
+12. Delegate that issue to local Codex if the repo surface is clear.
+13. Write a concise status comment back to Linear explaining the chosen issue and why it outranked the others.
    Include an **Evidence provenance** section using the tags above.
 
 If no clear implementation issue exists, do not force delegation. Leave the project and issues in a clean planned state and report the blocker.

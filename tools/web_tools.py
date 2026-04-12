@@ -1024,7 +1024,7 @@ async def _parallel_extract(urls: List[str]) -> List[Dict[str, Any]]:
     return results
 
 
-def web_search_tool(query: str, limit: int = 5) -> str:
+def web_search_tool(query: str, limit: int = 5, user_task: Optional[str] = None) -> str:
     """
     Search the web for information using available search API backend.
 
@@ -1073,6 +1073,44 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         from tools.interrupt import is_interrupted
         if is_interrupted():
             return json.dumps({"error": "Interrupted", "success": False})
+
+        lowered_query = (query or "").strip().lower()
+        lowered_user_task = (user_task or "").strip().lower()
+        matrix_scope_text = " ".join(part for part in (lowered_query, lowered_user_task) if part)
+        matrix_keywords = (
+            "ontology",
+            "business domain",
+            "market research",
+            "consulting domain",
+            "competency question",
+            "competency-question",
+            "vertical",
+        )
+        provider_status = get_web_provider_status()
+        if (
+            any(keyword in matrix_scope_text for keyword in matrix_keywords)
+            and len(provider_status.get("available_providers", [])) > 1
+        ):
+            matrix_payload = json.loads(
+                web_search_matrix_tool(query=query, limit=limit)
+            )
+            if isinstance(matrix_payload, dict):
+                matrix_payload["delegated_from"] = "web_search"
+                matrix_payload["recommended_tool"] = "web_search_matrix"
+                matrix_payload.setdefault(
+                    "note",
+                    "Ontology and business-domain research was auto-upgraded to the provider matrix.",
+                )
+            result_json = json.dumps(matrix_payload, ensure_ascii=False)
+            debug_call_data["results_count"] = len(
+                matrix_payload.get("data", {}).get("web", [])
+                if isinstance(matrix_payload, dict)
+                else []
+            )
+            debug_call_data["final_response_size"] = len(result_json)
+            _debug.log_call("web_search_tool", debug_call_data)
+            _debug.save()
+            return result_json
 
         # Dispatch to the configured backend
         backend = _get_backend()
@@ -1996,7 +2034,11 @@ from tools.registry import registry
 
 WEB_SEARCH_SCHEMA = {
     "name": "web_search",
-    "description": "Search the web for information on any topic. Returns up to 5 relevant results with titles, URLs, and descriptions.",
+    "description": (
+        "Search the web for information on any topic using a single backend. "
+        "For ontology business-domain research, market research, or any task where comparing provider overlap matters, "
+        "use web_search_matrix instead."
+    ),
     "parameters": {
         "type": "object",
         "properties": {
@@ -2013,8 +2055,8 @@ WEB_SEARCH_MATRIX_SCHEMA = {
     "name": "web_search_matrix",
     "description": (
         "Search across all configured web-search providers and fuse the results. "
-        "Use this for higher-rigor research where provider overlap and novelty matter, "
-        "such as ontology domain discovery or market research."
+        "This is the canonical first step for higher-rigor research where provider overlap and novelty matter, "
+        "such as ontology domain discovery or market research. Do not substitute plain web_search when provider comparison matters."
     ),
     "parameters": {
         "type": "object",
@@ -2063,7 +2105,11 @@ registry.register(
     name="web_search",
     toolset="web",
     schema=WEB_SEARCH_SCHEMA,
-    handler=lambda args, **kw: web_search_tool(args.get("query", ""), limit=5),
+    handler=lambda args, **kw: web_search_tool(
+        args.get("query", ""),
+        limit=5,
+        user_task=kw.get("user_task"),
+    ),
     check_fn=check_web_api_key,
     requires_env=["EXA_API_KEY", "PARALLEL_API_KEY", "FIRECRAWL_API_KEY", "TAVILY_API_KEY"],
     emoji="🔍",

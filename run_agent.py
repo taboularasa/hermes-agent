@@ -79,7 +79,7 @@ from hermes_constants import OPENROUTER_BASE_URL
 # Agent internals extracted to agent/ package for modularity
 from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY, PLATFORM_HINTS,
-    MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE, SKILLS_GUIDANCE,
+    MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE, SKILLS_GUIDANCE, ONTOLOGY_TOOL_GUIDANCE,
 )
 from agent.model_metadata import (
     fetch_model_metadata,
@@ -109,6 +109,19 @@ HONCHO_TOOL_NAMES = {
     "honcho_search",
     "honcho_conclude",
 }
+
+ONTOLOGY_PREFLIGHT_KEYWORDS = (
+    "ontology",
+    "competency question",
+    "competency-question",
+    "orsd",
+    "source manifest",
+    "source-material",
+    "smb-ontology-platform",
+    "textbook",
+    "ont-",
+    "vertical readiness",
+)
 
 
 class _SafeWriter:
@@ -2608,6 +2621,8 @@ class AIAgent:
             tool_guidance.append(SESSION_SEARCH_GUIDANCE)
         if "skill_manage" in self.valid_tool_names:
             tool_guidance.append(SKILLS_GUIDANCE)
+        if "ontology_context" in self.valid_tool_names or "web_search_matrix" in self.valid_tool_names:
+            tool_guidance.append(ONTOLOGY_TOOL_GUIDANCE)
         if tool_guidance:
             prompt_parts.append(" ".join(tool_guidance))
 
@@ -2920,6 +2935,62 @@ class AIAgent:
         self._cached_system_prompt = None
         if self._memory_store:
             self._memory_store.load_from_disk()
+
+    def _should_preload_ontology_context(self, user_message: str) -> bool:
+        """Return True when the current turn should start with ontology context."""
+        if "ontology_context" not in self.valid_tool_names:
+            return False
+        text = (user_message or "").strip().lower()
+        if not text:
+            return False
+        return any(keyword in text for keyword in ONTOLOGY_PREFLIGHT_KEYWORDS)
+
+    def _build_ontology_turn_context(self, user_message: str, task_id: str) -> str:
+        """Preload ontology context into the turn so the model starts grounded."""
+        if not self._should_preload_ontology_context(user_message):
+            return ""
+
+        raw = handle_function_call(
+            "ontology_context",
+            {"action": "ontology_engineering", "limit": 5},
+            task_id=task_id,
+            user_task=user_message,
+        )
+        try:
+            payload = json.loads(raw)
+        except Exception as exc:
+            logger.warning("Ontology preflight returned non-JSON payload: %s", exc)
+            return ""
+
+        if not isinstance(payload, dict) or not payload.get("success"):
+            logger.warning("Ontology preflight failed: %s", payload)
+            return ""
+
+        serialized_context = json.dumps(
+            payload.get("context") or {},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        if len(serialized_context) > 6000:
+            serialized_context = serialized_context[:6000].rstrip() + "... [truncated]"
+
+        guidance_parts = [
+            "## Ontology Workflow Preflight",
+            'Hermes preloaded ontology_context(action="ontology_engineering") for this turn because the request matches ontology engineering work.',
+            "Do not spend tool calls re-reading ontology tracker files, repo notes, or shelling into Python to reconstruct the same context.",
+        ]
+        if "web_search_matrix" in self.valid_tool_names:
+            guidance_parts.append(
+                "If this turn needs external domain or market research, the first web-search action must be web_search_matrix. Use plain web_search only if web_search_matrix fails or is unavailable."
+            )
+        guidance_parts.extend(
+            [
+                "Refresh with ontology_context again only if the task scope changes materially mid-turn.",
+                "## Preloaded Ontology Context",
+                serialized_context,
+            ]
+        )
+        return "\n\n".join(guidance_parts)
 
     def _responses_tools(self, tools: Optional[List[Dict[str, Any]]] = None) -> Optional[List[Dict[str, Any]]]:
         """Convert chat-completions tool schemas to Responses function-tool schemas."""
@@ -6479,6 +6550,19 @@ class AIAgent:
         except Exception as exc:
             logger.warning("pre_llm_call hook failed: %s", exc)
 
+        _ontology_turn_context = ""
+        try:
+            _ontology_turn_context = self._build_ontology_turn_context(
+                original_user_message,
+                effective_task_id,
+            )
+            if _ontology_turn_context:
+                logger.info("Preloaded ontology context for session %s", self.session_id)
+                if not self.quiet_mode:
+                    self._safe_print("🧠 Preloaded ontology_context for this turn")
+        except Exception as exc:
+            logger.warning("Ontology preflight failed (non-fatal): %s", exc)
+
         # Main conversation loop
         api_call_count = 0
         final_response = None
@@ -6576,6 +6660,8 @@ class AIAgent:
             effective_system = active_system_prompt or ""
             if self.ephemeral_system_prompt:
                 effective_system = (effective_system + "\n\n" + self.ephemeral_system_prompt).strip()
+            if _ontology_turn_context:
+                effective_system = (effective_system + "\n\n" + _ontology_turn_context).strip()
             # Plugin context from pre_llm_call hooks — ephemeral, not cached.
             if _plugin_turn_context:
                 effective_system = (effective_system + "\n\n" + _plugin_turn_context).strip()
