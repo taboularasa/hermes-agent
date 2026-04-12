@@ -97,10 +97,19 @@ SEARCH_PROVIDER_ENV_KEYS = {
     "firecrawl": ("FIRECRAWL_API_KEY", "FIRECRAWL_API_URL"),
 }
 
+BACKLOG_ISSUE_DIRS = (
+    "docs/operations/ontology-backlog",
+    "docs/issues",
+)
+PROVIDER_COVERAGE_PATH = "docs/operations/ontology-research-provider-coverage.yaml"
+
 TEXTBOOK_STUDY_PATTERNS = {
     "progress_tracker": "docs/plans/*keet-ontology-engineering-progress-tracker.md",
     "heartbeat": "docs/plans/*keet-ontology-engineering-heartbeat.md",
-    "governing_issue": "docs/issues/ONT-009-*.md",
+    "governing_issue": [
+        "docs/operations/ontology-backlog/ONT-009-*.md",
+        "docs/issues/ONT-009-*.md",
+    ],
 }
 
 TEXTBOOK_BACKLOG_TO_HERMES_CAPABILITY = {
@@ -208,6 +217,19 @@ def _glob_latest(root: Path, pattern: str) -> Optional[Path]:
         reverse=True,
     )
     return candidates[0] if candidates else None
+
+
+def _glob_latest_any(root: Path, patterns: Iterable[str]) -> Optional[Path]:
+    candidates: list[Path] = []
+    for pattern in patterns:
+        candidates.extend(root.glob(pattern))
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda item: (_file_timestamp(item) or datetime.min.replace(tzinfo=timezone.utc), str(item)),
+        reverse=True,
+    )
+    return candidates[0]
 
 
 def _markdown_section(text: str, heading: str) -> str:
@@ -391,7 +413,11 @@ def _count_files(path: Path) -> int:
 
 def _find_issue_doc_by_id(root: Path, issue_id: str) -> Optional[Path]:
     issue_id = str(issue_id).strip().upper()
-    matches = sorted(root.glob(f"docs/issues/{issue_id}-*.md"))
+    patterns = [f"{directory}/{issue_id}-*.md" for directory in BACKLOG_ISSUE_DIRS]
+    matches: list[Path] = []
+    for pattern in patterns:
+        matches.extend(root.glob(pattern))
+    matches.sort()
     return matches[0] if matches else None
 
 
@@ -456,7 +482,10 @@ def _parse_study_log_entries(text: str, *, limit: int = 3) -> list[dict[str, Any
 def _load_textbook_study_context(root: Path, *, limit: int = 5) -> dict[str, Any]:
     tracker_path = _glob_latest(root, TEXTBOOK_STUDY_PATTERNS["progress_tracker"])
     heartbeat_path = _glob_latest(root, TEXTBOOK_STUDY_PATTERNS["heartbeat"])
-    governing_issue_path = _glob_latest(root, TEXTBOOK_STUDY_PATTERNS["governing_issue"])
+    governing_issue_patterns = TEXTBOOK_STUDY_PATTERNS["governing_issue"]
+    if isinstance(governing_issue_patterns, str):
+        governing_issue_patterns = [governing_issue_patterns]
+    governing_issue_path = _glob_latest_any(root, governing_issue_patterns)
 
     tracker_text = _load_text(tracker_path) if tracker_path else ""
     tracker_summary = _parse_key_value_bullets(_markdown_section(tracker_text, "## Progress summary"))
@@ -535,7 +564,33 @@ def _load_hermes_web_backend() -> Optional[str]:
     return backend or None
 
 
-def _web_provider_status() -> dict[str, Any]:
+def _load_provider_inventory(root: Path) -> Optional[dict[str, Any]]:
+    path = root / PROVIDER_COVERAGE_PATH
+    payload = _load_yaml(path)
+    if not isinstance(payload, dict):
+        return None
+    if isinstance(payload.get("provider_coverage"), dict):
+        payload = payload["provider_coverage"]
+    providers = payload.get("providers", []) if isinstance(payload, dict) else []
+    available: list[str] = []
+    for entry in providers if isinstance(providers, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        status = str(entry.get("status") or "").strip().lower()
+        if status not in {"ready", "available", "declared"}:
+            continue
+        provider_id = str(entry.get("id") or entry.get("provider") or "").strip().lower()
+        if provider_id:
+            available.append(provider_id)
+    configured_backend = str(payload.get("configured_backend") or "").strip().lower() or None
+    return {
+        "available_providers": sorted(set(available)),
+        "configured_backend": configured_backend,
+        "path": str(path),
+    }
+
+
+def _web_provider_status(repo_root: Optional[Path] = None) -> dict[str, Any]:
     configured_backend = _load_hermes_web_backend()
     providers: dict[str, Any] = {}
     available: list[str] = []
@@ -553,6 +608,23 @@ def _web_provider_status() -> dict[str, Any]:
             available.append(provider)
         else:
             missing.append(provider)
+
+    coverage_source = "env"
+    inventory = _load_provider_inventory(repo_root) if repo_root else None
+    if not available and inventory and inventory.get("available_providers"):
+        available = list(inventory.get("available_providers") or [])
+        missing = [provider for provider in SEARCH_PROVIDER_ENV_KEYS.keys() if provider not in available]
+        configured_backend = inventory.get("configured_backend") or configured_backend
+        for provider_id in available:
+            if provider_id not in providers:
+                continue
+            providers[provider_id] = {
+                **providers[provider_id],
+                "available": True,
+                "present_env_keys": [],
+            }
+        coverage_source = "inventory"
+
     availability = "ready" if len(available) >= 2 else ("limited" if available else "missing")
     return {
         "configured_backend": configured_backend,
@@ -564,17 +636,23 @@ def _web_provider_status() -> dict[str, Any]:
             "available_provider_count": len(available),
             "missing_provider_count": len(missing),
         },
+        "coverage_source": coverage_source,
+        "inventory_path": inventory.get("path") if inventory else None,
     }
 
 
-def _build_business_domain_research_protocol() -> dict[str, Any]:
-    provider_status = _web_provider_status()
+def _build_business_domain_research_protocol(repo_root: Optional[Path] = None) -> dict[str, Any]:
+    provider_status = _web_provider_status(repo_root)
     if provider_status["available_providers"]:
         steps = [
             "Use web_search_matrix first so ontology domain research compares all available search providers instead of trusting one backend.",
             "Inspect overlap and novelty across providers before extracting pages or forming ontology hypotheses.",
             "Use web_extract on the strongest URLs and persist durable evidence into the ontology source-material manifests before updating ontology backlog or prompts.",
         ]
+        if provider_status.get("coverage_source") == "inventory":
+            steps.append(
+                "Provider coverage is declared in the ontology repo; verify live Hermes credentials before running real web research cycles."
+            )
     else:
         steps = [
             "No search-provider credentials are currently available in the Hermes runtime environment.",
@@ -1218,7 +1296,7 @@ def build_ontology_engineering_context(
     root = Path(repo_root).expanduser()
     snapshot = load_ontology_snapshot(root)
     study_context = _load_textbook_study_context(root, limit=limit)
-    research_protocol = _build_business_domain_research_protocol()
+    research_protocol = _build_business_domain_research_protocol(root)
     platform = snapshot.get("platform", {}) if isinstance(snapshot, dict) else {}
     return {
         "mode": "ontology_engineering",
@@ -1250,9 +1328,10 @@ def build_consulting_context(
     vertical: Optional[str] = None,
     limit: int = 3,
 ) -> dict[str, Any]:
-    snapshot = load_ontology_snapshot(repo_root)
-    study_context = _load_textbook_study_context(Path(repo_root).expanduser(), limit=3)
-    research_protocol = _build_business_domain_research_protocol()
+    root = Path(repo_root).expanduser()
+    snapshot = load_ontology_snapshot(root)
+    study_context = _load_textbook_study_context(root, limit=3)
+    research_protocol = _build_business_domain_research_protocol(root)
     matches = rank_verticals(snapshot, query=query, vertical=vertical, limit=limit)
     contexts = _match_core_contexts(query)
     top_match = matches[0] if matches else None
@@ -1303,9 +1382,10 @@ def build_sales_context(
     vertical: Optional[str] = None,
     limit: int = 3,
 ) -> dict[str, Any]:
-    snapshot = load_ontology_snapshot(repo_root)
-    study_context = _load_textbook_study_context(Path(repo_root).expanduser(), limit=3)
-    research_protocol = _build_business_domain_research_protocol()
+    root = Path(repo_root).expanduser()
+    snapshot = load_ontology_snapshot(root)
+    study_context = _load_textbook_study_context(root, limit=3)
+    research_protocol = _build_business_domain_research_protocol(root)
     matches = rank_verticals(snapshot, query=query, vertical=vertical, limit=limit)
     contexts = _match_core_contexts(query)
     top_match = matches[0] if matches else None
@@ -1359,7 +1439,7 @@ def build_self_improvement_context(
     snapshot = load_ontology_snapshot(root)
     reliability = summarize_ontology_reliability(snapshot, now=now, freshness_hours=freshness_hours)
     study_context = _load_textbook_study_context(root, limit=5)
-    research_protocol = _build_business_domain_research_protocol()
+    research_protocol = _build_business_domain_research_protocol(root)
     provider_status = research_protocol.get("provider_status", {})
 
     agenda_dir = root / "research" / "agenda"
