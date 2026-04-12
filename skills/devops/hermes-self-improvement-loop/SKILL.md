@@ -8,7 +8,7 @@ license: MIT
 
 # Hermes Self-Improvement Loop
 
-Use this when Hermes should inspect its own recent work, identify repeated capability gaps, score them against the current Hadto business epoch, create or update a Linear self-improvement backlog, and push concrete implementation work to the local Codex CLI on the Lenovo host.
+Use this when Hermes should inspect its own recent work, identify repeated capability gaps, score them against the current Hadto business epoch, create or update a Linear self-improvement backlog, push concrete implementation work to the local Codex CLI on the Lenovo host, and open strategic Slack discussions with David when the next step is future-direction alignment rather than immediate implementation.
 
 ## Inputs to read first
 
@@ -97,6 +97,29 @@ When a reliability trigger is active:
 - explain in the Linear description or status comment which trigger forced the agenda.
 - include evidence provenance with source tags (see the provenance contract below).
 
+## Strategic sounding-board discussions
+
+Not every self-improvement loop should immediately create or update Linear work.
+
+Use a strategic discussion when all of these are true:
+
+- the reliability floor is healthy,
+- no concrete benchmark-backed implementation issue is clearly more urgent,
+- the opportunity is blue-sky, architectural, or future-directional,
+- David's input would materially improve the framing before implementation.
+
+`self_improvement_pipeline(...)` now returns `strategic_conversation`.
+Treat `strategic_conversation.selected.should_reach_out=true` as an instruction to start a Slack discussion with David instead of forcing a Linear issue.
+
+Rules:
+
+- Use `send_message(target="slack", message=<slack_message>)` with the pipeline-provided `slack_message`.
+- Reuse the provided `discussion_key` so later loops can recover the thread with `session_search`.
+- Keep the discussion in one Slack thread whenever possible.
+- Do not create a Linear issue just to justify the conversation. Only create durable backlog once the discussion yields a concrete implementation gap.
+- Always preserve the note at `note_path` as the durable record of the conversation topic, questions, and resulting decisions.
+- After the discussion, extract ontological takeaways, update the note, and consider journal or blog synthesis when the ideas are broadly useful.
+
 ## Canonical Linear structures
 
 - Team key: `HAD`
@@ -116,12 +139,13 @@ Minimum flow:
 2. `linear_issue(action="list_projects")`
 3. `ontology_context(action="self_improvement")`
 4. `self_improvement_pipeline(...)`
-5. `self_improvement_benchmark(...)` when you need to inspect raw benchmark detail directly
-6. `ontology_context(action="ontology_engineering")` when ontology work is relevant
-7. `linear_issue(action="project_upsert", ...)` only when the pipeline is unavailable or insufficient
-8. `linear_issue(action="issue_upsert", ...)` for any durable gap the pipeline did not already maintain
-9. `linear_issue(action="comment", ...)` for machine-readable status
-10. `linear_issue(action="update_state", ...)` when work starts or finishes
+5. If `strategic_conversation.selected.should_reach_out=true`, `send_message(target="slack", message=<slack_message>)`
+6. `self_improvement_benchmark(...)` when you need to inspect raw benchmark detail directly
+7. `ontology_context(action="ontology_engineering")` when ontology work is relevant
+8. `linear_issue(action="project_upsert", ...)` only when the pipeline is unavailable or insufficient
+9. `linear_issue(action="issue_upsert", ...)` for any durable gap the pipeline did not already maintain
+10. `linear_issue(action="comment", ...)` for machine-readable status
+11. `linear_issue(action="update_state", ...)` when work starts or finishes
 
 Prefer `delegateId` for Hermes-owned work.
 Leave `assigneeId` empty unless a human operator is explicitly needed.
@@ -186,6 +210,7 @@ Do not treat the percentages as quotas. They are tie-break guidance after the re
 - Do not let `Capability` work consume more than 20% of active self-improvement effort while `Maintenance` and `Growth` still have higher-scoring items.
 - Every self-created issue must include the lane, why now, evidence, target repo or surface, and verification expectation.
 - If the top-scoring item is not concrete enough for Codex, keep it in planning state rather than forcing delegation.
+- If the opportunity is real but still ambiguous, prefer a strategic Slack discussion over speculative backlog churn.
 
 ## Project maintenance rules
 
