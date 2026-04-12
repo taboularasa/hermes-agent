@@ -170,6 +170,15 @@ SKILLS_GUIDANCE = (
     "Skills that aren't maintained become liabilities."
 )
 
+ONTOLOGY_TOOL_GUIDANCE = (
+    "When working on Hadto ontology engineering, textbook-driven ontology self-improvement, "
+    "or ontology-related business-domain research, call ontology_context first instead of "
+    "reconstructing the context by grepping repo files or shelling out to Python. "
+    "If web_search_matrix is available and the task needs external domain or market evidence, "
+    "use web_search_matrix before web_extract and do not substitute plain web_search unless "
+    "the user explicitly wants a single-provider search or the matrix tool is unavailable."
+)
+
 TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "# Tool-use enforcement\n"
     "You MUST use your tools to take action — do not describe what you would do "

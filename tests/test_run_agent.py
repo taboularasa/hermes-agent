@@ -579,6 +579,28 @@ class TestBuildSystemPrompt:
         prompt = agent._build_system_prompt()
         assert MEMORY_GUIDANCE not in prompt
 
+    def test_ontology_guidance_when_ontology_tools_loaded(self):
+        from agent.prompt_builder import ONTOLOGY_TOOL_GUIDANCE
+
+        with (
+            patch(
+                "run_agent.get_tool_definitions",
+                return_value=_make_tool_defs("ontology_context", "web_search_matrix"),
+            ),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-k...7890",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            agent.client = MagicMock()
+
+        prompt = agent._build_system_prompt()
+        assert ONTOLOGY_TOOL_GUIDANCE in prompt
+
     def test_includes_datetime(self, agent):
         prompt = agent._build_system_prompt()
         # Should contain current date info like "Conversation started:"
@@ -615,6 +637,50 @@ class TestBuildSystemPrompt:
         assert "SKILLS_PROMPT" in prompt
         assert mock_skills.call_args.kwargs["available_tools"] == set(toolset_map)
         assert mock_skills.call_args.kwargs["available_toolsets"] == {"web", "skills"}
+
+
+class TestOntologyPreflight:
+    def test_build_ontology_turn_context_uses_native_tool_and_matrix_guidance(self):
+        with (
+            patch(
+                "run_agent.get_tool_definitions",
+                return_value=_make_tool_defs("ontology_context", "web_search_matrix"),
+            ),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-k...7890",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            agent.client = MagicMock()
+
+        with patch(
+            "run_agent.handle_function_call",
+            return_value=json.dumps(
+                {
+                    "success": True,
+                    "action": "ontology_engineering",
+                    "context": {"mode": "ontology_engineering", "priorities": ["ONT-010"]},
+                }
+            ),
+        ) as mock_handle:
+            context = agent._build_ontology_turn_context(
+                "Improve Hermes ontology engineering for smb-ontology-platform",
+                task_id="task-123",
+            )
+
+        mock_handle.assert_called_once_with(
+            "ontology_context",
+            {"action": "ontology_engineering", "limit": 5},
+            task_id="task-123",
+            user_task="Improve Hermes ontology engineering for smb-ontology-platform",
+        )
+        assert 'Hermes preloaded ontology_context(action="ontology_engineering")' in context
+        assert "web_search_matrix" in context
+        assert '"mode":"ontology_engineering"' in context
 
 
 class TestToolUseEnforcementConfig:
@@ -1320,6 +1386,58 @@ class TestRunConversation:
             result = agent.run_conversation("hello")
         assert result["final_response"] == "Final answer"
         assert result["completed"] is True
+
+    def test_run_conversation_injects_ontology_preflight_into_system_message(self):
+        captured = {}
+        with (
+            patch(
+                "run_agent.get_tool_definitions",
+                return_value=_make_tool_defs("ontology_context", "web_search_matrix"),
+            ),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-key-1234567890",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            agent.client = MagicMock()
+
+        self._setup_agent(agent)
+
+        def _fake_api_call(api_kwargs):
+            captured.update(api_kwargs)
+            return _mock_response(content="done", finish_reason="stop")
+
+        with (
+            patch(
+                "run_agent.handle_function_call",
+                return_value=json.dumps(
+                    {
+                        "success": True,
+                        "action": "ontology_engineering",
+                        "context": {"mode": "ontology_engineering", "priorities": ["ONT-011"]},
+                    }
+                ),
+            ) as mock_handle,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch.object(agent, "_interruptible_api_call", side_effect=_fake_api_call),
+        ):
+            result = agent.run_conversation(
+                "Use ontology engineering evidence from smb-ontology-platform"
+            )
+
+        assert result["completed"] is True
+        mock_handle.assert_called_once()
+        api_messages = captured["messages"]
+        assert api_messages[0]["role"] == "system"
+        assert "Ontology Workflow Preflight" in api_messages[0]["content"]
+        assert "web_search_matrix" in api_messages[0]["content"]
+        assert '"mode":"ontology_engineering"' in api_messages[0]["content"]
 
     def test_tool_calls_then_stop(self, agent):
         self._setup_agent(agent)

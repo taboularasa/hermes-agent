@@ -206,7 +206,7 @@ _last_resolved_tool_names: List[str] = []
 # =============================================================================
 
 _LEGACY_TOOLSET_MAP = {
-    "web_tools": ["web_search", "web_extract"],
+    "web_tools": ["web_search", "web_search_matrix", "web_extract"],
     "terminal_tools": ["terminal"],
     "vision_tools": ["vision_analyze"],
     "moa_tools": ["mixture_of_agents"],

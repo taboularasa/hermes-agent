@@ -397,3 +397,48 @@ class TestWebSearchMatrix:
         assert payload["providers_used"] == ["exa", "tavily"]
         assert payload["data"]["web"][0]["provider_hits"] == 2
         assert payload["data"]["web"][0]["url"] in {"https://example.com/shared", "https://example.com/shared/"}
+
+
+class TestWebSearchGuardrails:
+    _ENV_KEYS = ("EXA_API_KEY", "PARALLEL_API_KEY", "FIRECRAWL_API_KEY", "FIRECRAWL_API_URL", "TAVILY_API_KEY")
+
+    def setup_method(self):
+        for key in self._ENV_KEYS:
+            os.environ.pop(key, None)
+
+    def teardown_method(self):
+        for key in self._ENV_KEYS:
+            os.environ.pop(key, None)
+
+    def test_upgrades_ontology_business_domain_queries_to_matrix_search(self):
+        with patch.dict(
+            os.environ,
+            {"EXA_API_KEY": "exa-test", "TAVILY_API_KEY": "tvly-test"},
+        ), patch("tools.interrupt.is_interrupted", return_value=False), \
+            patch(
+                "tools.web_tools.web_search_matrix_tool",
+                return_value=json.dumps(
+                    {
+                        "success": True,
+                        "data": {"web": [{"url": "https://example.com", "title": "Example"}]},
+                        "providers_used": ["exa", "tavily"],
+                    }
+                ),
+            ) as mock_matrix:
+            from tools.web_tools import web_search_tool
+            payload = json.loads(
+                web_search_tool(
+                    "dental revenue cycle patient responsibility estimate insurance applied explanation of benefits deductible coinsurance source",
+                    limit=5,
+                    user_task="Run ontology engineering business-domain research for smb-ontology-platform",
+                )
+            )
+
+        mock_matrix.assert_called_once_with(
+            query="dental revenue cycle patient responsibility estimate insurance applied explanation of benefits deductible coinsurance source",
+            limit=5,
+        )
+        assert payload["success"] is True
+        assert payload["delegated_from"] == "web_search"
+        assert payload["recommended_tool"] == "web_search_matrix"
+        assert payload["providers_used"] == ["exa", "tavily"]
