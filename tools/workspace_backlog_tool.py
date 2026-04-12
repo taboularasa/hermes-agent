@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -31,6 +31,8 @@ DEFAULT_CODEX_RUNS_PATH = get_hermes_home() / "codex" / "runs.json"
 DEFAULT_CTX_BINDINGS_PATH = get_hermes_home() / "ctx" / "session_bindings.json"
 DEFAULT_GIT_TIMEOUT_SECONDS = 8
 ACTIVE_CODEX_STATUSES = {"running", "active", "started"}
+DEFAULT_GIT_HYGIENE_PREEMPTION_LIMIT = 3
+DEFAULT_GIT_HYGIENE_BACKOFF_HOURS = 6
 
 DEFAULT_PROJECT_REPO_MAP = {
     "Hermes Self-Improvement": "/home/david/stacks/hermes-agent",
@@ -105,6 +107,22 @@ WORKSPACE_BACKLOG_ORCHESTRATOR_SCHEMA = {
                 "description": (
                     "Hours before unowned dirty repo state is considered stale enough "
                     "to preempt backlog work (default 24)."
+                ),
+                "minimum": 1,
+            },
+            "git_hygiene_preemption_limit": {
+                "type": "integer",
+                "description": (
+                    "Consecutive orchestrator selections allowed for the same orphaned "
+                    "dirty git hygiene incident before it yields backlog priority."
+                ),
+                "minimum": 1,
+            },
+            "git_hygiene_backoff_hours": {
+                "type": "integer",
+                "description": (
+                    "Hours an unresolved orphaned dirty git hygiene incident should "
+                    "back off after repeatedly preempting backlog work."
                 ),
                 "minimum": 1,
             },
@@ -234,6 +252,14 @@ def _load_orchestrator_config(path: Path) -> dict[str, Any]:
         "project_priority": project_priority,
         "stale_hours": _coerce_positive_int(raw.get("stale_hours"), DEFAULT_STALE_HOURS),
         "dirty_stale_hours": _coerce_positive_int(raw.get("dirty_stale_hours"), DEFAULT_DIRTY_STALE_HOURS),
+        "git_hygiene_preemption_limit": _coerce_positive_int(
+            raw.get("git_hygiene_preemption_limit"),
+            DEFAULT_GIT_HYGIENE_PREEMPTION_LIMIT,
+        ),
+        "git_hygiene_backoff_hours": _coerce_positive_int(
+            raw.get("git_hygiene_backoff_hours"),
+            DEFAULT_GIT_HYGIENE_BACKOFF_HOURS,
+        ),
         "candidate_limit": _coerce_positive_int(raw.get("candidate_limit"), DEFAULT_CANDIDATE_LIMIT),
         "issue_limit": _coerce_positive_int(raw.get("issue_limit"), DEFAULT_ISSUE_LIMIT),
     }
@@ -830,6 +856,137 @@ def _collect_git_hygiene(
     }
 
 
+def _git_hygiene_backoff_eligible(incident: dict[str, Any]) -> bool:
+    return (
+        str(incident.get("selection_bucket") or "").strip() == "resolve_orphaned_dirty_wip"
+        and not str(incident.get("linked_issue_identifier") or "").strip()
+        and bool(incident.get("dirty"))
+        and not bool(incident.get("active_ctx"))
+        and not isinstance(incident.get("active_codex"), dict)
+    )
+
+
+def _incident_sort_key(incident: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        int(incident.get("severity_rank") or 99),
+        0 if bool(incident.get("preempts_backlog")) else 1,
+        0 if bool(incident.get("dirty")) else 1,
+        0 if int(incident.get("tracked_dirty") or 0) else 1,
+        -float(incident.get("evidence_age_hours") or 0.0),
+        str(incident.get("worktree_path") or ""),
+    )
+
+
+def _apply_git_hygiene_backoff(
+    *,
+    git_hygiene: dict[str, Any],
+    previous_state: dict[str, Any],
+    now: datetime,
+    preemption_limit: int,
+    backoff_hours: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    previous_history = previous_state.get("git_hygiene_history")
+    if not isinstance(previous_history, dict):
+        previous_history = {}
+
+    previous_selected = previous_state.get("selected_work")
+    previous_selected_id = ""
+    if isinstance(previous_selected, dict) and str(previous_selected.get("kind") or "").strip() == "git_hygiene":
+        previous_selected_id = str(previous_selected.get("identifier") or "").strip()
+
+    incidents = []
+    history: dict[str, Any] = {}
+    for raw_incident in git_hygiene.get("incidents") or []:
+        if not isinstance(raw_incident, dict):
+            continue
+        incident = dict(raw_incident)
+        identifier = str(incident.get("identifier") or "").strip()
+        prior = previous_history.get(identifier)
+        prior = prior if isinstance(prior, dict) else {}
+
+        try:
+            previous_count = int(prior.get("consecutive_preemptions") or 0) if prior else 0
+        except Exception:
+            previous_count = 0
+        if incident.get("preempts_backlog"):
+            consecutive_preemptions = previous_count + 1 if previous_selected_id == identifier else 1
+        else:
+            consecutive_preemptions = 0
+
+        backoff_until = _parse_time(prior.get("backoff_until"))
+        backoff_reason = str(prior.get("backoff_reason") or "").strip()
+        backoff_count = int(prior.get("backoff_count") or 0)
+        backoff_active = backoff_until is not None and backoff_until > now
+
+        if _git_hygiene_backoff_eligible(incident):
+            if (
+                not backoff_active
+                and incident.get("preempts_backlog")
+                and consecutive_preemptions >= preemption_limit
+            ):
+                backoff_until = now + timedelta(hours=backoff_hours)
+                backoff_reason = (
+                    f"orphaned dirty worktree selected {consecutive_preemptions} consecutive cycles "
+                    "without durable issue linkage"
+                )
+                backoff_count += 1
+                backoff_active = True
+        else:
+            backoff_until = None
+            backoff_reason = ""
+            backoff_active = False
+
+        if backoff_active:
+            incident["preempts_backlog"] = False
+            note = (
+                f" Preemption backoff active until {backoff_until.isoformat()} because {backoff_reason}."
+                if backoff_until and backoff_reason
+                else ""
+            )
+            incident["selection_reason"] = f"{incident.get('selection_reason')}{note}".strip()
+
+        incident["backoff_active"] = backoff_active
+        incident["backoff_until"] = backoff_until.isoformat() if backoff_until else None
+        incident["backoff_reason"] = backoff_reason or None
+        incident["consecutive_preemptions"] = consecutive_preemptions
+        incident["sort_key"] = _incident_sort_key(incident)
+        incidents.append(incident)
+
+        history[identifier] = {
+            "identifier": identifier,
+            "selection_bucket": str(incident.get("selection_bucket") or ""),
+            "first_seen_at": str(prior.get("first_seen_at") or now.isoformat()),
+            "last_seen_at": now.isoformat(),
+            "last_selected_at": str(prior.get("last_selected_at") or ""),
+            "consecutive_preemptions": consecutive_preemptions,
+            "backoff_active": backoff_active,
+            "backoff_until": backoff_until.isoformat() if backoff_until else None,
+            "backoff_reason": backoff_reason or None,
+            "backoff_count": backoff_count,
+        }
+
+    incidents.sort(key=lambda item: item["sort_key"])
+    selected = next((item for item in incidents if item.get("preempts_backlog")), None)
+    if selected is None:
+        selected = next((item for item in incidents if item.get("actionable")), None)
+    if isinstance(selected, dict):
+        selected_id = str(selected.get("identifier") or "").strip()
+        record = history.get(selected_id)
+        if isinstance(record, dict):
+            record["last_selected_at"] = now.isoformat()
+
+    counts = dict(git_hygiene.get("counts") or {})
+    counts["backoff_active"] = sum(1 for item in incidents if item.get("backoff_active"))
+    return (
+        {
+            "counts": counts,
+            "incidents": incidents,
+            "selected": selected,
+        },
+        history,
+    )
+
+
 def _repo_root_for_issue(issue: dict[str, Any], repo_map: dict[str, str]) -> str:
     project = issue.get("project") if isinstance(issue.get("project"), dict) else {}
     project_name = str(project.get("name") or "").strip()
@@ -1124,7 +1281,8 @@ def _format_summary(
             "- repo hygiene: "
             f"{hygiene_counts.get('incidents', 0)} incidents; "
             f"{hygiene_counts.get('orphaned_dirty', 0)} orphaned dirty; "
-            f"{hygiene_counts.get('cleanup_candidates', 0)} cleanup candidates"
+            f"{hygiene_counts.get('cleanup_candidates', 0)} cleanup candidates; "
+            f"{hygiene_counts.get('backoff_active', 0)} in backoff"
         )
     if stale_wip:
         lines.append(
@@ -1165,12 +1323,15 @@ def evaluate_workspace_backlog(
     candidate_limit: int = DEFAULT_CANDIDATE_LIMIT,
     stale_hours: int = DEFAULT_STALE_HOURS,
     dirty_stale_hours: int = DEFAULT_DIRTY_STALE_HOURS,
+    git_hygiene_preemption_limit: int = DEFAULT_GIT_HYGIENE_PREEMPTION_LIMIT,
+    git_hygiene_backoff_hours: int = DEFAULT_GIT_HYGIENE_BACKOFF_HOURS,
     auto_delegate: bool = False,
     write_status_comment: bool = False,
     persist: bool = True,
     now: Optional[datetime] = None,
 ) -> dict[str, Any]:
     current = now or datetime.now(tz=timezone.utc)
+    previous_state = _load_json(state_path)
     cfg = _load_orchestrator_config(config_path)
     effective_team_key = str(team_key or cfg["team_key"]).strip() or DEFAULT_TEAM_KEY
     effective_issue_limit = _coerce_positive_int(issue_limit or cfg["issue_limit"], DEFAULT_ISSUE_LIMIT)
@@ -1181,6 +1342,14 @@ def evaluate_workspace_backlog(
     effective_dirty_stale_hours = _coerce_positive_int(
         dirty_stale_hours or cfg["dirty_stale_hours"],
         DEFAULT_DIRTY_STALE_HOURS,
+    )
+    effective_git_hygiene_preemption_limit = _coerce_positive_int(
+        git_hygiene_preemption_limit or cfg["git_hygiene_preemption_limit"],
+        DEFAULT_GIT_HYGIENE_PREEMPTION_LIMIT,
+    )
+    effective_git_hygiene_backoff_hours = _coerce_positive_int(
+        git_hygiene_backoff_hours or cfg["git_hygiene_backoff_hours"],
+        DEFAULT_GIT_HYGIENE_BACKOFF_HOURS,
     )
 
     users = linear_tool._list_users()
@@ -1227,10 +1396,20 @@ def evaluate_workspace_backlog(
         now=current,
         dirty_stale_hours=effective_dirty_stale_hours,
     )
-    selected_work = git_hygiene.get("selected")
+    git_hygiene, git_hygiene_history = _apply_git_hygiene_backoff(
+        git_hygiene=git_hygiene,
+        previous_state=previous_state,
+        now=current,
+        preemption_limit=effective_git_hygiene_preemption_limit,
+        backoff_hours=effective_git_hygiene_backoff_hours,
+    )
+    selected_git_hygiene = git_hygiene.get("selected")
+    selected_work = selected_git_hygiene if isinstance(selected_git_hygiene, dict) and selected_git_hygiene.get("preempts_backlog") else None
     if not isinstance(selected_work, dict) and selected:
         selected_work = dict(selected)
         selected_work["kind"] = "linear_issue"
+    elif not isinstance(selected_work, dict) and isinstance(selected_git_hygiene, dict):
+        selected_work = selected_git_hygiene
 
     writebacks: list[dict[str, Any]] = []
     if selected and auto_delegate and hermes_id and selected.get("ownership") == "unowned":
@@ -1321,6 +1500,7 @@ def evaluate_workspace_backlog(
         "selected_work": selected_work,
         "counts": counts,
         "git_hygiene": git_hygiene,
+        "git_hygiene_history": git_hygiene_history,
         "candidate_pool": candidate_pool,
         "writebacks": writebacks,
     }
@@ -1340,6 +1520,8 @@ def evaluate_workspace_backlog(
             "candidate_limit": effective_candidate_limit,
             "stale_hours": effective_stale_hours,
             "dirty_stale_hours": effective_dirty_stale_hours,
+            "git_hygiene_preemption_limit": effective_git_hygiene_preemption_limit,
+            "git_hygiene_backoff_hours": effective_git_hygiene_backoff_hours,
             "project_repo_roots": cfg["project_repo_roots"],
             "managed_repo_roots": cfg["managed_repo_roots"],
             "default_branches": cfg["default_branches"],
@@ -1350,6 +1532,7 @@ def evaluate_workspace_backlog(
         "selected_work": selected_work,
         "stale_wip": stale_wip,
         "git_hygiene": git_hygiene,
+        "git_hygiene_history": git_hygiene_history,
         "candidate_pool": candidate_pool,
         "writebacks": writebacks,
     }
@@ -1375,6 +1558,8 @@ def workspace_backlog_orchestrator(
     candidate_limit: Optional[int] = None,
     stale_hours: Optional[int] = None,
     dirty_stale_hours: Optional[int] = None,
+    git_hygiene_preemption_limit: Optional[int] = None,
+    git_hygiene_backoff_hours: Optional[int] = None,
     auto_delegate: Optional[bool] = None,
     write_status_comment: Optional[bool] = None,
     persist: Optional[bool] = None,
@@ -1391,6 +1576,14 @@ def workspace_backlog_orchestrator(
         candidate_limit=_coerce_positive_int(candidate_limit, DEFAULT_CANDIDATE_LIMIT),
         stale_hours=_coerce_positive_int(stale_hours, DEFAULT_STALE_HOURS),
         dirty_stale_hours=_coerce_positive_int(dirty_stale_hours, DEFAULT_DIRTY_STALE_HOURS),
+        git_hygiene_preemption_limit=_coerce_positive_int(
+            git_hygiene_preemption_limit,
+            DEFAULT_GIT_HYGIENE_PREEMPTION_LIMIT,
+        ),
+        git_hygiene_backoff_hours=_coerce_positive_int(
+            git_hygiene_backoff_hours,
+            DEFAULT_GIT_HYGIENE_BACKOFF_HOURS,
+        ),
         auto_delegate=False if auto_delegate is None else bool(auto_delegate),
         write_status_comment=False if write_status_comment is None else bool(write_status_comment),
         persist=True if persist is None else bool(persist),
@@ -1413,6 +1606,8 @@ registry.register(
         candidate_limit=args.get("candidate_limit"),
         stale_hours=args.get("stale_hours"),
         dirty_stale_hours=args.get("dirty_stale_hours"),
+        git_hygiene_preemption_limit=args.get("git_hygiene_preemption_limit"),
+        git_hygiene_backoff_hours=args.get("git_hygiene_backoff_hours"),
         auto_delegate=args.get("auto_delegate"),
         write_status_comment=args.get("write_status_comment"),
         persist=args.get("persist"),

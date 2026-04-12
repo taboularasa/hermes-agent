@@ -39,6 +39,8 @@ stale_hours: 24
 dirty_stale_hours: 24
 issue_limit: 200
 candidate_limit: 10
+git_hygiene_preemption_limit: 3
+git_hygiene_backoff_hours: 6
 project_priority:
   - Hermes Self-Improvement
   - Hermes Field Copilot
@@ -60,6 +62,7 @@ default_branches:
 - Active Hermes-owned WIP beats fresh backlog.
 - Unowned actionable backlog is claimable only when human-owned or other-agent-owned work is not being stolen.
 - Unowned dirty repo state can preempt backlog when it has no active ctx/Codex owner or when it is linked to an open Linear issue that has gone stale locally.
+- Repeated orphaned dirty repo incidents must not monopolize the queue forever. If the same unlinked orphaned dirty worktree preempts several consecutive coordinator cycles without durable linkage, it should enter backoff and yield backlog priority temporarily while remaining visible for later retry.
 - Human-owned and other-agent-owned issues are visible for audit but not selected.
 
 ## Repo hygiene policy
