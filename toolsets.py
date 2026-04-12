@@ -55,7 +55,7 @@ _HERMES_CORE_TOOLS = [
     # Clarifying questions
     "clarify",
     # Code execution + delegation
-    "execute_code", "delegate_task", "codex_delegate", "linear_issue", "ontology_context", "self_improvement_evidence_gate", "self_improvement_benchmark",
+    "execute_code", "delegate_task", "codex_delegate", "linear_issue", "ontology_context", "self_improvement_evidence_gate", "self_improvement_benchmark", "self_improvement_pipeline",
     # Cronjob management
     "cronjob",
     # Cross-platform messaging (gated on gateway running via check_fn)
@@ -222,7 +222,7 @@ TOOLSETS = {
 
     "self_improvement": {
         "description": "Evaluate self-improvement evidence freshness and benchmark trajectory",
-        "tools": ["self_improvement_evidence_gate", "self_improvement_benchmark", "ontology_context"],
+        "tools": ["self_improvement_evidence_gate", "self_improvement_benchmark", "self_improvement_pipeline", "ontology_context"],
         "includes": []
     },
 

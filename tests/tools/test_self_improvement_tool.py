@@ -159,6 +159,215 @@ def _linear_issue(
     return issue
 
 
+def _clone(payload):
+    return json.loads(json.dumps(payload))
+
+
+def _install_fake_linear_surface(monkeypatch, store: dict) -> None:
+    states = store["states"]
+
+    def _state(name: str) -> dict:
+        for entry in states:
+            if entry["name"] == name:
+                return _clone(entry)
+        raise AssertionError(f"unknown state: {name}")
+
+    def _find_issue(issue_ref: str) -> dict | None:
+        wanted = str(issue_ref)
+        for issue in store["issues"]:
+            if issue.get("id") == wanted or issue.get("identifier") == wanted:
+                return issue
+        return None
+
+    def _sync_state(issue: dict, state_name: str) -> None:
+        issue["state"] = _state(state_name)
+        if issue["state"]["type"] == "completed":
+            issue["completedAt"] = issue.get("completedAt") or issue.get("updatedAt")
+        else:
+            issue["completedAt"] = None
+
+    def fake_linear_issue(args: dict[str, object], **_kw) -> str:
+        action = str(args.get("action") or "")
+        if action == "project_upsert":
+            created = store["project"] is None
+            if created:
+                store["project"] = {
+                    "id": "project-1",
+                    "name": str(args.get("name") or "Hermes Self-Improvement"),
+                    "description": linear_issue_tool._format_project_description(
+                        str(args.get("description") or ""),
+                        str(args.get("dedupe_key") or ""),
+                    ),
+                    "teams": [{"id": "team-1", "key": "HAD", "name": "Hadto"}],
+                    "url": "https://linear.app/hadto/project/hermes-self-improvement",
+                }
+            else:
+                store["project"]["name"] = str(args.get("name") or store["project"]["name"])
+                store["project"]["description"] = linear_issue_tool._format_project_description(
+                    str(args.get("description") or ""),
+                    str(args.get("dedupe_key") or ""),
+                )
+            return json.dumps(
+                {
+                    "success": True,
+                    "created": created,
+                    "updated_existing": not created,
+                    "project": _clone(store["project"]),
+                }
+            )
+
+        if action == "issue_upsert":
+            dedupe_key = str(args.get("dedupe_key") or "")
+            issue_ref = str(args.get("issue_id") or args.get("identifier") or "")
+            issue = _find_issue(issue_ref) if issue_ref else None
+            if issue is None and dedupe_key:
+                for candidate in store["issues"]:
+                    marker = linear_issue_tool._parse_marker(str(candidate.get("description") or ""))
+                    if str((marker or {}).get("dedupe_key") or "") == dedupe_key:
+                        issue = candidate
+                        break
+            if issue is None:
+                store["next_issue"] += 1
+                identifier = f"HAD-{store['next_issue']}"
+                issue = {
+                    "id": f"issue-{identifier.lower()}",
+                    "identifier": identifier,
+                    "title": str(args.get("title") or ""),
+                    "description": linear_issue_tool._format_marker_body(
+                        str(args.get("description") or ""),
+                        dedupe_key or None,
+                    ),
+                    "priority": args.get("priority"),
+                    "project": _clone(store["project"]),
+                    "team": {"id": "team-1", "key": "HAD", "name": "Hadto"},
+                    "state": _state(str(args.get("state_name") or "Backlog")),
+                    "delegate": _clone(store["users"]["hermes"]),
+                    "assignee": None,
+                    "labels": [],
+                    "comments": [],
+                    "createdAt": store["timestamp"],
+                    "updatedAt": store["timestamp"],
+                    "completedAt": None,
+                    "url": f"https://linear.app/hadto/issue/{identifier.lower()}",
+                }
+                store["issues"].append(issue)
+                created = True
+            else:
+                created = False
+                issue["title"] = str(args.get("title") or issue["title"])
+                issue["description"] = linear_issue_tool._format_marker_body(
+                    str(args.get("description") or linear_issue_tool._strip_marker(str(issue.get("description") or ""))),
+                    dedupe_key or None,
+                )
+                issue["updatedAt"] = store["timestamp"]
+
+            if "priority" in args and args.get("priority") is not None:
+                issue["priority"] = int(args["priority"])
+            if "delegate_id" in args:
+                issue["delegate"] = (
+                    _clone(store["users"]["hermes"])
+                    if str(args.get("delegate_id") or "")
+                    else None
+                )
+            if "assignee_id" in args:
+                issue["assignee"] = (
+                    _clone(store["users"]["human"])
+                    if str(args.get("assignee_id") or "")
+                    else None
+                )
+            if args.get("state_name"):
+                _sync_state(issue, str(args["state_name"]))
+
+            return json.dumps(
+                {
+                    "success": True,
+                    "created": created,
+                    "updated_existing": not created,
+                    "issue": _clone(issue),
+                }
+            )
+
+        if action == "update_state":
+            issue = _find_issue(str(args.get("identifier") or args.get("issue_id") or ""))
+            if issue is None:
+                return json.dumps({"error": "missing issue"})
+            _sync_state(issue, str(args.get("state_name") or "Done"))
+            issue["updatedAt"] = store["timestamp"]
+            return json.dumps({"success": True, "issue": _clone(issue), "team_states": _clone(states)})
+
+        if action == "comment":
+            issue = _find_issue(str(args.get("identifier") or args.get("issue_id") or ""))
+            if issue is None:
+                return json.dumps({"error": "missing issue"})
+            dedupe_key = str(args.get("dedupe_key") or "")
+            body = linear_issue_tool._format_comment_body(str(args.get("body") or ""), dedupe_key or None)
+            existing = None
+            if dedupe_key:
+                for comment in issue["comments"]:
+                    marker = linear_issue_tool._parse_marker(str(comment.get("body") or ""))
+                    if str((marker or {}).get("dedupe_key") or "") == dedupe_key:
+                        existing = comment
+                        break
+            if existing:
+                existing["body"] = body
+                existing["updatedAt"] = store["timestamp"]
+                comment = existing
+                updated_existing = True
+            else:
+                comment = {
+                    "id": f"comment-{issue['identifier'].lower()}-{len(issue['comments']) + 1}",
+                    "body": body,
+                    "createdAt": store["timestamp"],
+                    "updatedAt": store["timestamp"],
+                    "url": f"{issue['url']}#comment-{len(issue['comments']) + 1}",
+                }
+                issue["comments"].insert(0, comment)
+                updated_existing = False
+            issue["updatedAt"] = store["timestamp"]
+            return json.dumps(
+                {
+                    "success": True,
+                    "updated_existing": updated_existing,
+                    "created": not updated_existing,
+                    "issue_id": issue["id"],
+                    "issue_identifier": issue["identifier"],
+                    "comment": _clone(comment),
+                }
+            )
+
+        raise AssertionError(f"unexpected action: {action}")
+
+    monkeypatch.setattr(linear_issue_tool, "check_linear_issue_requirements", lambda: True)
+    monkeypatch.setattr(linear_issue_tool, "_list_users", lambda: [_clone(store["users"]["hermes"]), _clone(store["users"]["human"])])
+    monkeypatch.setattr(linear_issue_tool, "_list_projects", lambda limit=100: [_clone(store["project"])] if store["project"] else [])
+    monkeypatch.setattr(linear_issue_tool, "_resolve_team_id", lambda team_id, team_key: ("team-1", "HAD"))
+    monkeypatch.setattr(linear_issue_tool, "_fetch_workflow_states", lambda team_key: _clone(states))
+    monkeypatch.setattr(
+        linear_issue_tool,
+        "_project_issues",
+        lambda project_id, limit=250: [_clone(issue) for issue in store["issues"]],
+    )
+    monkeypatch.setattr(
+        linear_issue_tool,
+        "_fetch_issue",
+        lambda issue_ref, comment_limit=10: _clone(_find_issue(issue_ref) or {}),
+    )
+    monkeypatch.setattr(
+        linear_issue_tool,
+        "_update_issue",
+        lambda issue_id, input_data: (
+            _find_issue(issue_id).update(
+                {
+                    "assignee": None if "assigneeId" in input_data else _find_issue(issue_id).get("assignee"),
+                    "updatedAt": store["timestamp"],
+                }
+            )
+            or _clone(_find_issue(issue_id))
+        ),
+    )
+    monkeypatch.setattr(linear_issue_tool, "linear_issue", fake_linear_issue)
+
+
 def test_evaluate_self_improvement_evidence_reports_healthy_sources(tmp_path):
     now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
     recent = (now - timedelta(hours=2)).isoformat()
@@ -608,3 +817,194 @@ def test_self_improvement_benchmark_detects_regression_and_delegate_conflicts(mo
 
     persisted = json.loads(history_path.read_text(encoding="utf-8"))
     assert len(persisted["evaluations"]) == 2
+
+
+def test_self_improvement_pipeline_repairs_delegate_conflicts_and_upserts_top_issue(monkeypatch, tmp_path):
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
+    recent = (now - timedelta(hours=2)).isoformat()
+    stale = (now - timedelta(hours=96)).isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=stale)
+    objective_path = _seed_reward_policy(tmp_path / "epoch.yaml")
+    history_path = tmp_path / "benchmarks.json"
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    _write_json(journal_path, {"entries": [{"occurredAt": recent}]})
+    _write_json(codex_path, {"runs": {"codex_1": {"run_id": "codex_1", "status": "completed", "completed_at": recent}}})
+    _write_json(ctx_path, {"sessions": {"sess_1": {"session_id": "sess_1", "active": False, "updated_at": recent, "worktree_path": str(worktree)}}})
+
+    monkeypatch.setattr(
+        self_improvement_tool,
+        "build_self_improvement_context",
+        lambda *args, **kwargs: {
+            "reliability": {"status": "stale"},
+            "research_provider_policy": {"summary": {"available_provider_count": 2}},
+            "textbook_study": {"upgrade_targets": [{"title": "Typed execution frame"}]},
+            "business_recommendations": ["Restore ontology freshness before new capability work."],
+        },
+    )
+
+    store = {
+        "project": {
+            "id": "project-1",
+            "name": "Hermes Self-Improvement",
+            "description": linear_issue_tool._format_project_description(
+                "Track capability gaps and implementation follow-through.",
+                "project:hermes-self-improvement",
+            ),
+            "teams": [{"id": "team-1", "key": "HAD", "name": "Hadto"}],
+            "url": "https://linear.app/hadto/project/hermes-self-improvement",
+        },
+        "issues": [
+            _linear_issue(
+                "HAD-401",
+                state_type="started",
+                state_name="In Progress",
+                lane="Maintenance",
+                assignee={"id": "user-human", "name": "david"},
+                include_status_comment=False,
+                updated_at=recent,
+            ),
+        ],
+        "states": [
+            {"id": "state-backlog", "name": "Backlog", "type": "backlog"},
+            {"id": "state-progress", "name": "In Progress", "type": "started"},
+            {"id": "state-done", "name": "Done", "type": "completed"},
+        ],
+        "users": {
+            "hermes": {"id": "user-hermes", "name": "Hermes", "displayName": "Hermes", "email": "hermes@hadto.net", "active": True},
+            "human": {"id": "user-human", "name": "David", "displayName": "David", "email": "david@hadto.net", "active": True},
+        },
+        "next_issue": 499,
+        "timestamp": recent,
+    }
+    _install_fake_linear_surface(monkeypatch, store)
+
+    pipeline = self_improvement_tool.evaluate_self_improvement_pipeline(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        objective_path=objective_path,
+        history_path=history_path,
+        now=now,
+        persist=False,
+    )
+
+    assert pipeline["linear"]["repairs"][0]["identifier"] == "HAD-401"
+    assert pipeline["benchmark"]["linear_surface"]["delegate_conflict_count"] == 0
+    assert pipeline["top_candidate"]["benchmark_id"] == "reliability_gate"
+
+    reliability_issue = next(
+        issue for issue in store["issues"]
+        if "issue:hermes-self-improvement:benchmark:reliability_gate" in str(issue.get("description") or "")
+    )
+    assert reliability_issue["delegate"]["id"] == "user-hermes"
+    assert reliability_issue["assignee"] is None
+    assert any(
+        str((linear_issue_tool._parse_marker(comment["body"]) or {}).get("dedupe_key") or "")
+        == f"status:{reliability_issue['identifier']}"
+        for comment in reliability_issue["comments"]
+    )
+
+
+def test_self_improvement_pipeline_auto_closes_resolved_benchmark_issue(monkeypatch, tmp_path):
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
+    recent = (now - timedelta(hours=2)).isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+    objective_path = _seed_reward_policy(tmp_path / "epoch.yaml")
+    history_path = tmp_path / "benchmarks.json"
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    _write_json(journal_path, {"entries": [{"occurredAt": recent}]})
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_1": {"run_id": "codex_1", "status": "completed", "completed_at": recent},
+                "codex_2": {"run_id": "codex_2", "status": "completed", "completed_at": recent},
+            }
+        },
+    )
+    _write_json(
+        ctx_path,
+        {
+            "sessions": {
+                "sess_1": {"session_id": "sess_1", "active": False, "updated_at": recent, "worktree_path": str(worktree)},
+                "sess_2": {"session_id": "sess_2", "active": False, "updated_at": recent, "worktree_path": str(worktree)},
+            }
+        },
+    )
+
+    monkeypatch.setattr(
+        self_improvement_tool,
+        "build_self_improvement_context",
+        lambda *args, **kwargs: {
+            "reliability": {"status": "fresh"},
+            "research_provider_policy": {"summary": {"available_provider_count": 2}},
+            "textbook_study": {"upgrade_targets": [{"title": "Typed execution frame"}]},
+            "business_recommendations": ["Prioritize contract-facing reliability work."],
+        },
+    )
+
+    resolved_issue = _linear_issue(
+        "HAD-450",
+        state_type="started",
+        state_name="In Progress",
+        lane="Maintenance",
+        include_status_comment=True,
+        updated_at=recent,
+    )
+    resolved_issue["description"] = linear_issue_tool._format_marker_body(
+        linear_issue_tool._strip_marker(str(resolved_issue["description"] or "")),
+        "issue:hermes-self-improvement:benchmark:delegate_assignment_hygiene",
+    )
+
+    store = {
+        "project": {
+            "id": "project-1",
+            "name": "Hermes Self-Improvement",
+            "description": linear_issue_tool._format_project_description(
+                "Track capability gaps and implementation follow-through.",
+                "project:hermes-self-improvement",
+            ),
+            "teams": [{"id": "team-1", "key": "HAD", "name": "Hadto"}],
+            "url": "https://linear.app/hadto/project/hermes-self-improvement",
+        },
+        "issues": [resolved_issue],
+        "states": [
+            {"id": "state-backlog", "name": "Backlog", "type": "backlog"},
+            {"id": "state-progress", "name": "In Progress", "type": "started"},
+            {"id": "state-done", "name": "Done", "type": "completed"},
+        ],
+        "users": {
+            "hermes": {"id": "user-hermes", "name": "Hermes", "displayName": "Hermes", "email": "hermes@hadto.net", "active": True},
+            "human": {"id": "user-human", "name": "David", "displayName": "David", "email": "david@hadto.net", "active": True},
+        },
+        "next_issue": 499,
+        "timestamp": recent,
+    }
+    _install_fake_linear_surface(monkeypatch, store)
+
+    pipeline = self_improvement_tool.evaluate_self_improvement_pipeline(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        objective_path=objective_path,
+        history_path=history_path,
+        now=now,
+        persist=False,
+    )
+
+    assert any(item["benchmark_id"] == "delegate_assignment_hygiene" for item in pipeline["linear"]["closed_issues"])
+    assert store["issues"][0]["state"]["type"] == "completed"

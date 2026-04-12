@@ -176,8 +176,11 @@ from .self_improvement_tool import (
     evaluate_self_improvement_evidence,
     self_improvement_benchmark,
     evaluate_self_improvement_benchmark,
+    self_improvement_pipeline,
+    evaluate_self_improvement_pipeline,
     SELF_IMPROVEMENT_EVIDENCE_SCHEMA,
     SELF_IMPROVEMENT_BENCHMARK_SCHEMA,
+    SELF_IMPROVEMENT_PIPELINE_SCHEMA,
 )
 
 # File tools have no external requirements - they use the terminal backend
@@ -297,6 +300,9 @@ __all__ = [
     'evaluate_self_improvement_evidence',
     'self_improvement_benchmark',
     'evaluate_self_improvement_benchmark',
+    'self_improvement_pipeline',
+    'evaluate_self_improvement_pipeline',
+    'SELF_IMPROVEMENT_PIPELINE_SCHEMA',
     'SELF_IMPROVEMENT_EVIDENCE_SCHEMA',
     'SELF_IMPROVEMENT_BENCHMARK_SCHEMA',
     # Subagent delegation
