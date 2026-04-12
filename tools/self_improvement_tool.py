@@ -30,12 +30,19 @@ DEFAULT_CTX_BINDINGS_PATH = get_hermes_home() / "ctx" / "session_bindings.json"
 DEFAULT_ONTOLOGY_ROOT = DEFAULT_ONTOLOGY_REPO_ROOT
 DEFAULT_OBJECTIVE_PATH = get_hermes_home() / "notes" / "hermes-epoch-objective.yaml"
 DEFAULT_BENCHMARK_HISTORY_PATH = get_hermes_home() / "self_improvement" / "benchmark_history.json"
+DEFAULT_STRATEGIC_CONVERSATION_HISTORY_PATH = (
+    get_hermes_home() / "self_improvement" / "strategic_conversations.json"
+)
+DEFAULT_STRATEGIC_CONVERSATION_NOTES_DIR = (
+    get_hermes_home() / "notes" / "self_improvement" / "strategic_conversations"
+)
 DEFAULT_SELF_IMPROVEMENT_PROJECT_NAME = "Hermes Self-Improvement"
 DEFAULT_SELF_IMPROVEMENT_TEAM_KEY = "HAD"
 DEFAULT_SELF_IMPROVEMENT_PROJECT_DEDUPE_KEY = "project:hermes-self-improvement"
 DEFAULT_SELF_IMPROVEMENT_ISSUE_DEDUPE_PREFIX = "issue:hermes-self-improvement:benchmark:"
 DEFAULT_SELF_IMPROVEMENT_CANDIDATE_LIMIT = 3
 DEFAULT_BENCHMARK_LOOKBACK_DAYS = 14
+DEFAULT_STRATEGIC_CONVERSATION_COOLDOWN_HOURS = 72
 BENCHMARK_CONTRACT_VERSION = "v1"
 _BENCHMARK_HISTORY_LIMIT = 200
 _SELF_IMPROVEMENT_TEMPLATE_PATH = (
@@ -233,6 +240,20 @@ SELF_IMPROVEMENT_PIPELINE_SCHEMA = {
                     f"(defaults to {display_hermes_home()}/self_improvement/benchmark_history.json)."
                 ),
             },
+            "discussion_history_path": {
+                "type": "string",
+                "description": (
+                    "Optional strategic-conversation history path "
+                    f"(defaults to {display_hermes_home()}/self_improvement/strategic_conversations.json)."
+                ),
+            },
+            "discussion_notes_dir": {
+                "type": "string",
+                "description": (
+                    "Optional directory for durable strategic-conversation notes "
+                    f"(defaults to {display_hermes_home()}/notes/self_improvement/strategic_conversations)."
+                ),
+            },
             "project_name": {
                 "type": "string",
                 "description": "Linear project name to maintain (default: Hermes Self-Improvement).",
@@ -267,6 +288,11 @@ SELF_IMPROVEMENT_PIPELINE_SCHEMA = {
             "candidate_limit": {
                 "type": "integer",
                 "description": "Maximum number of benchmark-driven issues to maintain (default 3).",
+                "minimum": 1,
+            },
+            "discussion_cooldown_hours": {
+                "type": "integer",
+                "description": "Cooldown before re-proposing the same strategic discussion topic (default 72h).",
                 "minimum": 1,
             },
             "auto_repair_linear": {
@@ -894,6 +920,392 @@ def _history_record_from_benchmark(benchmark: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _load_strategic_conversation_history(path: Path) -> dict[str, Any]:
+    payload = _load_json(path)
+    if not isinstance(payload, dict):
+        return {"version": 1, "conversations": []}
+    conversations = payload.get("conversations")
+    if not isinstance(conversations, list):
+        conversations = []
+    return {
+        "version": int(payload.get("version") or 1),
+        "conversations": [item for item in conversations if isinstance(item, dict)],
+    }
+
+
+def _save_strategic_conversation_history(path: Path, payload: dict[str, Any]) -> None:
+    atomic_json_write(path, payload)
+
+
+def _slugify(text: str, *, limit: int = 80) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "-", str(text or "").strip().casefold()).strip("-")
+    if not normalized:
+        normalized = "strategic-topic"
+    return normalized[:limit].strip("-") or "strategic-topic"
+
+
+def _truncate_line(text: str, *, limit: int = 120) -> str:
+    raw = " ".join(str(text or "").strip().split())
+    if len(raw) <= limit:
+        return raw
+    return raw[: max(1, limit - 1)].rstrip() + "…"
+
+
+def _strategic_lane_rank(lane: str) -> int:
+    normalized = str(lane or "").strip().casefold()
+    if normalized == "growth":
+        return 0
+    if normalized == "capability":
+        return 1
+    return 2
+
+
+def _strategic_source_rank(source_kind: str) -> int:
+    normalized = str(source_kind or "").strip().casefold()
+    if normalized == "ontology_candidate":
+        return 0
+    if normalized == "business_recommendation":
+        return 1
+    return 2
+
+
+def _discussion_entry_by_key(history: dict[str, Any], dedupe_key: str) -> Optional[dict[str, Any]]:
+    for item in history.get("conversations", []):
+        if str(item.get("dedupe_key") or "") == dedupe_key:
+            return item
+    return None
+
+
+def _discussion_questions(
+    *,
+    lane: str,
+    topic: str,
+    why_now: str,
+    review_question: str,
+) -> list[str]:
+    base_questions = [
+        f"What would make `{topic}` materially worth funding in the current epoch?",
+        review_question or "How would this direction improve Hermes's leverage for Hadto?",
+    ]
+    normalized_lane = str(lane or "").strip().casefold()
+    if normalized_lane == "growth":
+        base_questions.append(
+            "Should Hermes turn this into a concrete contract-winning surface now, or keep it as research until the offer is clearer?"
+        )
+    else:
+        base_questions.append(
+            "What capability shape would be genuinely compounding here instead of just intellectually interesting?"
+        )
+    if why_now:
+        base_questions.append(
+            f"Given `{_truncate_line(why_now, limit=90)}`, what signal would tell us to move from discussion to implementation?"
+        )
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for question in base_questions:
+        normalized = question.strip()
+        if normalized and normalized not in seen:
+            deduped.append(normalized)
+            seen.add(normalized)
+    return deduped[:3]
+
+
+def _format_strategic_conversation_note(
+    *,
+    candidate: dict[str, Any],
+    benchmark: dict[str, Any],
+    objective_name: str,
+    review_question: str,
+) -> str:
+    lines = [
+        "# Hermes Strategic Conversation",
+        "",
+        f"Discussion key: `{candidate.get('discussion_key')}`",
+        f"Lane: `{candidate.get('lane')}`",
+        f"Topic: {candidate.get('topic')}",
+        f"Why now: {candidate.get('why_now')}",
+        "",
+        "Operator prompt:",
+        str(candidate.get("operator_prompt") or "").strip(),
+        "",
+        "Questions:",
+    ]
+    for question in candidate.get("questions") or []:
+        lines.append(f"- {question}")
+    lines.extend(
+        [
+            "",
+            "Epoch objective:",
+            f"- {objective_name or 'Client Revenue and Social Proof'}",
+            f"- {review_question or 'Does this work increase Hadto leverage this epoch?'}",
+            "",
+            "Benchmark context:",
+            (
+                f"- score={float(benchmark.get('score') or 0.0):.2f}/100; "
+                f"direction={benchmark.get('direction')}; trend={benchmark.get('trend')}"
+            ),
+        ]
+    )
+    evidence_refs = [str(item).strip() for item in candidate.get("evidence_refs") or [] if str(item).strip()]
+    if evidence_refs:
+        lines.append("")
+        lines.append("Evidence refs:")
+        for ref in evidence_refs:
+            lines.append(f"- {ref}")
+    lines.extend(
+        [
+            "",
+            "Capture expectations:",
+            "- Keep the discussion in one Slack thread so Hermes can recover it via `session_search` later.",
+            "- After the discussion, update this note with decisions, ontological takeaways, and any follow-on work.",
+            "- If the discussion yields reusable framing, seed a journal entry and consider a blog post or Linear work item.",
+        ]
+    )
+    return "\n".join(lines).strip() + "\n"
+
+
+def _format_strategic_slack_message(candidate: dict[str, Any]) -> str:
+    lines = [
+        f"Hermes strategic evolution topic: {candidate.get('topic')}",
+        f"Discussion key: `{candidate.get('discussion_key')}`",
+        f"Lane: `{candidate.get('lane')}`",
+        f"Why now: {candidate.get('why_now')}",
+        "Questions:",
+    ]
+    for question in candidate.get("questions") or []:
+        lines.append(f"- {question}")
+    if candidate.get("note_path"):
+        lines.append(f"Note: `{candidate.get('note_path')}`")
+    lines.append("Reply in a thread so Hermes can treat that thread as the durable discussion record.")
+    return "\n".join(lines).strip()
+
+
+def _top_candidate_needs_immediate_execution(benchmark: dict[str, Any], top_candidate: Optional[dict[str, Any]]) -> bool:
+    if str((benchmark.get("gate") or {}).get("status") or "").strip().casefold() != "healthy":
+        return True
+    if benchmark.get("critical_failures"):
+        return True
+    if not isinstance(top_candidate, dict) or not top_candidate:
+        return False
+    lane = str(top_candidate.get("lane") or "").strip().casefold()
+    status = str(top_candidate.get("status") or "").strip().casefold()
+    if lane == "maintenance":
+        return True
+    if status == "fail":
+        return True
+    if lane == "growth" and status in {"fail", "warn"}:
+        return True
+    return False
+
+
+def _strategic_conversation_candidates(
+    *,
+    ontology_context: dict[str, Any],
+    benchmark: dict[str, Any],
+    reward_policy: dict[str, Any],
+) -> list[dict[str, Any]]:
+    objective_name = str((reward_policy.get("epoch") or {}).get("name") or "").strip()
+    review_question = str((reward_policy.get("epoch") or {}).get("review_question") or "").strip()
+    evidence = ontology_context.get("evidence") if isinstance(ontology_context.get("evidence"), dict) else {}
+    evidence_refs = [
+        str(value).strip()
+        for value in (
+            evidence.get("metrics_path"),
+            evidence.get("delta_report_path"),
+            evidence.get("daily_report_path"),
+            reward_policy.get("_resolved_path"),
+        )
+        if str(value or "").strip()
+    ]
+
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    source_groups = ontology_context.get("candidates") if isinstance(ontology_context.get("candidates"), dict) else {}
+    for lane_key in ("growth", "capability"):
+        lane_name = "Growth" if lane_key == "growth" else "Capability"
+        for item in source_groups.get(lane_key, []) or []:
+            if not isinstance(item, dict):
+                continue
+            topic = _truncate_line(str(item.get("title") or "").strip(), limit=110)
+            why_now = _truncate_line(str(item.get("why_now") or "").strip(), limit=180)
+            if not topic or not why_now:
+                continue
+            if str(item.get("change_surface") or "").strip() or str(item.get("backing_issue") or "").strip():
+                continue
+            key = (lane_name, topic.casefold())
+            if key in seen:
+                continue
+            seen.add(key)
+            dedupe_key = f"strategic:{lane_name.casefold()}:{_slugify(topic)}"
+            discussion_key = f"hermes-strategy:{_slugify(topic)}"
+            questions = _discussion_questions(
+                lane=lane_name,
+                topic=topic,
+                why_now=why_now,
+                review_question=review_question,
+            )
+            candidates.append(
+                {
+                    "kind": "strategic_conversation",
+                    "source_kind": "ontology_candidate",
+                    "lane": lane_name,
+                    "topic": topic,
+                    "why_now": why_now,
+                    "objective_name": objective_name,
+                    "objective_review_question": review_question,
+                    "dedupe_key": dedupe_key,
+                    "discussion_key": discussion_key,
+                    "questions": questions,
+                    "operator_prompt": (
+                        f"Use David as a sounding board for `{topic}` before forcing implementation. "
+                        f"Why now: {why_now}"
+                    ),
+                    "evidence_refs": evidence_refs,
+                }
+            )
+
+    for recommendation in ontology_context.get("business_recommendations", []) or []:
+        text = _truncate_line(str(recommendation or "").strip(), limit=180)
+        if not text:
+            continue
+        topic = _truncate_line(text, limit=110)
+        key = ("Growth", topic.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        dedupe_key = f"strategic:growth:{_slugify(topic)}"
+        discussion_key = f"hermes-strategy:{_slugify(topic)}"
+        questions = _discussion_questions(
+            lane="Growth",
+            topic=topic,
+            why_now=text,
+            review_question=review_question,
+        )
+        candidates.append(
+            {
+                "kind": "strategic_conversation",
+                "source_kind": "business_recommendation",
+                "lane": "Growth",
+                "topic": topic,
+                "why_now": text,
+                "objective_name": objective_name,
+                "objective_review_question": review_question,
+                "dedupe_key": dedupe_key,
+                "discussion_key": discussion_key,
+                "questions": questions,
+                "operator_prompt": (
+                    f"Hermes sees a growth-side future direction worth pairing on: {text}"
+                ),
+                "evidence_refs": evidence_refs,
+            }
+        )
+
+    candidates.sort(
+        key=lambda item: (
+            _strategic_lane_rank(str(item.get("lane") or "")),
+            _strategic_source_rank(str(item.get("source_kind") or "")),
+            str(item.get("topic") or "").casefold(),
+        )
+    )
+    return candidates
+
+
+def _select_strategic_conversation(
+    *,
+    benchmark: dict[str, Any],
+    top_candidate: Optional[dict[str, Any]],
+    ontology_context: dict[str, Any],
+    reward_policy: dict[str, Any],
+    history_path: Path,
+    notes_dir: Path,
+    now: datetime,
+    persist: bool,
+    cooldown_hours: int,
+) -> dict[str, Any]:
+    history = _load_strategic_conversation_history(history_path.expanduser())
+    result = {
+        "history_path": str(history_path.expanduser()),
+        "notes_dir": str(notes_dir.expanduser()),
+        "cooldown_hours": int(cooldown_hours),
+        "candidates": [],
+        "selected": None,
+    }
+
+    if str((benchmark.get("gate") or {}).get("status") or "").strip().casefold() != "healthy":
+        result["suppressed_reason"] = "reliability_gate_degraded"
+        return result
+
+    if _top_candidate_needs_immediate_execution(benchmark, top_candidate):
+        result["suppressed_reason"] = "execution_candidate_dominates"
+        return result
+
+    candidates = _strategic_conversation_candidates(
+        ontology_context=ontology_context,
+        benchmark=benchmark,
+        reward_policy=reward_policy,
+    )
+    result["candidates"] = candidates[:3]
+    if not candidates:
+        result["suppressed_reason"] = "no_future_direction_candidate"
+        return result
+
+    selected = dict(candidates[0])
+    record = _discussion_entry_by_key(history, str(selected.get("dedupe_key") or ""))
+    last_proposed_at = _parse_time((record or {}).get("last_proposed_at"))
+    cooldown_active = False
+    cooldown_remaining_hours = None
+    if last_proposed_at is not None:
+        elapsed_hours = max(0.0, (now - last_proposed_at).total_seconds() / 3600.0)
+        if elapsed_hours < int(cooldown_hours):
+            cooldown_active = True
+            cooldown_remaining_hours = round(int(cooldown_hours) - elapsed_hours, 2)
+
+    note_path = notes_dir.expanduser() / f"{_slugify(str(selected.get('topic') or 'strategic-topic'))}.md"
+    selected["note_path"] = str(note_path)
+    selected["history_record"] = record
+    selected["should_reach_out"] = not cooldown_active
+    if cooldown_active:
+        selected["suppressed_reason"] = "cooldown_active"
+        selected["cooldown_remaining_hours"] = cooldown_remaining_hours
+    else:
+        selected["suppressed_reason"] = ""
+    selected["slack_target"] = "slack"
+    selected["slack_message"] = _format_strategic_slack_message(selected)
+
+    if persist:
+        note_path.parent.mkdir(parents=True, exist_ok=True)
+        note_path.write_text(
+            _format_strategic_conversation_note(
+                candidate=selected,
+                benchmark=benchmark,
+                objective_name=str(selected.get("objective_name") or ""),
+                review_question=str(selected.get("objective_review_question") or ""),
+            ),
+            encoding="utf-8",
+        )
+        if record is None:
+            record = {
+                "dedupe_key": selected.get("dedupe_key"),
+                "discussion_key": selected.get("discussion_key"),
+                "topic": selected.get("topic"),
+                "lane": selected.get("lane"),
+                "created_at": now.isoformat(),
+            }
+            history["conversations"].append(record)
+        record["topic"] = selected.get("topic")
+        record["lane"] = selected.get("lane")
+        record["note_path"] = str(note_path)
+        record["last_seen_at"] = now.isoformat()
+        if selected.get("should_reach_out"):
+            record["last_proposed_at"] = now.isoformat()
+        record["last_suppressed_reason"] = selected.get("suppressed_reason") or ""
+        _save_strategic_conversation_history(history_path.expanduser(), history)
+        selected["history_record"] = dict(record)
+
+    result["selected"] = selected
+    return result
+
+
 def _check_status(score: float) -> str:
     if score >= 0.85:
         return "pass"
@@ -1470,6 +1882,7 @@ def _format_pipeline_summary(
     managed_issues: list[dict[str, Any]],
     closed_issues: list[dict[str, Any]],
     top_candidate: Optional[dict[str, Any]],
+    strategic_conversation: dict[str, Any],
 ) -> str:
     lines = [
         (
@@ -1493,6 +1906,20 @@ def _format_pipeline_summary(
     if top_candidate:
         lines.append(
             f"- top candidate: {top_candidate.get('identifier')} `{top_candidate.get('benchmark_id')}` [{top_candidate.get('lane')}]"
+        )
+    selected_discussion = (
+        strategic_conversation.get("selected")
+        if isinstance(strategic_conversation, dict)
+        else None
+    )
+    if isinstance(selected_discussion, dict) and selected_discussion:
+        status = "reach out" if selected_discussion.get("should_reach_out") else "hold"
+        lines.append(
+            f"- strategic conversation: {selected_discussion.get('lane')} `{selected_discussion.get('topic')}` ({status})"
+        )
+    elif isinstance(strategic_conversation, dict) and strategic_conversation.get("suppressed_reason"):
+        lines.append(
+            f"- strategic conversation: suppressed ({strategic_conversation.get('suppressed_reason')})"
         )
     return "\n".join(lines)
 
@@ -2243,6 +2670,8 @@ def evaluate_self_improvement_pipeline(
     ontology_root: Path = DEFAULT_ONTOLOGY_ROOT,
     objective_path: Optional[Path] = None,
     history_path: Path = DEFAULT_BENCHMARK_HISTORY_PATH,
+    discussion_history_path: Path = DEFAULT_STRATEGIC_CONVERSATION_HISTORY_PATH,
+    discussion_notes_dir: Path = DEFAULT_STRATEGIC_CONVERSATION_NOTES_DIR,
     project_name: str = DEFAULT_SELF_IMPROVEMENT_PROJECT_NAME,
     team_key: str = DEFAULT_SELF_IMPROVEMENT_TEAM_KEY,
     now: Optional[datetime] = None,
@@ -2251,16 +2680,23 @@ def evaluate_self_improvement_pipeline(
     lookback_days: int = DEFAULT_BENCHMARK_LOOKBACK_DAYS,
     persist: bool = True,
     candidate_limit: int = DEFAULT_SELF_IMPROVEMENT_CANDIDATE_LIMIT,
+    discussion_cooldown_hours: int = DEFAULT_STRATEGIC_CONVERSATION_COOLDOWN_HOURS,
     auto_repair_linear: bool = True,
     auto_close_resolved: bool = True,
 ) -> dict[str, Any]:
     current = now or datetime.now(tz=timezone.utc)
+    reward_policy = _load_reward_policy(objective_path)
+    resolved_objective_path = (
+        Path(str(reward_policy.get("_resolved_path"))).expanduser()
+        if reward_policy.get("_resolved_path")
+        else objective_path
+    )
     benchmark_before = evaluate_self_improvement_benchmark(
         journal_path=journal_path,
         codex_runs_path=codex_runs_path,
         ctx_bindings_path=ctx_bindings_path,
         ontology_root=ontology_root,
-        objective_path=objective_path,
+        objective_path=resolved_objective_path,
         history_path=history_path,
         project_name=project_name,
         team_key=team_key,
@@ -2286,7 +2722,7 @@ def evaluate_self_improvement_pipeline(
             codex_runs_path=codex_runs_path,
             ctx_bindings_path=ctx_bindings_path,
             ontology_root=ontology_root,
-            objective_path=objective_path,
+            objective_path=resolved_objective_path,
             history_path=history_path,
             project_name=project_name,
             team_key=team_key,
@@ -2316,7 +2752,7 @@ def evaluate_self_improvement_pipeline(
         codex_runs_path=codex_runs_path,
         ctx_bindings_path=ctx_bindings_path,
         ontology_root=ontology_root,
-        objective_path=objective_path,
+        objective_path=resolved_objective_path,
         history_path=history_path,
         project_name=project_name,
         team_key=team_key,
@@ -2330,6 +2766,22 @@ def evaluate_self_improvement_pipeline(
     top_candidate = _select_pipeline_top_candidate(
         benchmark=benchmark_after,
         issues_by_benchmark_id=issue_management.get("issues_by_benchmark_id", {}),
+    )
+    ontology_context = build_self_improvement_context(
+        repo_root=ontology_root,
+        now=current,
+        freshness_hours=freshness_hours,
+    )
+    strategic_conversation = _select_strategic_conversation(
+        benchmark=benchmark_after,
+        top_candidate=top_candidate,
+        ontology_context=ontology_context,
+        reward_policy=reward_policy,
+        history_path=discussion_history_path,
+        notes_dir=discussion_notes_dir,
+        now=current,
+        persist=persist,
+        cooldown_hours=max(1, int(discussion_cooldown_hours or DEFAULT_STRATEGIC_CONVERSATION_COOLDOWN_HOURS)),
     )
 
     comment_error = None
@@ -2379,6 +2831,7 @@ def evaluate_self_improvement_pipeline(
             "top_candidate_comment_error": comment_error,
         },
         "top_candidate": top_candidate,
+        "strategic_conversation": strategic_conversation,
     }
     pipeline["summary_markdown"] = _format_pipeline_summary(
         benchmark_before=benchmark_before,
@@ -2387,6 +2840,7 @@ def evaluate_self_improvement_pipeline(
         managed_issues=list(issue_management.get("managed_issues") or []),
         closed_issues=list(issue_management.get("closed_issues") or []),
         top_candidate=top_candidate,
+        strategic_conversation=strategic_conversation,
     )
     return pipeline
 
@@ -2432,6 +2886,8 @@ def self_improvement_pipeline(
     ontology_root: Optional[str] = None,
     objective_path: Optional[str] = None,
     history_path: Optional[str] = None,
+    discussion_history_path: Optional[str] = None,
+    discussion_notes_dir: Optional[str] = None,
     project_name: Optional[str] = None,
     team_key: Optional[str] = None,
     now: Optional[str] = None,
@@ -2440,6 +2896,7 @@ def self_improvement_pipeline(
     lookback_days: Optional[int] = None,
     persist: Optional[bool] = None,
     candidate_limit: Optional[int] = None,
+    discussion_cooldown_hours: Optional[int] = None,
     auto_repair_linear: Optional[bool] = None,
     auto_close_resolved: Optional[bool] = None,
     task_id: Optional[str] = None,
@@ -2451,6 +2908,16 @@ def self_improvement_pipeline(
         ontology_root=Path(ontology_root).expanduser() if ontology_root else DEFAULT_ONTOLOGY_ROOT,
         objective_path=Path(objective_path).expanduser() if objective_path else None,
         history_path=Path(history_path).expanduser() if history_path else DEFAULT_BENCHMARK_HISTORY_PATH,
+        discussion_history_path=(
+            Path(discussion_history_path).expanduser()
+            if discussion_history_path
+            else DEFAULT_STRATEGIC_CONVERSATION_HISTORY_PATH
+        ),
+        discussion_notes_dir=(
+            Path(discussion_notes_dir).expanduser()
+            if discussion_notes_dir
+            else DEFAULT_STRATEGIC_CONVERSATION_NOTES_DIR
+        ),
         project_name=str(project_name or DEFAULT_SELF_IMPROVEMENT_PROJECT_NAME),
         team_key=str(team_key or DEFAULT_SELF_IMPROVEMENT_TEAM_KEY),
         now=_parse_time(now) if now else None,
@@ -2459,6 +2926,11 @@ def self_improvement_pipeline(
         lookback_days=int(lookback_days) if lookback_days else DEFAULT_BENCHMARK_LOOKBACK_DAYS,
         persist=True if persist is None else bool(persist),
         candidate_limit=int(candidate_limit) if candidate_limit else DEFAULT_SELF_IMPROVEMENT_CANDIDATE_LIMIT,
+        discussion_cooldown_hours=(
+            int(discussion_cooldown_hours)
+            if discussion_cooldown_hours
+            else DEFAULT_STRATEGIC_CONVERSATION_COOLDOWN_HOURS
+        ),
         auto_repair_linear=True if auto_repair_linear is None else bool(auto_repair_linear),
         auto_close_resolved=True if auto_close_resolved is None else bool(auto_close_resolved),
     )
@@ -2536,6 +3008,8 @@ registry.register(
         ontology_root=args.get("ontology_root"),
         objective_path=args.get("objective_path"),
         history_path=args.get("history_path"),
+        discussion_history_path=args.get("discussion_history_path"),
+        discussion_notes_dir=args.get("discussion_notes_dir"),
         project_name=args.get("project_name"),
         team_key=args.get("team_key"),
         now=args.get("now"),
@@ -2544,6 +3018,7 @@ registry.register(
         lookback_days=args.get("lookback_days"),
         persist=args.get("persist"),
         candidate_limit=args.get("candidate_limit"),
+        discussion_cooldown_hours=args.get("discussion_cooldown_hours"),
         auto_repair_linear=args.get("auto_repair_linear"),
         auto_close_resolved=args.get("auto_close_resolved"),
         task_id=kw.get("task_id"),
