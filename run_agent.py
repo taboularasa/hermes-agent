@@ -123,6 +123,16 @@ ONTOLOGY_PREFLIGHT_KEYWORDS = (
     "vertical readiness",
 )
 
+WORK_STATUS_QUERY_PATTERNS = (
+    re.compile(r"\bwhat\s+are\s+(?:you|hermes)\s+(?:currently\s+)?working\s+on\b"),
+    re.compile(r"\bwhat\s+is\s+hermes\s+(?:currently\s+)?working\s+on\b"),
+    re.compile(r"\bwhat(?:'s| is)\s+(?:currently\s+)?active\b"),
+    re.compile(r"\bwhat(?:'s| is)\s+(?:the\s+)?current(?:ly)?\s+active\s+work\b"),
+    re.compile(r"\bwhat\s+work\s+is\s+left\b"),
+    re.compile(r"\bis\s+there\s+(?:any\s+)?work\s+left\b"),
+    re.compile(r"\bwhat(?:'s| is)\s+in\s+progress\b"),
+)
+
 
 class _SafeWriter:
     """Transparent stdio wrapper that catches OSError/ValueError from broken pipes.
@@ -373,6 +383,43 @@ def _inject_honcho_turn_context(content, turn_context: str):
     if not text.strip():
         return note
     return f"{text}\n\n{note}"
+
+
+def _inject_work_status_turn_context(content, turn_context: str):
+    """Append workspace backlog status context to the current-turn user message."""
+    if not turn_context:
+        return content
+
+    note = (
+        "[System note: The following workspace backlog snapshot was retrieved for this "
+        "turn because the user asked about Hermes' current work. It is authoritative "
+        "for workspace-global active work and takes precedence over the session-local "
+        "todo list.]\n\n"
+        f"{turn_context}"
+    )
+
+    if isinstance(content, list):
+        return list(content) + [{"type": "text", "text": note}]
+
+    text = "" if content is None else str(content)
+    if not text.strip():
+        return note
+    return f"{text}\n\n{note}"
+
+
+def _looks_like_work_status_query(user_message: str) -> bool:
+    """Return True when the user is asking about Hermes' current/global work status."""
+    text = re.sub(r"\s+", " ", str(user_message or "").strip().lower())
+    if not text:
+        return False
+    return any(pattern.search(text) for pattern in WORK_STATUS_QUERY_PATTERNS)
+
+
+def _fetch_workspace_backlog_snapshot() -> dict[str, Any]:
+    """Read the current workspace backlog snapshot without mutating Linear."""
+    from tools.workspace_backlog_tool import evaluate_workspace_backlog
+
+    return evaluate_workspace_backlog(persist=False)
 
 
 # Budget warning text patterns injected by _get_budget_warning().
@@ -2950,6 +2997,94 @@ class AIAgent:
         if not text:
             return False
         return any(keyword in text for keyword in ONTOLOGY_PREFLIGHT_KEYWORDS)
+
+    def _should_preload_work_status_context(self, user_message: str) -> bool:
+        """Return True when the current turn needs a fresh workspace status snapshot."""
+        if "workspace_backlog_orchestrator" not in self.valid_tool_names:
+            return False
+        return _looks_like_work_status_query(user_message)
+
+    def _build_work_status_turn_context(self, user_message: str) -> str:
+        """Preload global work status so Hermes does not answer from session todo alone."""
+        if not self._should_preload_work_status_context(user_message):
+            return ""
+
+        try:
+            snapshot = _fetch_workspace_backlog_snapshot()
+        except Exception as exc:
+            logger.warning("Workspace backlog preflight failed (non-fatal): %s", exc)
+            return (
+                "## Workspace Work Status Snapshot\n\n"
+                "Hermes attempted to refresh the HAD workspace backlog snapshot for this turn, "
+                "but the preflight failed. Do not answer from the session-local todo list alone. "
+                "If you can still use tools this turn, call workspace_backlog_orchestrator before "
+                "claiming there is no active work. If the snapshot cannot be refreshed, say that "
+                "global backlog status is temporarily unavailable instead of saying nothing is active."
+            )
+
+        selected_work = snapshot.get("selected_work")
+        if not isinstance(selected_work, dict):
+            selected_work = {}
+
+        counts = snapshot.get("counts") if isinstance(snapshot.get("counts"), dict) else {}
+        selected_compact = {
+            key: selected_work.get(key)
+            for key in (
+                "kind",
+                "identifier",
+                "title",
+                "selection_bucket",
+                "execution_mode",
+                "selection_reason",
+                "state_name",
+                "ownership",
+                "repo_root",
+                "worktree_path",
+                "linked_issue_identifier",
+            )
+            if selected_work.get(key) not in (None, "", [], {})
+        }
+
+        latest_codex = selected_work.get("latest_codex")
+        if isinstance(latest_codex, dict):
+            latest_codex_compact = {
+                key: latest_codex.get(key)
+                for key in ("status", "run_id", "process_session_id", "started_at", "completed_at")
+                if latest_codex.get(key) not in (None, "", [], {})
+            }
+            if latest_codex_compact:
+                selected_compact["latest_codex"] = latest_codex_compact
+
+        serialized_counts = json.dumps(counts, ensure_ascii=False, separators=(",", ":"))
+        serialized_selected = json.dumps(
+            selected_compact,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        summary_markdown = str(snapshot.get("summary_markdown") or "").strip()
+        if len(summary_markdown) > 2500:
+            summary_markdown = summary_markdown[:2500].rstrip() + "... [truncated]"
+
+        guidance_parts = [
+            "## Workspace Work Status Snapshot",
+            "Hermes preloaded the HAD workspace backlog snapshot for this turn because the user asked about current or active work.",
+            "The session-local todo list is only a scratchpad for the current chat turn. It is never authoritative for workspace-global status.",
+            "Do not answer that nothing is active unless this snapshot also shows no selected work, no active WIP, and no scheduled or recurring work worth mentioning.",
+            "## Workspace Counts",
+            serialized_counts,
+        ]
+        if summary_markdown:
+            guidance_parts.extend(["## Snapshot Summary", summary_markdown])
+        if selected_compact:
+            guidance_parts.extend(["## Selected Work", serialized_selected])
+        else:
+            guidance_parts.extend(
+                [
+                    "## Selected Work",
+                    "{}",
+                ]
+            )
+        return "\n\n".join(guidance_parts)
 
     def _build_ontology_turn_context(self, user_message: str, task_id: str) -> str:
         """Preload ontology context into the turn so the model starts grounded."""
@@ -6569,6 +6704,16 @@ class AIAgent:
         except Exception as exc:
             logger.warning("Ontology preflight failed (non-fatal): %s", exc)
 
+        _work_status_turn_context = ""
+        try:
+            _work_status_turn_context = self._build_work_status_turn_context(original_user_message)
+            if _work_status_turn_context:
+                logger.info("Preloaded workspace backlog status for session %s", self.session_id)
+                if not self.quiet_mode:
+                    self._safe_print("🗂️ Preloaded workspace backlog status for this turn")
+        except Exception as exc:
+            logger.warning("Workspace status preflight failed (non-fatal): %s", exc)
+
         # Main conversation loop
         api_call_count = 0
         final_response = None
@@ -6629,10 +6774,17 @@ class AIAgent:
             for idx, msg in enumerate(messages):
                 api_msg = msg.copy()
 
-                if idx == current_turn_user_idx and msg.get("role") == "user" and self._honcho_turn_context:
-                    api_msg["content"] = _inject_honcho_turn_context(
-                        api_msg.get("content", ""), self._honcho_turn_context
-                    )
+                if idx == current_turn_user_idx and msg.get("role") == "user":
+                    user_content = api_msg.get("content", "")
+                    if self._honcho_turn_context:
+                        user_content = _inject_honcho_turn_context(
+                            user_content, self._honcho_turn_context
+                        )
+                    if _work_status_turn_context:
+                        user_content = _inject_work_status_turn_context(
+                            user_content, _work_status_turn_context
+                        )
+                    api_msg["content"] = user_content
 
                 # For ALL assistant messages, pass reasoning back to the API
                 # This ensures multi-turn reasoning context is preserved
