@@ -3000,8 +3000,6 @@ class AIAgent:
 
     def _should_preload_work_status_context(self, user_message: str) -> bool:
         """Return True when the current turn needs a fresh workspace status snapshot."""
-        if "workspace_backlog_orchestrator" not in self.valid_tool_names:
-            return False
         return _looks_like_work_status_query(user_message)
 
     def _build_work_status_turn_context(self, user_message: str) -> str:

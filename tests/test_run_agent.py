@@ -1570,6 +1570,50 @@ class TestRunConversation:
         assert "HAD-271" in api_messages[-1]["content"]
         assert "delegate_codex" in api_messages[-1]["content"]
 
+    def test_run_conversation_injects_workspace_status_preflight_with_restricted_toolset(self, agent):
+        captured = {}
+        snapshot = {
+            "counts": {"open": 47, "started": 8, "hermes_owned": 17, "unowned": 24},
+            "selected_work": {
+                "kind": "git_hygiene",
+                "identifier": "HAD-139",
+                "title": "Reconcile repo hygiene for ctx residue",
+                "selection_bucket": "verify_completed_linked_wip",
+                "execution_mode": "investigate_merge_or_delete",
+                "selection_reason": "Dirty ctx worktree is still linked to a completed issue.",
+                "repo_root": "/home/david/stacks/hermes-agent",
+                "worktree_path": "/home/david/.ctx-data/worktrees/example",
+                "linked_issue_identifier": "HAD-139",
+            },
+            "summary_markdown": (
+                "Workspace backlog: 47 open; 8 started; 17 Hermes-owned; 24 unowned\n"
+                "- selected: HAD-139 [verify_completed_linked_wip] -> investigate_merge_or_delete"
+            ),
+        }
+
+        self._setup_agent(agent)
+
+        def _fake_api_call(api_kwargs):
+            captured.update(api_kwargs)
+            return _mock_response(content="done", finish_reason="stop")
+
+        with (
+            patch("run_agent._fetch_workspace_backlog_snapshot", return_value=snapshot) as mock_fetch,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch.object(agent, "_interruptible_api_call", side_effect=_fake_api_call),
+        ):
+            result = agent.run_conversation("what are you working on currently")
+
+        assert result["completed"] is True
+        mock_fetch.assert_called_once()
+        api_messages = captured["messages"]
+        assert api_messages[-1]["role"] == "user"
+        assert "Workspace Work Status Snapshot" in api_messages[-1]["content"]
+        assert "HAD-139" in api_messages[-1]["content"]
+        assert "investigate_merge_or_delete" in api_messages[-1]["content"]
+
     def test_tool_calls_then_stop(self, agent):
         self._setup_agent(agent)
         tc = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")
