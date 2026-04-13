@@ -977,7 +977,10 @@ def test_self_improvement_benchmark_detects_regression_and_delegate_conflicts(mo
         self_improvement_tool,
         "build_self_improvement_context",
         lambda *args, **kwargs: {
-            "reliability": {"status": "fresh"},
+            "reliability": {
+                "status": "fresh",
+                "conversion_bottleneck": {"active": False, "reason": None},
+            },
             "research_provider_policy": {"summary": {"available_provider_count": 2}},
             "textbook_study": {"upgrade_targets": [{"title": "Typed execution frame"}]},
             "business_recommendations": ["Prioritize contract-facing reliability work."],
@@ -1297,6 +1300,164 @@ def test_self_improvement_pipeline_demotes_started_issue_without_live_execution(
         issue["state"]["type"] in {"backlog", "unstarted"}
         for issue in store["issues"]
         if issue["identifier"] in {"HAD-510", "HAD-511"}
+    )
+
+
+def test_self_improvement_pipeline_surfaces_ontology_fallback_candidate_when_benchmark_healthy(monkeypatch, tmp_path):
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
+    recent = (now - timedelta(hours=2)).isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+    objective_path = _seed_reward_policy(tmp_path / "epoch.yaml")
+    history_path = tmp_path / "benchmarks.json"
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    _write_json(journal_path, {"entries": [{"occurredAt": recent}]})
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_1": {"run_id": "codex_1", "status": "completed", "completed_at": recent},
+                "codex_2": {"run_id": "codex_2", "status": "completed", "completed_at": recent},
+            }
+        },
+    )
+    _write_json(
+        ctx_path,
+        {
+            "sessions": {
+                "sess_1": {
+                    "session_id": "sess_1",
+                    "task_id": "task-1",
+                    "active": False,
+                    "updated_at": recent,
+                    "worktree_path": str(worktree),
+                },
+                "sess_2": {
+                    "session_id": "sess_2",
+                    "task_id": "task-2",
+                    "active": False,
+                    "updated_at": recent,
+                    "worktree_path": str(worktree),
+                },
+            }
+        },
+    )
+
+    monkeypatch.setattr(
+        self_improvement_tool,
+        "build_self_improvement_context",
+        lambda *args, **kwargs: {
+            "reliability": {
+                "status": "fresh",
+                "conversion_bottleneck": {
+                    "active": True,
+                    "reason": "Ontology added 11 competency questions but generated 0 proposals.",
+                },
+            },
+            "research_provider_policy": {"summary": {"available_provider_count": 2}},
+            "textbook_study": {
+                "upgrade_targets": [
+                    {
+                        "issue_id": "ONT-010",
+                        "title": "Prefer query-ready competency-question contracts",
+                        "why_now": (
+                            "Hermes should treat free-form competency questions as incomplete until they map "
+                            "to a reusable template or query-ready contract."
+                        ),
+                        "change_surface": "ontology CQ authoring and research prompts",
+                    }
+                ]
+            },
+            "business_recommendations": ["Prioritize contract-facing ontology packaging."],
+        },
+    )
+
+    store = {
+        "project": {
+            "id": "project-1",
+            "name": "Hermes Self-Improvement",
+            "description": linear_issue_tool._format_project_description(
+                "Track capability gaps and implementation follow-through.",
+                "project:hermes-self-improvement",
+            ),
+            "teams": [{"id": "team-1", "key": "HAD", "name": "Hadto"}],
+            "url": "https://linear.app/hadto/project/hermes-self-improvement",
+        },
+        "issues": [
+            _linear_issue(
+                "HAD-610",
+                state_type="started",
+                state_name="In Progress",
+                lane="Maintenance",
+                include_status_comment=True,
+                updated_at=recent,
+            ),
+            _linear_issue(
+                "HAD-611",
+                state_type="started",
+                state_name="In Progress",
+                lane="Maintenance",
+                include_status_comment=True,
+                updated_at=recent,
+            ),
+            _linear_issue(
+                "HAD-612",
+                state_type="completed",
+                state_name="Done",
+                lane="Growth",
+                updated_at=recent,
+                completed_at=recent,
+            ),
+        ],
+        "states": [
+            {"id": "state-backlog", "name": "Backlog", "type": "backlog"},
+            {"id": "state-todo", "name": "Todo", "type": "unstarted"},
+            {"id": "state-progress", "name": "In Progress", "type": "started"},
+            {"id": "state-done", "name": "Done", "type": "completed"},
+        ],
+        "users": {
+            "hermes": {"id": "user-hermes", "name": "Hermes", "displayName": "Hermes", "email": "hermes@hadto.net", "active": True},
+            "human": {"id": "user-human", "name": "David", "displayName": "David", "email": "david@hadto.net", "active": True},
+        },
+        "next_issue": 699,
+        "timestamp": recent,
+    }
+    _install_fake_linear_surface(monkeypatch, store)
+
+    pipeline = self_improvement_tool.evaluate_self_improvement_pipeline(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        objective_path=objective_path,
+        history_path=history_path,
+        now=now,
+        persist=False,
+    )
+
+    candidate = pipeline["top_candidate"]
+    assert candidate["candidate_source"] == "ontology_fallback"
+    assert candidate["benchmark_id"] == "ontology_conversion_bottleneck"
+    assert candidate["lane"] == "Growth"
+    assert candidate["identifier"] == "HAD-700"
+    assert "query-ready competency-question contracts" in candidate["description"]
+    assert "Verification expectation:" in candidate["description"]
+    assert "Client Revenue and Social Proof" in candidate["why_now"]
+    assert candidate["state"]["type"] == "backlog"
+
+    fallback_issue = next(issue for issue in store["issues"] if issue["identifier"] == "HAD-700")
+    marker = linear_issue_tool._parse_marker(str(fallback_issue["description"] or ""))
+    assert str((marker or {}).get("dedupe_key") or "") == "issue:hermes-self-improvement:ontology:conversion_bottleneck"
+    assert any(
+        str((linear_issue_tool._parse_marker(comment["body"]) or {}).get("dedupe_key") or "")
+        == "status:HAD-700"
+        and "ontology-backed self-improvement candidate selected" in str(comment["body"] or "")
+        for comment in fallback_issue["comments"]
     )
 
 
