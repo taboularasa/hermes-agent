@@ -96,18 +96,23 @@ class TestTirithAllowSafeCommand:
         assert result["approved"] is True
 
     @patch(_TIRITH_PATCH, return_value=_tirith_result("allow"))
-    def test_noninteractive_blocks_without_headless_opt_in(self, mock_tirith):
+    def test_noninteractive_allows_safe_command_without_headless_opt_in(self, mock_tirith):
         result = check_all_command_guards("echo hello", "local")
-        assert result["approved"] is False
-        assert "HERMES_HEADLESS_AUTO_APPROVE=true" in result["message"]
-        mock_tirith.assert_not_called()
+        assert result["approved"] is True
+        mock_tirith.assert_called_once()
 
     @patch(_TIRITH_PATCH, return_value=_tirith_result("allow"))
-    def test_noninteractive_allows_with_headless_opt_in(self, mock_tirith):
+    def test_noninteractive_allows_safe_command_with_headless_opt_in(self, mock_tirith):
         os.environ["HERMES_HEADLESS_AUTO_APPROVE"] = "true"
         result = check_all_command_guards("echo hello", "local")
         assert result["approved"] is True
-        mock_tirith.assert_not_called()
+        mock_tirith.assert_called_once()
+
+    @patch(_TIRITH_PATCH, return_value=_tirith_result("allow"))
+    def test_noninteractive_allows_read_only_git_inspection(self, mock_tirith):
+        result = check_all_command_guards("git status --short --branch", "local")
+        assert result["approved"] is True
+        mock_tirith.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -323,15 +328,14 @@ class TestAlwaysVisibility:
 # ---------------------------------------------------------------------------
 
 class TestTirithImportError:
-    def test_import_error_still_blocks_without_headless_opt_in(self):
-        """ImportError does not bypass the explicit headless opt-in requirement."""
+    def test_import_error_allows_safe_command_without_headless_opt_in(self):
+        """ImportError should not block safe commands in headless mode."""
         import sys
         original = sys.modules.get("tools.tirith_security")
         sys.modules["tools.tirith_security"] = None  # causes ImportError on from-import
         try:
             result = check_all_command_guards("echo hello", "local")
-            assert result["approved"] is False
-            assert "HERMES_HEADLESS_AUTO_APPROVE=true" in result["message"]
+            assert result["approved"] is True
         finally:
             if original is not None:
                 sys.modules["tools.tirith_security"] = original
@@ -339,7 +343,7 @@ class TestTirithImportError:
                 sys.modules.pop("tools.tirith_security", None)
 
     def test_import_error_allows_with_headless_opt_in(self):
-        """When Tirith is unavailable, explicit headless opt-in still permits execution."""
+        """When Tirith is unavailable, safe commands still execute with opt-in set."""
         import sys
         original = sys.modules.get("tools.tirith_security")
         sys.modules["tools.tirith_security"] = None  # causes ImportError on from-import

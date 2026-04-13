@@ -635,22 +635,6 @@ def check_all_command_guards(command: str, env_type: str,
     is_gateway = os.getenv("HERMES_GATEWAY_SESSION")
     is_ask = os.getenv("HERMES_EXEC_ASK")
 
-    # C-06: Non-interactive auto-approve requires explicit opt-in
-    if not is_cli and not is_gateway and not is_ask:
-        if os.getenv("HERMES_HEADLESS_AUTO_APPROVE"):
-            return {"approved": True, "message": None}
-        logger.warning(
-            "Non-interactive mode: skipping external guard work. "
-            "Set HERMES_HEADLESS_AUTO_APPROVE=true to allow auto-approval."
-        )
-        return {
-            "approved": False,
-            "message": (
-                "BLOCKED: Dangerous command denied in non-interactive/headless "
-                "mode. Set HERMES_HEADLESS_AUTO_APPROVE=true to enable."
-            ),
-        }
-
     # --- Phase 1: Gather findings from both checks ---
 
     # Tirith check — wrapper guarantees no raise for expected failures.
@@ -693,6 +677,24 @@ def check_all_command_guards(command: str, env_type: str,
     # Nothing to warn about
     if not warnings:
         return {"approved": True, "message": None}
+
+    # C-06: Non-interactive auto-approve requires explicit opt-in, but only
+    # after we know the command actually triggered a warning.
+    if not is_cli and not is_gateway and not is_ask:
+        if os.getenv("HERMES_HEADLESS_AUTO_APPROVE"):
+            return {"approved": True, "message": None}
+        logger.warning(
+            "Dangerous command denied in non-interactive mode: %s. "
+            "Set HERMES_HEADLESS_AUTO_APPROVE=true to allow auto-approval.",
+            "; ".join(desc for _, desc, _ in warnings),
+        )
+        return {
+            "approved": False,
+            "message": (
+                "BLOCKED: Dangerous command denied in non-interactive/headless "
+                "mode. Set HERMES_HEADLESS_AUTO_APPROVE=true to enable."
+            ),
+        }
 
     # --- Phase 2.5: Smart approval (auxiliary LLM risk assessment) ---
     # When approvals.mode=smart, ask the aux LLM before prompting the user.
