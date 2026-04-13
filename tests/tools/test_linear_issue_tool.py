@@ -87,6 +87,69 @@ def test_linear_issue_comment_creates_when_no_deduped_comment_exists(monkeypatch
     ]
 
 
+def test_linear_issue_comment_canonicalizes_workspace_git_hygiene_suffix_and_supersedes_legacy_comments(monkeypatch):
+    issue = {
+        "id": "issue-1",
+        "identifier": "HAD-271",
+        "comments": [
+            {
+                "id": "comment-canonical",
+                "body": linear_issue_tool._format_comment_body(
+                    "old canonical body",
+                    "workspace-orchestrator:git-hygiene:HAD-271",
+                ),
+            },
+            {
+                "id": "comment-inspection",
+                "body": linear_issue_tool._format_comment_body(
+                    "old inspection body",
+                    "workspace-orchestrator:git-hygiene:HAD-271:inspection",
+                ),
+            },
+        ],
+    }
+    update_calls = []
+
+    monkeypatch.setattr(linear_issue_tool, "_fetch_issue", lambda issue_ref, comment_limit=10: issue)
+    monkeypatch.setattr(
+        linear_issue_tool,
+        "_update_comment",
+        lambda comment_id, body: update_calls.append((comment_id, body)) or {"id": comment_id, "body": body},
+    )
+
+    result = json.loads(
+        linear_issue_tool.linear_issue(
+            {
+                "action": "comment",
+                "identifier": "HAD-271",
+                "body": "resolved and reconciled",
+                "dedupe_key": "workspace-orchestrator:git-hygiene:HAD-271:blocker",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["updated_existing"] is True
+    assert result["dedupe_key"] == "workspace-orchestrator:git-hygiene:HAD-271"
+    assert result["superseded_comment_ids"] == ["comment-inspection"]
+    assert update_calls == [
+        (
+            "comment-canonical",
+            linear_issue_tool._format_comment_body(
+                "resolved and reconciled",
+                "workspace-orchestrator:git-hygiene:HAD-271",
+            ),
+        ),
+        (
+            "comment-inspection",
+            linear_issue_tool._build_superseded_comment_body(
+                original_key="workspace-orchestrator:git-hygiene:HAD-271:inspection",
+                canonical_key="workspace-orchestrator:git-hygiene:HAD-271",
+            ),
+        ),
+    ]
+
+
 def test_linear_issue_update_state_skips_when_issue_already_in_target_state(monkeypatch):
     monkeypatch.setattr(
         linear_issue_tool,

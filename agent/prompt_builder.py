@@ -199,6 +199,14 @@ TERMINAL_HYGIENE_GUIDANCE = (
     "`workdir` instead of `cd && ...` so retries stay attributable to one command."
 )
 
+LINEAR_COMMENT_HYGIENE_GUIDANCE = (
+    "When linear_issue(action='comment') is available for recurring status writes, keep one "
+    "canonical dedupe key per issue/workflow and update it in place. For workspace backlog "
+    "comments, use only `workspace-orchestrator:<IDENTIFIER>` or "
+    "`workspace-orchestrator:git-hygiene:<IDENTIFIER>`. Do not invent suffix variants like "
+    "`:inspection` or `:blocker`; put that detail in the comment body."
+)
+
 TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "# Tool-use enforcement\n"
     "You MUST use your tools to take action — do not describe what you would do "

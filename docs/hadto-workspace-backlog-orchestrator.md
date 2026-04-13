@@ -85,6 +85,8 @@ default_branches:
    - inspect diff and branch status before deleting anything
    - only remove stale worktrees when the tool marks them as cleanup candidates and blockers are absent
 5. Write a deduplicated Linear status comment for the selected work item's linked issue when possible.
+   - Use one canonical dedupe key per issue: `workspace-orchestrator:<IDENTIFIER>` for normal selection comments and `workspace-orchestrator:git-hygiene:<IDENTIFIER>` for hygiene comments.
+   - Do not create suffix variants like `:inspection` or `:blocker`; update the canonical comment body instead.
 6. Keep scoped implementers paused so there is one backlog owner.
 7. Do not stop after a lightweight inspection or status write if the workspace still has actionable backlog. Prefer leaving the system with either an active local Codex run, a clearly blocked item recorded in Linear, or a resolved hygiene incident.
 8. When reporting status to a user, distinguish:
