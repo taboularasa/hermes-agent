@@ -645,6 +645,28 @@ class TestBuildSystemPrompt:
         prompt = agent._build_system_prompt()
         assert TERMINAL_HYGIENE_GUIDANCE in prompt
 
+    def test_linear_comment_hygiene_guidance_when_linear_issue_tool_loaded(self):
+        from agent.prompt_builder import LINEAR_COMMENT_HYGIENE_GUIDANCE
+
+        with (
+            patch(
+                "run_agent.get_tool_definitions",
+                return_value=_make_tool_defs("linear_issue"),
+            ),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-k...7890",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            agent.client = MagicMock()
+
+        prompt = agent._build_system_prompt()
+        assert LINEAR_COMMENT_HYGIENE_GUIDANCE in prompt
+
     def test_includes_datetime(self, agent):
         prompt = agent._build_system_prompt()
         # Should contain current date info like "Conversation started:"

@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 LINEAR_API_URL = "https://api.linear.app/graphql"
 _MARKER_PREFIX = "<!-- hermes-linear:v1 "
 _MARKER_SUFFIX = " -->"
+_WORKSPACE_ORCHESTRATOR_GIT_HYGIENE_PREFIX = "workspace-orchestrator:git-hygiene:"
 # Linear rejects longer project descriptions with a generic Argument Validation
 # Error. Keep project descriptions compact and reserve issue descriptions for
 # the full detail.
@@ -378,7 +379,11 @@ LINEAR_ISSUE_SCHEMA = {
                 "description": (
                     "Optional stable key for idempotent comment updates. "
                     "When set, Hermes stores a hidden marker in the comment and "
-                    "reuses that same comment on retries."
+                    "reuses that same comment on retries. For workspace backlog "
+                    "git-hygiene updates, use the canonical form "
+                    "`workspace-orchestrator:git-hygiene:<IDENTIFIER>` and keep "
+                    "sub-status details in the comment body instead of inventing "
+                    "suffix variants like `:inspection` or `:blocker`."
                 ),
             },
             "update_existing": {
@@ -711,6 +716,60 @@ def _find_comment_by_dedupe(issue: dict[str, Any], dedupe_key: str) -> dict[str,
         if marker and str(marker.get("dedupe_key") or "") == dedupe_key:
             return comment
     return None
+
+
+def _comment_dedupe_key(comment: dict[str, Any]) -> str:
+    marker = _parse_marker(str(comment.get("body") or ""))
+    return str(marker.get("dedupe_key") or "") if marker else ""
+
+
+def _canonicalize_comment_dedupe_key(dedupe_key: str | None) -> str | None:
+    raw = str(dedupe_key or "").strip()
+    if not raw:
+        return None
+    if raw.startswith(_WORKSPACE_ORCHESTRATOR_GIT_HYGIENE_PREFIX):
+        suffix = raw[len(_WORKSPACE_ORCHESTRATOR_GIT_HYGIENE_PREFIX):]
+        identifier, _, _substatus = suffix.partition(":")
+        identifier = identifier.strip()
+        if identifier:
+            return f"{_WORKSPACE_ORCHESTRATOR_GIT_HYGIENE_PREFIX}{identifier}"
+    return raw
+
+
+def _find_comment_family_by_dedupe(
+    issue: dict[str, Any],
+    dedupe_key: str | None,
+) -> tuple[str | None, dict[str, Any] | None, list[dict[str, Any]]]:
+    canonical_key = _canonicalize_comment_dedupe_key(dedupe_key)
+    if not canonical_key:
+        return None, None, []
+
+    exact_match: dict[str, Any] | None = None
+    legacy_matches: list[dict[str, Any]] = []
+    family_prefix = f"{canonical_key}:"
+    for comment in issue.get("comments", []):
+        if not isinstance(comment, dict):
+            continue
+        comment_key = _comment_dedupe_key(comment)
+        if not comment_key:
+            continue
+        if comment_key == canonical_key:
+            exact_match = comment
+            continue
+        if canonical_key.startswith(_WORKSPACE_ORCHESTRATOR_GIT_HYGIENE_PREFIX) and comment_key.startswith(family_prefix):
+            legacy_matches.append(comment)
+    return canonical_key, exact_match, legacy_matches
+
+
+def _build_superseded_comment_body(*, original_key: str, canonical_key: str) -> str:
+    lines = [
+        "Status: superseded by the canonical workspace backlog orchestrator hygiene comment.",
+        "",
+        f"This legacy sub-status marker `{original_key}` is retained only for history.",
+        f"Canonical dedupe key: `{canonical_key}`",
+        "Inspect the canonical workspace backlog orchestrator comment or the latest Hermes ctx status comment for the current state.",
+    ]
+    return _format_comment_body("\n".join(lines), original_key)
 
 
 def _find_project_by_name(projects: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
@@ -1170,7 +1229,16 @@ def linear_issue(args: dict[str, Any], **_kw) -> str:
         issue = _fetch_issue(issue_ref, comment_limit=100)
         issue_id = str(issue.get("id") or "")
         comment_id = str(args.get("comment_id") or "").strip()
-        dedupe_key = str(args.get("dedupe_key") or "").strip() or None
+        raw_dedupe_key = str(args.get("dedupe_key") or "").strip() or None
+        dedupe_key, existing_comment, legacy_family_comments = _find_comment_family_by_dedupe(issue, raw_dedupe_key)
+        if not dedupe_key:
+            dedupe_key = raw_dedupe_key
+        if raw_dedupe_key and dedupe_key != raw_dedupe_key:
+            logger.info(
+                "linear_issue.comment canonicalized_dedupe_key raw=%s canonical=%s",
+                raw_dedupe_key,
+                dedupe_key,
+            )
         update_existing = args.get("update_existing")
         if update_existing is None:
             update_existing = True
@@ -1178,8 +1246,12 @@ def linear_issue(args: dict[str, Any], **_kw) -> str:
             update_existing = bool(update_existing)
 
         formatted_body = _format_comment_body(body, dedupe_key)
-        existing_comment = _find_comment_by_dedupe(issue, dedupe_key) if dedupe_key and not comment_id else None
+        if dedupe_key and not comment_id and existing_comment is None:
+            existing_comment = _find_comment_by_dedupe(issue, dedupe_key)
+        if dedupe_key and not comment_id and existing_comment is None and legacy_family_comments:
+            existing_comment = legacy_family_comments[0]
         target_comment_id = comment_id or (str(existing_comment.get("id") or "") if existing_comment else "")
+        superseded_comment_ids: list[str] = []
 
         if target_comment_id:
             existing_body = ""
@@ -1212,12 +1284,29 @@ def linear_issue(args: dict[str, Any], **_kw) -> str:
                     ensure_ascii=False,
                 )
             comment = _update_comment(target_comment_id, formatted_body)
+            for legacy_comment in legacy_family_comments:
+                legacy_comment_id = str(legacy_comment.get("id") or "")
+                if not legacy_comment_id or legacy_comment_id == target_comment_id:
+                    continue
+                legacy_key = _comment_dedupe_key(legacy_comment)
+                if not legacy_key:
+                    continue
+                superseded_body = _build_superseded_comment_body(
+                    original_key=legacy_key,
+                    canonical_key=str(dedupe_key or ""),
+                )
+                if str(legacy_comment.get("body") or "").strip() == superseded_body.strip():
+                    continue
+                _update_comment(legacy_comment_id, superseded_body)
+                superseded_comment_ids.append(legacy_comment_id)
             return json.dumps(
                 {
                     "success": True,
                     "updated_existing": True,
                     "issue_id": issue_id,
                     "issue_identifier": issue.get("identifier"),
+                    "dedupe_key": dedupe_key,
+                    "superseded_comment_ids": superseded_comment_ids,
                     "comment": comment,
                 },
                 ensure_ascii=False,
@@ -1230,6 +1319,7 @@ def linear_issue(args: dict[str, Any], **_kw) -> str:
                 "created": True,
                 "issue_id": issue_id,
                 "issue_identifier": issue.get("identifier"),
+                "dedupe_key": dedupe_key,
                 "comment": comment,
             },
             ensure_ascii=False,
