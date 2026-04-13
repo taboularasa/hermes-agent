@@ -126,11 +126,14 @@ ONTOLOGY_PREFLIGHT_KEYWORDS = (
 WORK_STATUS_QUERY_PATTERNS = (
     re.compile(r"\bwhat\s+are\s+(?:you|hermes)\s+(?:currently\s+)?working\s+on\b"),
     re.compile(r"\bwhat\s+is\s+hermes\s+(?:currently\s+)?working\s+on\b"),
+    re.compile(r"\b(?:tell\s+me\s+)?what\s+(?:you(?:'re| are)|hermes(?:\s+is)?)\s+working\s+on(?:\s+right\s+now|\s+currently)?\b"),
+    re.compile(r"\bwhat\s+are\s+(?:you|hermes)\s+doing\s+(?:right\s+now|currently)\b"),
     re.compile(r"\bwhat(?:'s| is)\s+(?:currently\s+)?active\b"),
     re.compile(r"\bwhat(?:'s| is)\s+(?:the\s+)?current(?:ly)?\s+active\s+work\b"),
     re.compile(r"\bwhat\s+work\s+is\s+left\b"),
     re.compile(r"\bis\s+there\s+(?:any\s+)?work\s+left\b"),
     re.compile(r"\bwhat(?:'s| is)\s+in\s+progress\b"),
+    re.compile(r"\bare\s+(?:you|hermes)\s+idle\b"),
 )
 
 
