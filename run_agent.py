@@ -89,7 +89,7 @@ from agent.model_metadata import (
 )
 from agent.context_compressor import ContextCompressor
 from agent.prompt_caching import apply_anthropic_cache_control
-from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, WORK_STATUS_GUIDANCE
+from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, WORK_STATUS_GUIDANCE, TERMINAL_HYGIENE_GUIDANCE
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.display import (
     KawaiiSpinner, build_tool_preview as _build_tool_preview,
@@ -2625,6 +2625,8 @@ class AIAgent:
             tool_guidance.append(ONTOLOGY_TOOL_GUIDANCE)
         if "workspace_backlog_orchestrator" in self.valid_tool_names:
             tool_guidance.append(WORK_STATUS_GUIDANCE)
+        if "terminal" in self.valid_tool_names:
+            tool_guidance.append(TERMINAL_HYGIENE_GUIDANCE)
         if tool_guidance:
             prompt_parts.append(" ".join(tool_guidance))
 

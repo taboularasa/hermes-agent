@@ -384,6 +384,7 @@ Background: ONLY for long-running servers, watchers, or processes that never exi
 Do NOT use background for scripts, builds, or installs — foreground with a generous timeout is always better (fewer tool calls, instant results).
 Working directory: Use 'workdir' for per-command cwd.
 PTY mode: Set pty=true for interactive CLI tools (Codex, Claude Code, Python REPL).
+Prefer one terminal call per command for routine inspection work. Avoid chaining unrelated commands with &&, ;, pipes, or command substitution when separate calls would work; this keeps retries and failures attributable to one command. Use workdir instead of `cd && ...` for directory changes.
 
 Do NOT use vim/nano/interactive tools without pty=true — they hang without a pseudo-terminal. Pipe git output to cat if it might page.
 """

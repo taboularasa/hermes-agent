@@ -191,6 +191,14 @@ WORK_STATUS_GUIDANCE = (
     "no live process at this instant, but the selected backlog item is still the active focus."
 )
 
+TERMINAL_HYGIENE_GUIDANCE = (
+    "When the terminal tool is available, prefer one command per terminal call for routine "
+    "inspection work. For repo state, run `git status`, `git diff --stat`, `git log`, and "
+    "similar checks as separate tool calls instead of chaining them with `&&`, `;`, pipes, "
+    "or command substitution unless the shell composition is essential to the task. Use "
+    "`workdir` instead of `cd && ...` so retries stay attributable to one command."
+)
+
 TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "# Tool-use enforcement\n"
     "You MUST use your tools to take action — do not describe what you would do "
