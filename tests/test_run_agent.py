@@ -1976,8 +1976,11 @@ class TestFlushSentinelNotLeaked:
 class TestWorkStatusQueryDetection:
     def test_matches_global_work_status_question(self):
         assert _looks_like_work_status_query("what are you working on currently")
+        assert _looks_like_work_status_query("tell me what you're working on right now")
+        assert _looks_like_work_status_query("what are you doing right now")
         assert _looks_like_work_status_query("is there any work left")
         assert _looks_like_work_status_query("what is active right now")
+        assert _looks_like_work_status_query("are you idle")
 
     def test_ignores_non_status_requests(self):
         assert not _looks_like_work_status_query("keep working on HAD-271")
