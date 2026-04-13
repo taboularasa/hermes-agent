@@ -1978,6 +1978,8 @@ class TestWorkStatusQueryDetection:
         assert _looks_like_work_status_query("what are you working on currently")
         assert _looks_like_work_status_query("tell me what you're working on right now")
         assert _looks_like_work_status_query("what are you doing right now")
+        assert _looks_like_work_status_query("what are your current activities across all processes")
+        assert _looks_like_work_status_query("current activities across all processes")
         assert _looks_like_work_status_query("is there any work left")
         assert _looks_like_work_status_query("what is active right now")
         assert _looks_like_work_status_query("are you idle")
