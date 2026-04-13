@@ -18,7 +18,11 @@ import pytest
 
 import run_agent
 from honcho_integration.client import HonchoClientConfig
-from run_agent import AIAgent, _inject_honcho_turn_context
+from run_agent import (
+    AIAgent,
+    _inject_honcho_turn_context,
+    _looks_like_work_status_query,
+)
 from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
 
 
@@ -622,6 +626,8 @@ class TestBuildSystemPrompt:
 
         prompt = agent._build_system_prompt()
         assert WORK_STATUS_GUIDANCE in prompt
+        assert "MUST inspect its current state or rerun it" in prompt
+        assert "todo tool is only a scratchpad" in prompt
 
     def test_terminal_hygiene_guidance_when_terminal_tool_loaded(self):
         from agent.prompt_builder import TERMINAL_HYGIENE_GUIDANCE
@@ -1505,6 +1511,65 @@ class TestRunConversation:
         assert "web_search_matrix" in api_messages[0]["content"]
         assert '"mode":"ontology_engineering"' in api_messages[0]["content"]
 
+    def test_run_conversation_injects_workspace_status_preflight_into_user_message(self):
+        captured = {}
+        snapshot = {
+            "counts": {"open": 12, "started": 4, "hermes_owned": 5, "unowned": 3},
+            "selected_work": {
+                "kind": "linear_issue",
+                "identifier": "HAD-271",
+                "title": "Repair self-improvement reliability floor",
+                "selection_bucket": "continue_active_wip",
+                "execution_mode": "delegate_codex",
+                "selection_reason": "Continue active WIP: HAD-271 is already In Progress.",
+                "repo_root": "/home/david/stacks/hermes-agent",
+            },
+            "summary_markdown": (
+                "Workspace backlog: 12 open; 4 started; 5 Hermes-owned; 3 unowned\n"
+                "- selected: HAD-271 [continue_active_wip] -> delegate_codex"
+            ),
+        }
+
+        with (
+            patch(
+                "run_agent.get_tool_definitions",
+                return_value=_make_tool_defs("workspace_backlog_orchestrator"),
+            ),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-key-1234567890",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            agent.client = MagicMock()
+
+        self._setup_agent(agent)
+
+        def _fake_api_call(api_kwargs):
+            captured.update(api_kwargs)
+            return _mock_response(content="done", finish_reason="stop")
+
+        with (
+            patch("run_agent._fetch_workspace_backlog_snapshot", return_value=snapshot) as mock_fetch,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch.object(agent, "_interruptible_api_call", side_effect=_fake_api_call),
+        ):
+            result = agent.run_conversation("what are you working on currently")
+
+        assert result["completed"] is True
+        mock_fetch.assert_called_once()
+        api_messages = captured["messages"]
+        assert api_messages[-1]["role"] == "user"
+        assert "Workspace Work Status Snapshot" in api_messages[-1]["content"]
+        assert "todo list is only a scratchpad" in api_messages[-1]["content"]
+        assert "HAD-271" in api_messages[-1]["content"]
+        assert "delegate_codex" in api_messages[-1]["content"]
+
     def test_tool_calls_then_stop(self, agent):
         self._setup_agent(agent)
         tc = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")
@@ -1862,6 +1927,17 @@ class TestFlushSentinelNotLeaked:
             assert "_flush_sentinel" not in msg, (
                 f"_flush_sentinel leaked to API in message: {msg}"
             )
+
+
+class TestWorkStatusQueryDetection:
+    def test_matches_global_work_status_question(self):
+        assert _looks_like_work_status_query("what are you working on currently")
+        assert _looks_like_work_status_query("is there any work left")
+        assert _looks_like_work_status_query("what is active right now")
+
+    def test_ignores_non_status_requests(self):
+        assert not _looks_like_work_status_query("keep working on HAD-271")
+        assert not _looks_like_work_status_query("please implement the reliability fix")
 
 
 # ---------------------------------------------------------------------------

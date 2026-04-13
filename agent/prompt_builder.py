@@ -185,10 +185,12 @@ WORK_STATUS_GUIDANCE = (
     "(1) live execution right now (active Codex/ctx/process work), "
     "(2) the currently selected backlog item from workspace coordination, and "
     "(3) recurring scheduled jobs. "
-    "If workspace_backlog_orchestrator is available, inspect its current state or rerun it "
-    "before claiming there is no work. Never say there is no active work when there is an "
-    "actionable selected_work item or recent coordinator activity; instead say there may be "
-    "no live process at this instant, but the selected backlog item is still the active focus."
+    "The session-local todo tool is only a scratchpad for the current chat turn; it is never "
+    "authoritative for Hermes' global work status. If workspace_backlog_orchestrator is "
+    "available, you MUST inspect its current state or rerun it before claiming there is no work. "
+    "Never say there is no active work when there is an actionable selected_work item or recent "
+    "coordinator activity; instead say there may be no live process at this instant, but the "
+    "selected backlog item is still the active focus."
 )
 
 TERMINAL_HYGIENE_GUIDANCE = (
