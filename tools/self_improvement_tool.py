@@ -42,6 +42,10 @@ DEFAULT_SELF_IMPROVEMENT_PROJECT_NAME = "Hermes Self-Improvement"
 DEFAULT_SELF_IMPROVEMENT_TEAM_KEY = "HAD"
 DEFAULT_SELF_IMPROVEMENT_PROJECT_DEDUPE_KEY = "project:hermes-self-improvement"
 DEFAULT_SELF_IMPROVEMENT_ISSUE_DEDUPE_PREFIX = "issue:hermes-self-improvement:benchmark:"
+DEFAULT_SELF_IMPROVEMENT_ONTOLOGY_FALLBACK_CANDIDATE_ID = "ontology_conversion_bottleneck"
+DEFAULT_SELF_IMPROVEMENT_ONTOLOGY_ISSUE_DEDUPE_KEY = (
+    "issue:hermes-self-improvement:ontology:conversion_bottleneck"
+)
 DEFAULT_SELF_IMPROVEMENT_CANDIDATE_LIMIT = 3
 DEFAULT_BENCHMARK_LOOKBACK_DAYS = 14
 DEFAULT_STRATEGIC_CONVERSATION_COOLDOWN_HOURS = 72
@@ -1849,12 +1853,246 @@ def _benchmark_issue_specs(
     return ordered[: max(1, int(candidate_limit or DEFAULT_SELF_IMPROVEMENT_CANDIDATE_LIMIT))]
 
 
+def _select_contract_facing_upgrade_target(ontology_context: dict[str, Any]) -> Optional[dict[str, Any]]:
+    targets = [
+        item
+        for item in ((ontology_context.get("textbook_study") or {}).get("upgrade_targets") or [])
+        if isinstance(item, dict)
+    ]
+    for target in targets:
+        haystack = " ".join(
+            str(target.get(field) or "")
+            for field in ("title", "why_now", "change_surface", "issue_id")
+        ).casefold()
+        if any(
+            keyword in haystack
+            for keyword in ("contract", "query-ready", "competency-question", "proposal", "backlog")
+        ):
+            return target
+    return targets[0] if targets else None
+
+
+def _build_ontology_fallback_candidate(
+    *,
+    benchmark: dict[str, Any],
+    ontology_context: dict[str, Any],
+) -> Optional[dict[str, Any]]:
+    if str((benchmark.get("gate") or {}).get("status") or "") != "healthy":
+        return None
+    if _benchmark_issue_specs(benchmark, candidate_limit=1):
+        return None
+
+    reliability = ontology_context.get("reliability") or {}
+    conversion_bottleneck = reliability.get("conversion_bottleneck") or {}
+    if not conversion_bottleneck.get("active"):
+        return None
+
+    objective_name = str(benchmark.get("objective_name") or "").strip()
+    objective_review_question = str(benchmark.get("objective_review_question") or "").strip()
+    why_now = (
+        str(conversion_bottleneck.get("reason") or "").strip()
+        or "Ontology discoveries are not converting into proposals or backlog."
+    )
+    contract_target = _select_contract_facing_upgrade_target(ontology_context)
+    contract_title = str((contract_target or {}).get("title") or "").strip()
+    contract_issue_id = str((contract_target or {}).get("issue_id") or "").strip()
+    contract_change_surface = str((contract_target or {}).get("change_surface") or "").strip()
+    business_recommendations = [
+        str(item).strip()
+        for item in (ontology_context.get("business_recommendations") or [])
+        if str(item).strip()
+    ]
+
+    capability_gap = (
+        "Fresh ontology intelligence is producing discoveries, but Hermes is not turning the newly added "
+        "competency questions into contract-facing proposals or backlog items that fit the current epoch objective."
+    )
+    if objective_name:
+        capability_gap += f" Current objective: {objective_name}."
+
+    why_now_detail = why_now
+    if objective_name:
+        why_now_detail += (
+            f" The current epoch objective is {objective_name!r}, so the next ontology step should create "
+            "proposal and backlog artifacts that can convert discovery into execution."
+        )
+    if objective_review_question:
+        why_now_detail += f" Review question: {objective_review_question}"
+
+    evidence = [
+        why_now,
+        (
+            "The benchmark gate is healthy, so this is concrete execution work rather than maintenance repair."
+        ),
+    ]
+    if business_recommendations:
+        evidence.append(f"Ontology recommendation: {business_recommendations[0]}")
+    if contract_title:
+        contract_evidence = f"Contract-facing ontology target: {contract_title}"
+        if contract_issue_id:
+            contract_evidence += f" ({contract_issue_id})"
+        evidence.append(contract_evidence)
+
+    target_surface = "query-ready competency-question contracts, ontology prompt proposals, and backlog intake"
+    if contract_change_surface:
+        target_surface += f"; focus change surface: {contract_change_surface}"
+
+    verification = (
+        "Create at least one ontology prompt proposal or backlog-ready issue from the newly added competency "
+        "questions, then rerun `self_improvement_pipeline` or `self_improvement_benchmark` and confirm the "
+        "conversion bottleneck clears or proposal generation increases above zero."
+    )
+    expected_effect = (
+        "Turn fresh ontology discoveries into contract-facing proposals and backlog that Hermes can execute "
+        "against the current epoch objective."
+    )
+
+    description_lines = [
+        "Lane: Growth",
+        "",
+        "Capability gap:",
+        capability_gap,
+        "",
+        "Why now:",
+        why_now_detail,
+        "",
+        "Evidence:",
+        *[f"- {item}" for item in evidence],
+        "",
+        "Target repo or surface:",
+        target_surface,
+        "",
+        "Verification expectation:",
+        verification,
+        "",
+        "Expected effect:",
+        expected_effect,
+    ]
+
+    return {
+        "candidate_source": "ontology_fallback",
+        "candidate_id": DEFAULT_SELF_IMPROVEMENT_ONTOLOGY_FALLBACK_CANDIDATE_ID,
+        "benchmark_id": DEFAULT_SELF_IMPROVEMENT_ONTOLOGY_FALLBACK_CANDIDATE_ID,
+        "title": "Convert ontology discoveries into contract-ready proposals and backlog",
+        "lane": "Growth",
+        "priority": 2,
+        "dedupe_key": DEFAULT_SELF_IMPROVEMENT_ONTOLOGY_ISSUE_DEDUPE_KEY,
+        "status": "ready",
+        "score": float(benchmark.get("score") or 0.0),
+        "weight": 0,
+        "detail": why_now,
+        "why_now": why_now_detail,
+        "evidence": evidence,
+        "target_surface": target_surface,
+        "verification": verification,
+        "expected_effect": expected_effect,
+        "objective_name": objective_name,
+        "objective_review_question": objective_review_question,
+        "description": "\n".join(description_lines).strip(),
+    }
+
+
+def _realize_ontology_fallback_candidate(
+    *,
+    candidate: dict[str, Any],
+    linear_surface: dict[str, Any],
+) -> tuple[dict[str, Any], Optional[str]]:
+    if not linear_surface.get("available") or linear_surface.get("error"):
+        return candidate, None
+
+    try:
+        from tools import linear_issue_tool as linear_tool
+    except Exception as exc:
+        return candidate, f"linear tool unavailable: {exc}"
+
+    project_id = str(linear_surface.get("project_id") or "")
+    team_id = str(linear_surface.get("team_id") or "")
+    team_key = str(linear_surface.get("team_key") or "")
+    delegate_id = str(linear_surface.get("hermes_delegate_id") or "")
+    if not (project_id and team_id and team_key):
+        return candidate, None
+
+    try:
+        states = linear_surface.get("states") or []
+        backlog_state_name = _workflow_state_name(states, "backlog", "unstarted")
+        existing_issue = None
+        for issue in linear_tool._project_issues(project_id, limit=250):
+            if not isinstance(issue, dict):
+                continue
+            marker = linear_tool._parse_marker(str(issue.get("description") or ""))
+            if str((marker or {}).get("dedupe_key") or "") == str(candidate.get("dedupe_key") or ""):
+                existing_issue = issue
+                break
+
+        args: dict[str, Any] = {
+            "action": "issue_upsert",
+            "project_id": project_id,
+            "team_id": team_id,
+            "team_key": team_key,
+            "title": str(candidate.get("title") or ""),
+            "description": str(candidate.get("description") or ""),
+            "priority": int(candidate.get("priority") or 2),
+            "dedupe_key": str(candidate.get("dedupe_key") or ""),
+            "delegate_id": delegate_id,
+            "assignee_id": "",
+        }
+        if backlog_state_name and (existing_issue is None or _is_completed_issue(existing_issue)):
+            args["state_name"] = backlog_state_name
+
+        result = json.loads(linear_tool.linear_issue(args))
+        if result.get("error"):
+            return candidate, str(result.get("error"))
+
+        issue = result.get("issue")
+        if not isinstance(issue, dict):
+            issue = existing_issue or {}
+        return (
+            {
+                **candidate,
+                "issue_id": str(issue.get("id") or ""),
+                "identifier": str(issue.get("identifier") or ""),
+                "url": str(issue.get("url") or ""),
+                "state": issue.get("state"),
+            },
+            None,
+        )
+    except Exception as exc:
+        logger.warning("Failed to realize ontology fallback candidate", exc_info=True)
+        return candidate, str(exc)
+
+
 def _format_pipeline_status_comment(
     *,
     candidate: dict[str, Any],
     benchmark: dict[str, Any],
     repairs: list[dict[str, Any]],
 ) -> str:
+    if str(candidate.get("candidate_source") or "") == "ontology_fallback":
+        lines = [
+            "Status: ontology-backed self-improvement candidate selected.",
+            "",
+            f"Candidate: {candidate.get('title')}",
+            f"Lane: `{candidate.get('lane')}`",
+            (
+                "Benchmark summary: "
+                f"{float(benchmark.get('score') or 0.0):.2f}/100; direction=`{benchmark.get('direction')}`; "
+                f"trend=`{benchmark.get('trend')}`"
+            ),
+            "",
+            "Why this issue won:",
+            f"- {str(candidate.get('why_now') or candidate.get('detail') or '').strip()}",
+        ]
+        for item in candidate.get("evidence") or []:
+            lines.append(f"- {str(item).strip()}")
+        lines.extend(
+            [
+                "",
+                f"Target surface: {str(candidate.get('target_surface') or '').strip()}",
+                f"Verification: {str(candidate.get('verification') or '').strip()}",
+            ]
+        )
+        return "\n".join(lines).strip()
+
     lines = [
         "Status: benchmark-driven self-improvement candidate selected.",
         "",
@@ -1914,8 +2152,24 @@ def _format_pipeline_summary(
             f"- issue {issue.get('identifier') or issue.get('title')}: auto-closed after `{issue.get('benchmark_id')}` returned to pass"
         )
     if top_candidate:
+        candidate_ref = str(
+            top_candidate.get("identifier")
+            or top_candidate.get("title")
+            or top_candidate.get("candidate_id")
+            or top_candidate.get("benchmark_id")
+            or ""
+        ).strip()
+        candidate_key = str(
+            top_candidate.get("benchmark_id")
+            or top_candidate.get("candidate_id")
+            or ""
+        ).strip()
         lines.append(
-            f"- top candidate: {top_candidate.get('identifier')} `{top_candidate.get('benchmark_id')}` [{top_candidate.get('lane')}]"
+            (
+                f"- top candidate: {candidate_ref} `{candidate_key}` [{top_candidate.get('lane')}]"
+                if candidate_key
+                else f"- top candidate: {candidate_ref} [{top_candidate.get('lane')}]"
+            )
         )
     selected_discussion = (
         strategic_conversation.get("selected")
@@ -2675,6 +2929,8 @@ def _select_pipeline_top_candidate(
             continue
         return {
             **spec,
+            "candidate_source": "benchmark",
+            "candidate_id": spec["benchmark_id"],
             "issue_id": str(issue.get("id") or ""),
             "identifier": str(issue.get("identifier") or ""),
             "url": str(issue.get("url") or ""),
@@ -2783,16 +3039,27 @@ def evaluate_self_improvement_pipeline(
         lookback_days=lookback_days,
         persist=persist,
     )
-
-    top_candidate = _select_pipeline_top_candidate(
-        benchmark=benchmark_after,
-        issues_by_benchmark_id=issue_management.get("issues_by_benchmark_id", {}),
-    )
     ontology_context = build_self_improvement_context(
         repo_root=ontology_root,
         now=current,
         freshness_hours=freshness_hours,
     )
+
+    top_candidate = _select_pipeline_top_candidate(
+        benchmark=benchmark_after,
+        issues_by_benchmark_id=issue_management.get("issues_by_benchmark_id", {}),
+    )
+    fallback_error = None
+    if top_candidate is None:
+        fallback_candidate = _build_ontology_fallback_candidate(
+            benchmark=benchmark_after,
+            ontology_context=ontology_context,
+        )
+        if fallback_candidate is not None:
+            top_candidate, fallback_error = _realize_ontology_fallback_candidate(
+                candidate=fallback_candidate,
+                linear_surface=linear_surface,
+            )
     strategic_conversation = _select_strategic_conversation(
         benchmark=benchmark_after,
         top_candidate=top_candidate,
@@ -2844,7 +3111,7 @@ def evaluate_self_improvement_pipeline(
         "benchmark": benchmark_after,
         "linear": {
             "available": linear_surface.get("available", False),
-            "error": linear_surface.get("error") or issue_management.get("error") or comment_error,
+            "error": linear_surface.get("error") or issue_management.get("error") or fallback_error or comment_error,
             "project": linear_surface.get("project"),
             "repairs": linear_surface.get("repairs", []),
             "managed_issues": issue_management.get("managed_issues", []),
