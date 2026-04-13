@@ -676,6 +676,50 @@ def _summarize_source(name: str, latest: Optional[datetime], freshness_hours: in
     }
 
 
+def _source_freshness_cadence_hours(
+    source_name: str,
+    *,
+    freshness_hours: int,
+    active_stale_hours: int,
+) -> int:
+    if source_name in {"codex_runs", "ctx_bindings"}:
+        return active_stale_hours
+    return freshness_hours
+
+
+def _has_freshness_skew(
+    source_timestamps: Dict[str, Optional[datetime]],
+    source_summaries: Dict[str, Dict[str, Any]],
+    *,
+    freshness_hours: int,
+    active_stale_hours: int,
+) -> bool:
+    fresh_sources: list[tuple[datetime, int]] = []
+    for source_name, latest in source_timestamps.items():
+        if latest is None:
+            continue
+        summary = source_summaries.get(source_name) or {}
+        if summary.get("status") != "fresh":
+            continue
+        fresh_sources.append(
+            (
+                latest,
+                _source_freshness_cadence_hours(
+                    source_name,
+                    freshness_hours=freshness_hours,
+                    active_stale_hours=active_stale_hours,
+                ),
+            )
+        )
+
+    for index, (latest, cadence_hours) in enumerate(fresh_sources):
+        for other_latest, other_cadence_hours in fresh_sources[index + 1 :]:
+            spread_hours = abs((latest - other_latest).total_seconds()) / 3600
+            if spread_hours >= max(cadence_hours, other_cadence_hours):
+                return True
+    return False
+
+
 def _build_provenance_item(tag: str, path: Path, summary: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "tag": tag,
@@ -779,6 +823,12 @@ def evaluate_self_improvement_evidence(
     planning_contradictions = _find_planning_contradictions(codex_payload, ctx_payload)
 
     statuses = {entry["status"] for entry in sources.values()}
+    source_timestamps = {
+        "journal_entries": journal_latest,
+        "codex_runs": codex_latest,
+        "ctx_bindings": ctx_latest,
+        "ontology_intelligence": ontology_latest,
+    }
     latest_timestamps = [
         ts for ts in (journal_latest, codex_latest, ctx_latest, ontology_latest) if ts is not None
     ]
@@ -786,11 +836,17 @@ def evaluate_self_improvement_evidence(
     if len(latest_timestamps) >= 2:
         spread_seconds = (max(latest_timestamps) - min(latest_timestamps)).total_seconds()
         freshness_spread_hours = round(spread_seconds / 3600, 2)
+    freshness_skew = _has_freshness_skew(
+        source_timestamps,
+        sources,
+        freshness_hours=freshness_hours,
+        active_stale_hours=active_stale_hours,
+    )
     contradictions = []
     warnings = []
     if "fresh" in statuses and ("stale" in statuses or "missing" in statuses):
         contradictions.append("evidence freshness mismatch across sources")
-    elif freshness_spread_hours is not None and freshness_spread_hours >= active_stale_hours:
+    elif freshness_spread_hours is not None and freshness_skew:
         warnings.append("evidence freshness skew across sources")
     if stale_active_codex:
         contradictions.append("stale active Codex runs detected")
