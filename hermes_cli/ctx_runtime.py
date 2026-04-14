@@ -640,6 +640,127 @@ class _CtxDaemonClient:
             raise RuntimeError("ctx daemon returned an unexpected session payload")
         return data
 
+    def delete_task(self, task_id: str) -> None:
+        self._request_json("DELETE", f"/api/tasks/{task_id}")
+
+
+def ctx_cleanup_reason_for_end(end_reason: str) -> str:
+    cleaned = str(end_reason or "").strip() or "session ended"
+    return f"ctx binding retired: session ended ({cleaned})"
+
+
+def transfer_ctx_binding(
+    old_session_id: str,
+    new_session_id: str,
+    *,
+    reason: str = "ctx binding transferred",
+) -> Optional[CtxBinding]:
+    """Move a persisted ctx binding to a replacement Hermes session id."""
+
+    old_session_id = str(old_session_id or "").strip()
+    new_session_id = str(new_session_id or "").strip()
+    if not old_session_id or not new_session_id:
+        return None
+    if old_session_id == new_session_id:
+        return describe_existing_ctx_binding(new_session_id)
+
+    updated_at = _utcnow_iso()
+    record: Optional[Dict[str, Any]] = None
+    with _BINDINGS_LOCK:
+        data = _load_bindings()
+        sessions = data.setdefault("sessions", {})
+        existing = sessions.get(old_session_id)
+        if not isinstance(existing, dict):
+            return None
+        record = dict(existing)
+        record["session_id"] = new_session_id
+        record["updated_at"] = updated_at
+        if "created_at" not in record:
+            record["created_at"] = updated_at
+        sessions.pop(old_session_id, None)
+        sessions[new_session_id] = record
+        _save_bindings(data)
+
+    _clear_binding_overrides([old_session_id])
+    worktree_path = record.get("worktree_path") if record else None
+    if (
+        record
+        and bool(record.get("active"))
+        and worktree_path
+        and Path(str(worktree_path)).exists()
+    ):
+        try:
+            from tools.terminal_tool import register_task_env_overrides
+
+            register_task_env_overrides(new_session_id, {"cwd": str(worktree_path)})
+        except Exception:
+            logger.debug("Failed to transfer ctx cwd override to %s", new_session_id, exc_info=True)
+
+    return _binding_from_record(record, reason=reason) if record else None
+
+
+def cleanup_ctx_binding(
+    session_id: str,
+    *,
+    reason: str,
+    delete_task: bool = True,
+    config: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Retire a ctx binding and optionally delete its backing ctx task/worktree.
+
+    Returns True when cleanup completed or no cleanup was needed. Returns False
+    when a ctx task was found but could not be deleted, leaving the binding
+    active so a later cleanup attempt can retry.
+    """
+
+    session_id = str(session_id or "").strip()
+    reason = str(reason or "").strip()
+    if not session_id or not reason:
+        return False
+
+    record = _load_binding_record(session_id)
+    _clear_binding_overrides([session_id])
+    if not isinstance(record, dict):
+        return True
+
+    task_id = str(record.get("task_id") or "").strip()
+    if delete_task and task_id:
+        ctx_cfg = _load_ctx_config(config)
+        daemon_url, token = _find_auth_material(ctx_cfg)
+        if not token:
+            logger.warning(
+                "ctx cleanup skipped for session %s: ctx auth token not found",
+                session_id,
+            )
+            return False
+
+        try:
+            _CtxDaemonClient(daemon_url, token).delete_task(task_id)
+        except Exception as exc:
+            detail = str(exc)
+            if "HTTP 404" not in detail:
+                logger.warning(
+                    "Failed to delete ctx task %s for Hermes session %s: %s",
+                    task_id,
+                    session_id,
+                    exc,
+                )
+                return False
+            logger.info(
+                "ctx task %s already absent while cleaning up Hermes session %s",
+                task_id,
+                session_id,
+            )
+
+    with _BINDINGS_LOCK:
+        data = _load_bindings()
+        persisted = data.get("sessions", {}).get(session_id)
+        if not isinstance(persisted, dict):
+            return True
+        if _set_binding_record_inactive(persisted, reason=reason):
+            _save_bindings(data)
+    return True
+
 
 def _resolve_workspace(
     client: _CtxDaemonClient,

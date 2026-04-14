@@ -2989,6 +2989,15 @@ class HermesCLI:
                 self._session_db.end_session(old_session_id, "new_session")
             except Exception:
                 pass
+            try:
+                from hermes_cli.ctx_runtime import cleanup_ctx_binding, ctx_cleanup_reason_for_end
+
+                cleanup_ctx_binding(
+                    old_session_id,
+                    reason=ctx_cleanup_reason_for_end("new_session"),
+                )
+            except Exception:
+                pass
 
         self.session_start = datetime.now()
         timestamp_str = self.session_start.strftime("%Y%m%d_%H%M%S")
@@ -3062,6 +3071,15 @@ class HermesCLI:
         # End current session
         try:
             self._session_db.end_session(self.session_id, "resumed_other")
+        except Exception:
+            pass
+        try:
+            from hermes_cli.ctx_runtime import cleanup_ctx_binding, ctx_cleanup_reason_for_end
+
+            cleanup_ctx_binding(
+                self.session_id,
+                reason=ctx_cleanup_reason_for_end("resumed_other"),
+            )
         except Exception:
             pass
 
@@ -4082,6 +4100,7 @@ class HermesCLI:
         turn_route = self._resolve_turn_agent_config(prompt)
 
         def run_background():
+            end_reason = "background_complete"
             try:
                 try:
                     from hermes_cli.ctx_runtime import maybe_bind_ctx_session
@@ -4184,6 +4203,7 @@ class HermesCLI:
                     sys.stdout.flush()
 
             except Exception as e:
+                end_reason = "background_failed"
                 # Same TUI refresh pattern as success path (#2718)
                 if self._app:
                     self._app.invalidate()
@@ -4192,6 +4212,20 @@ class HermesCLI:
                 print()
                 _cprint(f"  ❌ Background task #{task_num} failed: {e}")
             finally:
+                if self._session_db:
+                    try:
+                        self._session_db.end_session(task_id, end_reason)
+                    except Exception:
+                        pass
+                try:
+                    from hermes_cli.ctx_runtime import cleanup_ctx_binding, ctx_cleanup_reason_for_end
+
+                    cleanup_ctx_binding(
+                        task_id,
+                        reason=ctx_cleanup_reason_for_end(end_reason),
+                    )
+                except Exception:
+                    pass
                 self._background_tasks.pop(task_id, None)
                 # Clear spinner only if no foreground agent owns it
                 if not self._agent_running:
@@ -7539,6 +7573,15 @@ class HermesCLI:
                     self._session_db.end_session(self.agent.session_id, "cli_close")
                 except (Exception, KeyboardInterrupt) as e:
                     logger.debug("Could not close session in DB: %s", e)
+                try:
+                    from hermes_cli.ctx_runtime import cleanup_ctx_binding, ctx_cleanup_reason_for_end
+
+                    cleanup_ctx_binding(
+                        self.agent.session_id,
+                        reason=ctx_cleanup_reason_for_end("cli_close"),
+                    )
+                except (Exception, KeyboardInterrupt) as e:
+                    logger.debug("Could not clean up ctx binding on CLI close: %s", e)
             _run_cleanup()
             self._print_exit_summary()
 

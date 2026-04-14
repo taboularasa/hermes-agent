@@ -16,6 +16,7 @@ class _FakeCtxClient:
         self.providers = providers or []
         self.created_tasks = []
         self.created_sessions = []
+        self.deleted_tasks = []
 
     def get_workspace(self, workspace_id: str):
         return None
@@ -46,6 +47,9 @@ class _FakeCtxClient:
             "task_id": task_id,
             "worktree_id": "wt-1",
         }
+
+    def delete_task(self, task_id: str):
+        self.deleted_tasks.append(task_id)
 
 
 class _FakeHTTPResponse:
@@ -402,6 +406,91 @@ def test_normalize_ctx_bindings_deactivates_ended_cron_session(monkeypatch, tmp_
     }
     assert record["sessions"][session_id]["active"] is False
     assert record["sessions"][session_id]["reason"] == "ctx binding retired: session ended (cron_complete)"
+
+
+def test_transfer_ctx_binding_moves_record_and_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    old_session_id = "sess-old"
+    new_session_id = "sess-new"
+    worktree = tmp_path / "ctx-data" / "worktrees" / "ws-1" / "wt-1"
+    worktree.mkdir(parents=True, exist_ok=True)
+    _write_binding_record(
+        tmp_path,
+        old_session_id,
+        {
+            "active": True,
+            "reason": "ctx task bound",
+            "session_id": old_session_id,
+            "platform": "cli",
+            "workspace_id": "ws-1",
+            "task_id": "task-1",
+            "worktree_id": "wt-1",
+            "worktree_path": str(worktree),
+            "source": "ctx-daemon",
+        },
+    )
+    from tools.terminal_tool import register_task_env_overrides
+
+    register_task_env_overrides(old_session_id, {"cwd": str(worktree)})
+
+    binding = ctx_runtime.transfer_ctx_binding(
+        old_session_id,
+        new_session_id,
+        reason="ctx binding transferred after compression",
+    )
+    record = json.loads((tmp_path / "ctx" / "session_bindings.json").read_text(encoding="utf-8"))
+
+    assert binding is not None
+    assert binding.session_id == new_session_id
+    assert old_session_id not in record["sessions"]
+    assert record["sessions"][new_session_id]["session_id"] == new_session_id
+    assert get_task_cwd(old_session_id, default="fallback") == "fallback"
+    assert get_task_cwd(new_session_id) == str(worktree)
+
+    clear_task_env_overrides(new_session_id)
+
+
+def test_cleanup_ctx_binding_deletes_task_and_clears_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _write_ctx_config(tmp_path)
+
+    session_id = "sess-cleanup"
+    worktree = tmp_path / "ctx-data" / "worktrees" / "ws-1" / "wt-1"
+    worktree.mkdir(parents=True, exist_ok=True)
+    _write_binding_record(
+        tmp_path,
+        session_id,
+        {
+            "active": True,
+            "reason": "ctx task bound",
+            "session_id": session_id,
+            "platform": "cli",
+            "workspace_id": "ws-1",
+            "task_id": "task-1",
+            "worktree_id": "wt-1",
+            "worktree_path": str(worktree),
+            "source": "ctx-daemon",
+        },
+    )
+    from tools.terminal_tool import register_task_env_overrides
+
+    register_task_env_overrides(session_id, {"cwd": str(worktree)})
+
+    fake_client = _FakeCtxClient()
+    monkeypatch.setattr(ctx_runtime, "_CtxDaemonClient", lambda *_args, **_kwargs: fake_client)
+    monkeypatch.setattr(ctx_runtime, "_find_auth_material", lambda _cfg: ("http://ctx.local", "token"))
+
+    assert ctx_runtime.cleanup_ctx_binding(
+        session_id,
+        reason=ctx_runtime.ctx_cleanup_reason_for_end("cli_close"),
+    )
+
+    record = json.loads((tmp_path / "ctx" / "session_bindings.json").read_text(encoding="utf-8"))
+    assert fake_client.deleted_tasks == ["task-1"]
+    assert record["sessions"][session_id]["active"] is False
+    assert record["sessions"][session_id]["reason"] == "ctx binding retired: session ended (cli_close)"
+    assert get_task_cwd(session_id, default="fallback") == "fallback"
 
 
 def test_normalize_ctx_bindings_deactivates_missing_worktree_and_clears_override(monkeypatch, tmp_path):

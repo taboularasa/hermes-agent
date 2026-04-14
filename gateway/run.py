@@ -4076,6 +4076,7 @@ class GatewayRunner:
             return
 
         _thread_metadata = {"thread_id": source.thread_id} if source.thread_id else None
+        end_reason = "background_complete"
 
         try:
             runtime_kwargs = _resolve_runtime_agent_kwargs()
@@ -4196,6 +4197,7 @@ class GatewayRunner:
                 )
 
         except Exception as e:
+            end_reason = "background_failed"
             logger.exception("Background task %s failed", task_id)
             try:
                 await adapter.send(
@@ -4205,6 +4207,21 @@ class GatewayRunner:
                 )
             except Exception:
                 pass
+        finally:
+            if self._session_db:
+                try:
+                    self._session_db.end_session(task_id, end_reason)
+                except Exception as e:
+                    logger.debug("Background task %s failed to end session: %s", task_id, e)
+            try:
+                from hermes_cli.ctx_runtime import cleanup_ctx_binding, ctx_cleanup_reason_for_end
+
+                cleanup_ctx_binding(
+                    task_id,
+                    reason=ctx_cleanup_reason_for_end(end_reason),
+                )
+            except Exception as e:
+                logger.debug("Background task %s failed to clean ctx binding: %s", task_id, e)
 
     async def _handle_reasoning_command(self, event: MessageEvent) -> str:
         """Handle /reasoning command — manage reasoning effort and display toggle.

@@ -728,6 +728,12 @@ class SessionStore:
         if self._db and db_end_session_id:
             try:
                 self._db.end_session(db_end_session_id, "session_reset")
+                from hermes_cli.ctx_runtime import cleanup_ctx_binding, ctx_cleanup_reason_for_end
+
+                cleanup_ctx_binding(
+                    db_end_session_id,
+                    reason=ctx_cleanup_reason_for_end("session_reset"),
+                )
             except Exception as e:
                 logger.debug("Session DB operation failed: %s", e)
 
@@ -843,6 +849,12 @@ class SessionStore:
         if self._db and db_end_session_id:
             try:
                 self._db.end_session(db_end_session_id, "session_reset")
+                from hermes_cli.ctx_runtime import cleanup_ctx_binding, ctx_cleanup_reason_for_end
+
+                cleanup_ctx_binding(
+                    db_end_session_id,
+                    reason=ctx_cleanup_reason_for_end("session_reset"),
+                )
             except Exception as e:
                 logger.debug("Session DB operation failed: %s", e)
 
@@ -897,6 +909,12 @@ class SessionStore:
         if self._db and db_end_session_id:
             try:
                 self._db.end_session(db_end_session_id, "session_switch")
+                from hermes_cli.ctx_runtime import cleanup_ctx_binding, ctx_cleanup_reason_for_end
+
+                cleanup_ctx_binding(
+                    db_end_session_id,
+                    reason=ctx_cleanup_reason_for_end("session_switch"),
+                )
             except Exception as e:
                 logger.debug("Session DB end_session failed: %s", e)
 

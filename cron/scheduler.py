@@ -578,11 +578,11 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             except (Exception, KeyboardInterrupt) as e:
                 logger.debug("Job '%s': failed to end session: %s", job_id, e)
         try:
-            from hermes_cli.ctx_runtime import retire_ctx_binding
+            from hermes_cli.ctx_runtime import cleanup_ctx_binding, ctx_cleanup_reason_for_end
 
-            retire_ctx_binding(
+            cleanup_ctx_binding(
                 _cron_session_id,
-                reason="ctx binding retired: cron job finished",
+                reason=ctx_cleanup_reason_for_end("cron_complete"),
             )
         except (Exception, KeyboardInterrupt) as e:
             logger.debug("Job '%s': failed to retire ctx binding: %s", job_id, e)

@@ -50,7 +50,7 @@ from hermes_constants import get_hermes_home
 # Load .env from ~/.hermes/.env first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.
 from hermes_cli.env_loader import load_hermes_dotenv
-from hermes_cli.ctx_runtime import CtxBinding, maybe_bind_ctx_session
+from hermes_cli.ctx_runtime import CtxBinding, maybe_bind_ctx_session, transfer_ctx_binding
 
 _hermes_home = get_hermes_home()
 _project_env = Path(__file__).parent / '.env'
@@ -5603,11 +5603,26 @@ class AIAgent:
             try:
                 # Propagate title to the new session with auto-numbering
                 old_title = self._session_db.get_session_title(self.session_id)
-                self._session_db.end_session(self.session_id, "compression")
                 old_session_id = self.session_id
+                self._session_db.end_session(old_session_id, "compression")
                 self.session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
                 # Update session_log_file to point to the new session's JSON file
                 self.session_log_file = self.logs_dir / f"session_{self.session_id}.json"
+                try:
+                    transferred = transfer_ctx_binding(
+                        old_session_id,
+                        self.session_id,
+                        reason="ctx binding transferred after compression",
+                    )
+                    if transferred:
+                        self._ctx_binding = transferred
+                except Exception as exc:
+                    logger.warning(
+                        "ctx binding transfer failed during compression (%s -> %s): %s",
+                        old_session_id,
+                        self.session_id,
+                        exc,
+                    )
                 self._session_db.create_session(
                     session_id=self.session_id,
                     source=self.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
