@@ -160,6 +160,31 @@ TEXTBOOK_BACKLOG_TO_HERMES_CAPABILITY = {
     },
 }
 
+SELF_IMPROVEMENT_RUBRIC_VERSION = "lane_rubric_v1"
+SELF_IMPROVEMENT_RUBRIC_WEIGHTS = {
+    "epoch_impact": 24,
+    "reliability_impact": 24,
+    "reuse": 14,
+    "urgency": 14,
+    "confidence": 10,
+    "risk": 8,
+    "effort": 6,
+}
+SELF_IMPROVEMENT_RUBRIC_LABELS = {
+    "epoch_impact": "epoch impact",
+    "reliability_impact": "reliability impact",
+    "reuse": "reuse",
+    "urgency": "urgency",
+    "confidence": "confidence",
+    "risk": "risk",
+    "effort": "effort",
+}
+SELF_IMPROVEMENT_GATING_RULES = [
+    "If required ontology artifacts are stale or missing, Maintenance preempts Growth and Capability.",
+    "If ontology research has zero active search providers, Maintenance restores the evidence floor before Growth or Capability work.",
+    "When the reliability floor is healthy, Growth and Capability compete on weighted evidence rather than fixed lane priority.",
+]
+
 
 def _parse_timestamp(value: Any) -> Optional[datetime]:
     if value is None:
@@ -1196,6 +1221,364 @@ def summarize_ontology_reliability(
     }
 
 
+def _clamp01(value: Any) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(1.0, numeric))
+
+
+def _candidate_slug(title: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", str(title or "").strip().lower()).strip("-")
+    return slug or "candidate"
+
+
+def _self_improvement_lane_status(
+    *,
+    reliability: dict[str, Any],
+    available_provider_count: int,
+    candidates: dict[str, list[dict[str, Any]]],
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    gate_reasons: list[str] = []
+    if str(reliability.get("status") or "").strip().lower() != "fresh":
+        reliability_reasons = [
+            str(reason).strip()
+            for reason in (reliability.get("reasons") or [])
+            if str(reason).strip()
+        ]
+        gate_reasons.append(
+            "Reliability floor degraded"
+            + (f": {', '.join(reliability_reasons[:3])}." if reliability_reasons else ".")
+        )
+    if available_provider_count == 0:
+        gate_reasons.append("Ontology research has zero active search providers.")
+
+    gate_active = bool(gate_reasons)
+    lane_status: dict[str, dict[str, Any]] = {}
+    for lane_name in ("maintenance", "growth", "capability"):
+        candidate_count = len(candidates.get(lane_name, []) or [])
+        eligible = lane_name == "maintenance" or not gate_active
+        reason = None
+        if lane_name == "maintenance" and gate_active:
+            reason = "Maintenance is preferred while the reliability floor is degraded."
+        elif lane_name != "maintenance" and gate_active:
+            reason = "Gated until maintenance restores fresh ontology evidence and provider coverage."
+        lane_status[lane_name] = {
+            "eligible": eligible,
+            "candidate_count": candidate_count,
+            "reason": reason,
+        }
+    return lane_status, gate_reasons
+
+
+def _score_self_improvement_candidate(
+    candidate: dict[str, Any],
+    *,
+    reliability: dict[str, Any],
+    study_context: dict[str, Any],
+    business_recommendations: list[str],
+    lane_status: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    candidate_type = str(candidate.get("candidate_type") or "").strip().lower()
+    candidate_title = str(candidate.get("title") or "").strip()
+    candidate_lane = str(candidate.get("lane") or "").strip()
+    lane_key = candidate_lane.lower()
+    lower_text = " ".join(
+        value
+        for value in (
+            candidate_title,
+            str(candidate.get("why_now") or "").strip(),
+            str(candidate.get("change_surface") or "").strip(),
+            str(candidate.get("issue_id") or "").strip(),
+        )
+        if value
+    ).lower()
+    latest_backlog_items = {
+        str(item).strip().upper()
+        for item in (study_context.get("progress_summary", {}).get("latest_backlog_items") or [])
+        if str(item).strip()
+    }
+    business_terms = set(_tokenize(" ".join(business_recommendations)))
+    progress_note_terms = set(
+        _tokenize(str(study_context.get("progress_summary", {}).get("total_book_progress_note") or ""))
+    )
+    candidate_terms = set(_tokenize(lower_text))
+    alignment_boost = min(
+        0.18,
+        0.03 * (len(candidate_terms & business_terms) + len(candidate_terms & progress_note_terms)),
+    )
+
+    inputs = {
+        "epoch_impact": 0.6,
+        "reliability_impact": 0.25,
+        "reuse": 0.6,
+        "urgency": 0.5,
+        "confidence": 0.75,
+        "risk": 0.35,
+        "effort": 0.4,
+    }
+
+    if candidate_type == "stale_artifacts":
+        inputs.update(
+            {
+                "epoch_impact": 0.62,
+                "reliability_impact": 1.0,
+                "reuse": 0.92,
+                "urgency": 1.0,
+                "confidence": 0.95,
+                "risk": 0.18,
+                "effort": 0.32,
+            }
+        )
+    elif candidate_type == "provider_coverage_repair":
+        inputs.update(
+            {
+                "epoch_impact": 0.66,
+                "reliability_impact": 1.0,
+                "reuse": 0.9,
+                "urgency": 0.95,
+                "confidence": 0.95,
+                "risk": 0.16,
+                "effort": 0.22,
+            }
+        )
+    elif candidate_type == "conversion_bottleneck":
+        inputs.update(
+            {
+                "epoch_impact": 0.82,
+                "reliability_impact": 0.48,
+                "reuse": 0.76,
+                "urgency": 0.9,
+                "confidence": 0.88,
+                "risk": 0.32,
+                "effort": 0.42,
+            }
+        )
+        if reliability.get("conversion_bottleneck", {}).get("active"):
+            inputs["epoch_impact"] += 0.08
+            inputs["urgency"] += 0.05
+    elif candidate_type == "productization":
+        reuse_ratio = _clamp01(candidate.get("foundation_reuse_ratio"))
+        inputs.update(
+            {
+                "epoch_impact": 0.68,
+                "reliability_impact": 0.18,
+                "reuse": max(0.7, reuse_ratio),
+                "urgency": 0.58,
+                "confidence": 0.84,
+                "risk": 0.28,
+                "effort": 0.36,
+            }
+        )
+        if str(candidate.get("vertical") or "").strip().lower().replace("-", "_") in " ".join(business_recommendations).lower():
+            inputs["epoch_impact"] += 0.1
+            inputs["urgency"] += 0.05
+    elif candidate_type == "multi_provider_upgrade":
+        inputs.update(
+            {
+                "epoch_impact": 0.64,
+                "reliability_impact": 0.82,
+                "reuse": 0.86,
+                "urgency": 0.72,
+                "confidence": 0.9,
+                "risk": 0.24,
+                "effort": 0.32,
+            }
+        )
+    elif candidate_type == "differentiation":
+        reuse_ratio = _clamp01(candidate.get("foundation_reuse_ratio"))
+        inputs.update(
+            {
+                "epoch_impact": 0.64,
+                "reliability_impact": 0.2,
+                "reuse": reuse_ratio,
+                "urgency": 0.54,
+                "confidence": 0.8,
+                "risk": 0.48,
+                "effort": 0.62,
+            }
+        )
+        if str(candidate.get("vertical") or "").strip().lower().replace("-", "_") in " ".join(business_recommendations).lower():
+            inputs["epoch_impact"] += 0.08
+    elif candidate_type == "upgrade_target":
+        inputs.update(
+            {
+                "epoch_impact": 0.66,
+                "reliability_impact": 0.34,
+                "reuse": 0.74,
+                "urgency": 0.58,
+                "confidence": 0.82,
+                "risk": 0.34,
+                "effort": 0.42,
+            }
+        )
+        issue_id = str(candidate.get("issue_id") or "").strip().upper()
+        if issue_id and issue_id in latest_backlog_items:
+            inputs["epoch_impact"] += 0.12
+            inputs["urgency"] += 0.1
+        if any(keyword in lower_text for keyword in ("query-ready", "competency-question", "contract")):
+            inputs["epoch_impact"] += 0.08
+            inputs["reuse"] += 0.16
+        if any(keyword in lower_text for keyword in ("pitfall", "review", "debug", "governance", "heuristic")):
+            inputs["reliability_impact"] += 0.12
+            inputs["reuse"] += 0.12
+        if any(keyword in lower_text for keyword in ("foundational", "cross-vertical")):
+            inputs["risk"] += 0.1
+            inputs["effort"] += 0.12
+
+    inputs["epoch_impact"] = _clamp01(inputs["epoch_impact"] + alignment_boost)
+    inputs = {factor: _clamp01(value) for factor, value in inputs.items()}
+
+    contributions: dict[str, float] = {}
+    for factor, weight in SELF_IMPROVEMENT_RUBRIC_WEIGHTS.items():
+        effective_value = 1.0 - inputs[factor] if factor in {"risk", "effort"} else inputs[factor]
+        contributions[factor] = round(weight * _clamp01(effective_value), 2)
+
+    driver_pairs = sorted(
+        contributions.items(),
+        key=lambda item: (-item[1], SELF_IMPROVEMENT_RUBRIC_LABELS[item[0]]),
+    )
+    driver_factors = [name for name, _ in driver_pairs[:2]]
+    driver_labels = [SELF_IMPROVEMENT_RUBRIC_LABELS[name] for name in driver_factors]
+    gating = lane_status.get(lane_key, {"eligible": True, "reason": None})
+    score = round(sum(contributions.values()), 2)
+    explanation = (
+        f"Strongest on {', '.join(driver_labels)}. "
+        f"{str((candidate.get('evidence') or [candidate.get('why_now')])[0] or '').strip()}"
+    ).strip()
+    if not gating.get("eligible"):
+        explanation = f"Gated by reliability floor. {explanation}"
+
+    return {
+        **candidate,
+        "candidate_id": str(candidate.get("candidate_id") or f"{lane_key}:{_candidate_slug(candidate_title)}"),
+        "rubric_inputs": inputs,
+        "rubric_contributions": contributions,
+        "score": score,
+        "primary_drivers": driver_factors,
+        "gating": {
+            "eligible": bool(gating.get("eligible")),
+            "reason": gating.get("reason"),
+        },
+        "explanation": explanation,
+    }
+
+
+def _explain_candidate_outranking(winner: dict[str, Any], loser: dict[str, Any]) -> dict[str, Any]:
+    if not loser.get("gating", {}).get("eligible"):
+        summary = (
+            f"{winner.get('title')} outranks {loser.get('title')} because it remains eligible while "
+            f"{loser.get('lane')} is gated by the reliability floor."
+        )
+        return {
+            "winner_title": winner.get("title"),
+            "loser_title": loser.get("title"),
+            "drivers": ["reliability_impact", "urgency"],
+            "summary": summary,
+        }
+
+    deltas = []
+    for factor in SELF_IMPROVEMENT_RUBRIC_WEIGHTS:
+        delta = round(
+            float(winner.get("rubric_contributions", {}).get(factor) or 0.0)
+            - float(loser.get("rubric_contributions", {}).get(factor) or 0.0),
+            2,
+        )
+        deltas.append((factor, delta))
+    positive = [item for item in sorted(deltas, key=lambda item: (-item[1], item[0])) if item[1] > 0][:2]
+    if not positive:
+        positive = [("confidence", 0.0)]
+    driver_labels = [SELF_IMPROVEMENT_RUBRIC_LABELS[name] for name, _ in positive]
+    summary = (
+        f"{winner.get('title')} outranks {loser.get('title')} on {', '.join(driver_labels)}."
+    )
+    return {
+        "winner_title": winner.get("title"),
+        "loser_title": loser.get("title"),
+        "drivers": [name for name, _ in positive],
+        "summary": summary,
+    }
+
+
+def _prioritize_self_improvement_candidates(
+    *,
+    candidates: dict[str, list[dict[str, Any]]],
+    reliability: dict[str, Any],
+    study_context: dict[str, Any],
+    provider_status: dict[str, Any],
+    business_recommendations: list[str],
+) -> dict[str, Any]:
+    available_provider_count = int(provider_status.get("summary", {}).get("available_provider_count") or 0)
+    lane_status, gate_reasons = _self_improvement_lane_status(
+        reliability=reliability,
+        available_provider_count=available_provider_count,
+        candidates=candidates,
+    )
+    ranked_candidates = [
+        _score_self_improvement_candidate(
+            candidate,
+            reliability=reliability,
+            study_context=study_context,
+            business_recommendations=business_recommendations,
+            lane_status=lane_status,
+        )
+        for lane_name in ("maintenance", "growth", "capability")
+        for candidate in candidates.get(lane_name, []) or []
+        if isinstance(candidate, dict)
+    ]
+    ranked_candidates.sort(
+        key=lambda item: (
+            0 if item.get("gating", {}).get("eligible") else 1,
+            -float(item.get("score") or 0.0),
+            str(item.get("lane") or ""),
+            str(item.get("title") or ""),
+        )
+    )
+    selected_candidate = next(
+        (candidate for candidate in ranked_candidates if candidate.get("gating", {}).get("eligible")),
+        None,
+    )
+    eligible_candidates = [candidate for candidate in ranked_candidates if candidate.get("gating", {}).get("eligible")]
+    outranking = [
+        _explain_candidate_outranking(winner, loser)
+        for winner, loser in zip(eligible_candidates, eligible_candidates[1:])
+    ]
+
+    if gate_reasons:
+        selection_reason = (
+            f"{' '.join(gate_reasons)} Maintenance preempts Growth and Capability until the evidence floor recovers."
+        )
+    elif selected_candidate:
+        driver_labels = [
+            SELF_IMPROVEMENT_RUBRIC_LABELS[name]
+            for name in (selected_candidate.get("primary_drivers") or [])[:2]
+        ]
+        selection_reason = (
+            f"{selected_candidate.get('title')} leads on {', '.join(driver_labels)} and remains the highest-scoring eligible candidate."
+        )
+    else:
+        selection_reason = "No self-improvement candidates were available from the current ontology evidence."
+
+    return {
+        "rubric": {
+            "version": SELF_IMPROVEMENT_RUBRIC_VERSION,
+            "weights": dict(SELF_IMPROVEMENT_RUBRIC_WEIGHTS),
+            "labels": dict(SELF_IMPROVEMENT_RUBRIC_LABELS),
+            "gating_rules": list(SELF_IMPROVEMENT_GATING_RULES),
+            "score_scale": "0-100 weighted points; lower observed risk and effort earn more points.",
+        },
+        "gate_status": "maintenance_only" if gate_reasons else "open",
+        "gate_reasons": gate_reasons,
+        "lane_status": lane_status,
+        "selected_lane": selected_candidate.get("lane") if isinstance(selected_candidate, dict) else None,
+        "selected_candidate": selected_candidate,
+        "selection_reason": selection_reason,
+        "ranked_candidates": ranked_candidates,
+        "outranking": outranking,
+    }
+
+
 def _match_core_contexts(query: str, *, limit: int = 4) -> list[dict[str, Any]]:
     query_terms = set(_tokenize(query))
     matches = []
@@ -1441,6 +1824,11 @@ def build_self_improvement_context(
     study_context = _load_textbook_study_context(root, limit=5)
     research_protocol = _build_business_domain_research_protocol(root)
     provider_status = research_protocol.get("provider_status", {})
+    business_recommendations = [
+        str(item).strip()
+        for item in (snapshot.get("business_recommendations") or [])
+        if str(item).strip()
+    ]
 
     agenda_dir = root / "research" / "agenda"
     retrospective_dir = root / "research" / "retrospectives"
@@ -1525,16 +1913,26 @@ def build_self_improvement_context(
         maintenance_candidates.append(
             {
                 "lane": "Maintenance",
+                "candidate_type": "stale_artifacts",
+                "candidate_id": "maintenance:repair-stale-ontology-intelligence-artifacts",
                 "title": "Repair stale ontology intelligence artifacts",
                 "why_now": ", ".join(reliability["reasons"]) or "Required ontology reports are missing or stale.",
+                "evidence": list(reliability.get("reasons") or [])[:3],
             }
         )
     if available_provider_count == 0:
         maintenance_candidates.append(
             {
                 "lane": "Maintenance",
+                "candidate_type": "provider_coverage_repair",
+                "candidate_id": "maintenance:restore-ontology-research-search-provider-credentials",
                 "title": "Restore ontology research search-provider credentials",
                 "why_now": "Ontology business-domain research has no active Exa, Parallel, Tavily, or Firecrawl coverage in the Hermes runtime.",
+                "available_provider_count": available_provider_count,
+                "evidence": [
+                    "No ontology search providers are active in the Hermes runtime.",
+                    "Research-provider coverage is required for fresh multi-source ontology evidence.",
+                ],
             }
         )
 
@@ -1543,8 +1941,13 @@ def build_self_improvement_context(
         growth_candidates.append(
             {
                 "lane": "Growth",
+                "candidate_type": "conversion_bottleneck",
+                "candidate_id": "growth:turn-ontology-research-discoveries-into-proposals-and-backlog",
                 "title": "Turn ontology research discoveries into proposals and backlog",
                 "why_now": reliability["conversion_bottleneck"]["reason"],
+                "evidence": [str(reliability["conversion_bottleneck"]["reason"])],
+                "total_cqs_added": snapshot.get("platform", {}).get("total_cqs_added"),
+                "total_proposals_generated": snapshot.get("platform", {}).get("total_proposals_generated"),
             }
         )
 
@@ -1553,11 +1956,22 @@ def build_self_improvement_context(
         growth_candidates.append(
             {
                 "lane": "Growth",
+                "candidate_type": "productization",
+                "candidate_id": f"growth:package-{productization['vertical']}-as-a-repeatable-offer",
                 "title": f"Package {productization['vertical']} as a repeatable offer",
                 "why_now": (
                     f"{productization['vertical']} shows the strongest shared-foundation reuse "
                     f"({float(productization.get('foundation_reuse_ratio') or 0.0):.1%})."
                 ),
+                "vertical": productization.get("vertical"),
+                "foundation_reuse_ratio": productization.get("foundation_reuse_ratio"),
+                "cq_total": productization.get("cq_total"),
+                "evidence": [
+                    (
+                        f"{productization['vertical']} has the highest shared-foundation reuse "
+                        f"at {float(productization.get('foundation_reuse_ratio') or 0.0):.1%}."
+                    )
+                ],
             }
         )
 
@@ -1567,32 +1981,74 @@ def build_self_improvement_context(
         capability_candidates.append(
             {
                 "lane": "Capability",
+                "candidate_type": "multi_provider_upgrade",
+                "candidate_id": "capability:upgrade-ontology-research-to-multi-provider-search-coverage",
                 "title": "Upgrade ontology research to multi-provider search coverage",
                 "why_now": "Hermes currently has only one search provider available for ontology domain research, which weakens evidence quality and novelty detection.",
+                "available_provider_count": available_provider_count,
+                "evidence": [
+                    "Only one ontology search provider is currently active.",
+                    "Multi-provider evidence improves novelty detection and coverage checks.",
+                ],
             }
         )
     if isinstance(differentiation, dict) and differentiation.get("vertical"):
         capability_candidates.append(
             {
                 "lane": "Capability",
+                "candidate_type": "differentiation",
+                "candidate_id": f"capability:deepen-differentiated-modeling-for-{differentiation['vertical']}",
                 "title": f"Deepen differentiated modeling for {differentiation['vertical']}",
                 "why_now": (
                     f"{differentiation['vertical']} has the lowest shared-foundation reuse "
                     f"({float(differentiation.get('foundation_reuse_ratio') or 0.0):.1%}), "
                     "which points to higher-value niche depth."
                 ),
+                "vertical": differentiation.get("vertical"),
+                "foundation_reuse_ratio": differentiation.get("foundation_reuse_ratio"),
+                "cq_total": differentiation.get("cq_total"),
+                "evidence": [
+                    (
+                        f"{differentiation['vertical']} has the lowest shared-foundation reuse "
+                        f"at {float(differentiation.get('foundation_reuse_ratio') or 0.0):.1%}."
+                    )
+                ],
             }
         )
     for target in study_context.get("upgrade_targets", [])[:3]:
         capability_candidates.append(
             {
                 "lane": "Capability",
+                "candidate_type": "upgrade_target",
+                "candidate_id": f"capability:{_candidate_slug(str(target.get('title') or 'upgrade-target'))}",
                 "title": target.get("title"),
                 "why_now": target.get("why_now"),
                 "change_surface": target.get("change_surface"),
                 "backing_issue": target.get("issue_id"),
+                "issue_id": target.get("issue_id"),
+                "evidence": [
+                    str(target.get("why_now") or "").strip(),
+                    (
+                        f"Backed by ontology textbook issue {target.get('issue_id')}."
+                        if target.get("issue_id")
+                        else ""
+                    ),
+                ],
             }
         )
+
+    candidates = {
+        "maintenance": maintenance_candidates,
+        "growth": growth_candidates,
+        "capability": capability_candidates,
+    }
+    prioritization = _prioritize_self_improvement_candidates(
+        candidates=candidates,
+        reliability=reliability,
+        study_context=study_context,
+        provider_status=provider_status,
+        business_recommendations=business_recommendations,
+    )
 
     return {
         "mode": "self_improvement",
@@ -1602,12 +2058,9 @@ def build_self_improvement_context(
         "retrospectives": retrospective_summaries,
         "textbook_study": study_context,
         "research_provider_policy": provider_status,
-        "candidates": {
-            "maintenance": maintenance_candidates,
-            "growth": growth_candidates,
-            "capability": capability_candidates,
-        },
-        "business_recommendations": snapshot.get("business_recommendations", [])[:3],
+        "candidates": candidates,
+        "prioritization": prioritization,
+        "business_recommendations": business_recommendations[:3],
         "evidence": {
             "repo_root": snapshot.get("repo_root"),
             "metrics_path": snapshot.get("paths", {}).get("metrics"),

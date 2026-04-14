@@ -294,6 +294,85 @@ def test_self_improvement_context_surfaces_conversion_bottleneck_without_stalene
     assert context["textbook_study"]["progress_summary"]["current_subsection"] == "6.1.2 — Foundational ontology choices"
 
 
+def test_self_improvement_context_scores_candidates_and_selects_growth_when_reliable(tmp_path):
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
+    repo = _seed_ontology_repo(tmp_path, now=now)
+
+    with patch.dict(os.environ, {"EXA_API_KEY": "exa-test", "TAVILY_API_KEY": "tvly-test"}, clear=False):
+        context = build_self_improvement_context(repo, now=now, freshness_hours=72)
+
+    prioritization = context["prioritization"]
+    selected = prioritization["selected_candidate"]
+
+    assert prioritization["selected_lane"] == "Growth"
+    assert selected["lane"] == "Growth"
+    assert "proposals" in selected["title"].lower()
+    assert set(prioritization["rubric"]["weights"]) == {
+        "epoch_impact",
+        "reliability_impact",
+        "reuse",
+        "urgency",
+        "confidence",
+        "risk",
+        "effort",
+    }
+    assert prioritization["lane_status"]["growth"]["eligible"] is True
+    assert prioritization["lane_status"]["capability"]["eligible"] is True
+    assert set(selected["rubric_inputs"]) == {
+        "epoch_impact",
+        "reliability_impact",
+        "reuse",
+        "urgency",
+        "confidence",
+        "risk",
+        "effort",
+    }
+    assert selected["score"] > 0
+    assert {item["lane"] for item in prioritization["ranked_candidates"]} >= {"Growth", "Capability"}
+
+
+def test_self_improvement_context_gates_growth_and_capability_when_reliability_degraded(tmp_path):
+    seeded_at = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
+    now = seeded_at + timedelta(days=5)
+    repo = _seed_ontology_repo(tmp_path, now=seeded_at)
+
+    with patch.dict(os.environ, {"EXA_API_KEY": "exa-test", "TAVILY_API_KEY": "tvly-test"}, clear=False):
+        context = build_self_improvement_context(repo, now=now, freshness_hours=72)
+
+    prioritization = context["prioritization"]
+    selected = prioritization["selected_candidate"]
+
+    assert prioritization["selected_lane"] == "Maintenance"
+    assert selected["lane"] == "Maintenance"
+    assert "stale ontology intelligence artifacts" in selected["title"].lower()
+    assert prioritization["lane_status"]["growth"]["eligible"] is False
+    assert prioritization["lane_status"]["capability"]["eligible"] is False
+    assert "reliability" in prioritization["selection_reason"].lower()
+    gated_titles = [
+        item["title"]
+        for item in prioritization["ranked_candidates"]
+        if item["lane"] in {"Growth", "Capability"} and not item["gating"]["eligible"]
+    ]
+    assert any("proposals" in title.lower() for title in gated_titles)
+
+
+def test_self_improvement_context_includes_outranking_explanations(tmp_path):
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
+    repo = _seed_ontology_repo(tmp_path, now=now)
+
+    with patch.dict(os.environ, {"EXA_API_KEY": "exa-test", "TAVILY_API_KEY": "tvly-test"}, clear=False):
+        context = build_self_improvement_context(repo, now=now, freshness_hours=72)
+
+    prioritization = context["prioritization"]
+    comparison = prioritization["outranking"][0]
+
+    assert comparison["winner_title"] == prioritization["selected_candidate"]["title"]
+    assert comparison["loser_title"]
+    assert comparison["drivers"]
+    assert set(comparison["drivers"]).issubset(set(prioritization["rubric"]["weights"]))
+    assert "outranks" in comparison["summary"].lower()
+
+
 def test_ontology_engineering_context_reads_textbook_study_and_provider_policy(tmp_path):
     now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
     repo = _seed_ontology_repo(tmp_path, now=now)
