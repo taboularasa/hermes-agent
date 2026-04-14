@@ -41,6 +41,9 @@ guardrails:
   max_active_issues_per_lane: 1
   max_active_projects: 1
   capability_budget_percent: 20
+  capability_requires_healthy_lanes:
+    - maintenance
+    - growth
   require_evidence_sources: true
   require_verification_expectation: true
 
