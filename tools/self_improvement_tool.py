@@ -2663,6 +2663,7 @@ def evaluate_self_improvement_benchmark(
         "objective_review_question": str((reward_policy.get("epoch") or {}).get("review_question") or ""),
         "objective_path": reward_policy.get("_resolved_path"),
         "gate": gate,
+        "ontology_prioritization": ontology_context.get("prioritization"),
         "score": overall_score,
         "direction": direction,
         "trend": trend,
@@ -3190,6 +3191,7 @@ def evaluate_self_improvement_pipeline(
             "critical_failures": benchmark_before.get("critical_failures"),
         },
         "benchmark": benchmark_after,
+        "ontology_prioritization": ontology_context.get("prioritization"),
         "linear": {
             "available": linear_surface.get("available", False),
             "error": linear_surface.get("error") or issue_management.get("error") or fallback_error or comment_error,

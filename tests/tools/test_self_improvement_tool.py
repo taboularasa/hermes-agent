@@ -1000,6 +1000,14 @@ def test_self_improvement_benchmark_scores_positive_and_persists_history(monkeyp
             "research_provider_policy": {"summary": {"available_provider_count": 2}},
             "textbook_study": {"upgrade_targets": [{"title": "Typed execution frame"}]},
             "business_recommendations": ["Prioritize contract-facing reliability work."],
+            "prioritization": {
+                "selected_lane": "Growth",
+                "selected_candidate": {
+                    "lane": "Growth",
+                    "title": "Turn ontology research discoveries into proposals and backlog",
+                    "score": 74.5,
+                },
+            },
         },
     )
     monkeypatch.setattr(
@@ -1046,6 +1054,7 @@ def test_self_improvement_benchmark_scores_positive_and_persists_history(monkeyp
     assert benchmark["positive_direction"] is True
     assert benchmark["critical_failures"] == []
     assert benchmark["history"]["evaluation_count_after_run"] == 1
+    assert benchmark["ontology_prioritization"]["selected_lane"] == "Growth"
     assert benchmark["score"] >= 90.0
 
     persisted = json.loads(history_path.read_text(encoding="utf-8"))
