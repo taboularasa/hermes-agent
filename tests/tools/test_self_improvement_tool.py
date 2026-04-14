@@ -323,8 +323,16 @@ def _install_fake_linear_surface(monkeypatch, store: dict) -> None:
             issue = _find_issue(str(args.get("identifier") or args.get("issue_id") or ""))
             if issue is None:
                 return json.dumps({"error": "missing issue"})
-            dedupe_key = str(args.get("dedupe_key") or "")
-            body = linear_issue_tool._format_comment_body(str(args.get("body") or ""), dedupe_key or None)
+            raw_dedupe_key = str(args.get("dedupe_key") or "")
+            dedupe_key, status_comment_state = linear_issue_tool._resolve_comment_dedupe_key(
+                raw_dedupe_key or None,
+                status_comment_state=args.get("status_comment_state"),
+            )
+            body = linear_issue_tool._format_comment_body(
+                str(args.get("body") or ""),
+                dedupe_key or None,
+                status_comment_state=status_comment_state,
+            )
             existing = None
             if dedupe_key:
                 for comment in issue["comments"]:
@@ -355,6 +363,8 @@ def _install_fake_linear_surface(monkeypatch, store: dict) -> None:
                     "created": not updated_existing,
                     "issue_id": issue["id"],
                     "issue_identifier": issue["identifier"],
+                    "dedupe_key": dedupe_key,
+                    "status_comment_state": status_comment_state,
                     "comment": _clone(comment),
                 }
             )
@@ -1442,6 +1452,8 @@ def test_self_improvement_pipeline_repairs_delegate_conflicts_and_upserts_top_is
     assert any(
         str((linear_issue_tool._parse_marker(comment["body"]) or {}).get("dedupe_key") or "")
         == f"status:{reliability_issue['identifier']}"
+        and str((linear_issue_tool._parse_marker(comment["body"]) or {}).get("status_comment_state") or "")
+        == "verified"
         for comment in reliability_issue["comments"]
     )
 
@@ -1730,6 +1742,8 @@ def test_self_improvement_pipeline_surfaces_ontology_fallback_candidate_when_ben
     assert any(
         str((linear_issue_tool._parse_marker(comment["body"]) or {}).get("dedupe_key") or "")
         == "status:HAD-700"
+        and str((linear_issue_tool._parse_marker(comment["body"]) or {}).get("status_comment_state") or "")
+        == "verified"
         and "ontology-backed self-improvement candidate selected" in str(comment["body"] or "")
         for comment in fallback_issue["comments"]
     )

@@ -21,7 +21,11 @@ def test_linear_issue_comment_updates_existing_deduped_comment(monkeypatch):
         "comments": [
             {
                 "id": "comment-1",
-                "body": linear_issue_tool._format_comment_body("old body", "status:had-123"),
+                "body": linear_issue_tool._format_comment_body(
+                    "old body",
+                    "status:had-123",
+                    status_comment_state="verified",
+                ),
             }
         ],
     }
@@ -41,6 +45,7 @@ def test_linear_issue_comment_updates_existing_deduped_comment(monkeypatch):
                 "identifier": "HAD-123",
                 "body": "new body",
                 "dedupe_key": "status:had-123",
+                "status_comment_state": "verified",
             }
         )
     )
@@ -48,7 +53,14 @@ def test_linear_issue_comment_updates_existing_deduped_comment(monkeypatch):
     assert result["success"] is True
     assert result["updated_existing"] is True
     assert update_calls == [
-        ("comment-1", linear_issue_tool._format_comment_body("new body", "status:had-123"))
+        (
+            "comment-1",
+            linear_issue_tool._format_comment_body(
+                "new body",
+                "status:had-123",
+                status_comment_state="verified",
+            ),
+        )
     ]
 
 
@@ -76,6 +88,7 @@ def test_linear_issue_comment_creates_when_no_deduped_comment_exists(monkeypatch
                 "identifier": "HAD-123",
                 "body": "fresh body",
                 "dedupe_key": "status:had-123",
+                "status_comment_state": "verified",
             }
         )
     )
@@ -83,7 +96,116 @@ def test_linear_issue_comment_creates_when_no_deduped_comment_exists(monkeypatch
     assert result["success"] is True
     assert result["created"] is True
     assert create_calls == [
-        ("issue-1", linear_issue_tool._format_comment_body("fresh body", "status:had-123"))
+        (
+            "issue-1",
+            linear_issue_tool._format_comment_body(
+                "fresh body",
+                "status:had-123",
+                status_comment_state="verified",
+            ),
+        )
+    ]
+
+
+def test_linear_issue_comment_defaults_status_updates_to_interim_variant(monkeypatch):
+    monkeypatch.setattr(
+        linear_issue_tool,
+        "_fetch_issue",
+        lambda issue_ref, comment_limit=10: {
+            "id": "issue-1",
+            "identifier": "HAD-123",
+            "comments": [],
+        },
+    )
+    create_calls = []
+    monkeypatch.setattr(
+        linear_issue_tool,
+        "_create_comment",
+        lambda issue_id, body: create_calls.append((issue_id, body)) or {"id": "comment-2", "body": body},
+    )
+
+    result = json.loads(
+        linear_issue_tool.linear_issue(
+            {
+                "action": "comment",
+                "identifier": "HAD-123",
+                "body": "assistant summary pending verification",
+                "dedupe_key": "status:had-123",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["created"] is True
+    assert result["dedupe_key"] == "status:had-123:interim"
+    assert result["status_comment_state"] == "interim"
+    assert create_calls == [
+        (
+            "issue-1",
+            linear_issue_tool._format_comment_body(
+                "assistant summary pending verification",
+                "status:had-123:interim",
+                status_comment_state="interim",
+            ),
+        )
+    ]
+
+
+def test_linear_issue_comment_unverified_status_cannot_overwrite_verified_comment(monkeypatch):
+    issue = {
+        "id": "issue-1",
+        "identifier": "HAD-123",
+        "comments": [
+            {
+                "id": "comment-verified",
+                "body": linear_issue_tool._format_comment_body(
+                    "verified shipped result",
+                    "status:had-123",
+                    status_comment_state="verified",
+                ),
+            }
+        ],
+    }
+    update_calls = []
+    create_calls = []
+
+    monkeypatch.setattr(linear_issue_tool, "_fetch_issue", lambda issue_ref, comment_limit=10: issue)
+    monkeypatch.setattr(
+        linear_issue_tool,
+        "_update_comment",
+        lambda comment_id, body: update_calls.append((comment_id, body)) or {"id": comment_id, "body": body},
+    )
+    monkeypatch.setattr(
+        linear_issue_tool,
+        "_create_comment",
+        lambda issue_id, body: create_calls.append((issue_id, body)) or {"id": "comment-interim", "body": body},
+    )
+
+    result = json.loads(
+        linear_issue_tool.linear_issue(
+            {
+                "action": "comment",
+                "identifier": "HAD-123",
+                "body": "assistant thinks the work is done",
+                "dedupe_key": "status:had-123",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["created"] is True
+    assert result["updated_existing"] is False
+    assert result["dedupe_key"] == "status:had-123:interim"
+    assert update_calls == []
+    assert create_calls == [
+        (
+            "issue-1",
+            linear_issue_tool._format_comment_body(
+                "assistant thinks the work is done",
+                "status:had-123:interim",
+                status_comment_state="interim",
+            ),
+        )
     ]
 
 
