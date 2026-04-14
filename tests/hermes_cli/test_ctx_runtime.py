@@ -439,6 +439,36 @@ def test_normalize_ctx_bindings_deactivates_missing_worktree_and_clears_override
     assert get_task_cwd(session_id, default="fallback") == "fallback"
 
 
+def test_normalize_ctx_bindings_deactivates_active_record_already_marked_retired(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    session_id = "sess-retired-reason"
+    worktree = tmp_path / "ctx-data" / "worktrees" / "ws-1" / "wt-1"
+    worktree.mkdir(parents=True, exist_ok=True)
+    _write_binding_record(
+        tmp_path,
+        session_id,
+        {
+            "active": True,
+            "reason": "ctx binding retired: session ended (new_session)",
+            "session_id": session_id,
+            "platform": "cli",
+            "workspace_id": "ws-1",
+            "task_id": "task-1",
+            "worktree_id": "wt-1",
+            "worktree_path": str(worktree),
+            "source": "ctx-daemon",
+        },
+    )
+
+    retired = ctx_runtime.normalize_ctx_bindings(session_id=session_id)
+    record = json.loads((tmp_path / "ctx" / "session_bindings.json").read_text(encoding="utf-8"))
+
+    assert retired == {session_id: "ctx binding retired: session ended (new_session)"}
+    assert record["sessions"][session_id]["active"] is False
+    assert record["sessions"][session_id]["reason"] == "ctx binding retired: session ended (new_session)"
+
+
 def test_normalize_ctx_bindings_deactivates_stale_active_binding(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
