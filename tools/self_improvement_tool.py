@@ -2966,6 +2966,7 @@ def _manage_benchmark_issues(
                             "benchmark-generated issue was auto-closed."
                         ),
                         "dedupe_key": f"status:{issue_ref}",
+                        "status_comment_state": "verified",
                     }
                 )
             )
@@ -3172,6 +3173,7 @@ def evaluate_self_improvement_pipeline(
                                 repairs=list(linear_surface.get("repairs") or []),
                             ),
                             "dedupe_key": f"status:{issue_ref}",
+                            "status_comment_state": "verified",
                         }
                     )
                 )

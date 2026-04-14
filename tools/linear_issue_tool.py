@@ -19,6 +19,9 @@ LINEAR_API_URL = "https://api.linear.app/graphql"
 _MARKER_PREFIX = "<!-- hermes-linear:v1 "
 _MARKER_SUFFIX = " -->"
 _WORKSPACE_ORCHESTRATOR_GIT_HYGIENE_PREFIX = "workspace-orchestrator:git-hygiene:"
+_STATUS_COMMENT_PREFIX = "status:"
+_STATUS_COMMENT_INTERIM_SUFFIX = ":interim"
+_STATUS_COMMENT_STATES = {"verified", "interim"}
 # Linear rejects longer project descriptions with a generic Argument Validation
 # Error. Keep project descriptions compact and reserve issue descriptions for
 # the full detail.
@@ -393,6 +396,17 @@ LINEAR_ISSUE_SCHEMA = {
                     "comment in place instead of skipping it. Defaults to true."
                 ),
             },
+            "status_comment_state": {
+                "type": "string",
+                "enum": ["verified", "interim"],
+                "description": (
+                    "For dedupe keys starting with `status:`, mark whether the "
+                    "comment is a verification-backed canonical status update or "
+                    "an interim note. Defaults to `interim`; interim status "
+                    "comments use a separate dedupe marker so they cannot "
+                    "overwrite the canonical verified status comment."
+                ),
+            },
             "state_name": {
                 "type": "string",
                 "description": "Workflow state name for action=update_state, such as In Progress or Done.",
@@ -656,9 +670,64 @@ def _find_state_id(states: list[dict[str, Any]], state_name: str) -> str:
     raise RuntimeError(f"Linear workflow state '{state_name}' was not found. Available: {available}")
 
 
-def _build_marker(dedupe_key: str) -> str:
-    payload = json.dumps({"dedupe_key": dedupe_key}, separators=(",", ":"), sort_keys=True)
-    return f"{_MARKER_PREFIX}{payload}{_MARKER_SUFFIX}"
+def _canonical_status_comment_key(dedupe_key: str | None) -> str | None:
+    raw = str(dedupe_key or "").strip()
+    if not raw.startswith(_STATUS_COMMENT_PREFIX):
+        return None
+    if raw.endswith(_STATUS_COMMENT_INTERIM_SUFFIX):
+        raw = raw[: -len(_STATUS_COMMENT_INTERIM_SUFFIX)]
+    return raw or None
+
+
+def _normalize_status_comment_state(value: Any) -> str | None:
+    raw = str(value or "").strip().casefold()
+    if raw in _STATUS_COMMENT_STATES:
+        return raw
+    return None
+
+
+def _marker_status_comment_state(dedupe_key: str | None, status_comment_state: Any = None) -> str | None:
+    canonical_key = _canonical_status_comment_key(dedupe_key)
+    if not canonical_key:
+        return None
+    normalized = _normalize_status_comment_state(status_comment_state)
+    if normalized:
+        return normalized
+    raw = str(dedupe_key or "").strip()
+    return "verified" if raw == canonical_key else "interim"
+
+
+def _resolve_comment_dedupe_key(
+    dedupe_key: str | None,
+    *,
+    status_comment_state: Any = None,
+) -> tuple[str | None, str | None]:
+    raw = str(dedupe_key or "").strip()
+    if not raw:
+        return None, None
+
+    canonical_key = _canonical_status_comment_key(raw)
+    if not canonical_key:
+        return raw, None
+
+    normalized_state = _normalize_status_comment_state(status_comment_state) or "interim"
+    if normalized_state == "verified":
+        return canonical_key, normalized_state
+    return f"{canonical_key}{_STATUS_COMMENT_INTERIM_SUFFIX}", normalized_state
+
+
+def _build_marker(dedupe_key: str, *, status_comment_state: str | None = None) -> str:
+    payload: dict[str, Any] = {"dedupe_key": dedupe_key}
+    canonical_status_key = _canonical_status_comment_key(dedupe_key)
+    if canonical_status_key:
+        payload["status_comment_state"] = _marker_status_comment_state(
+            dedupe_key,
+            status_comment_state,
+        )
+        payload["status_canonical_dedupe_key"] = canonical_status_key
+    payload = {key: value for key, value in payload.items() if value is not None}
+    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    return f"{_MARKER_PREFIX}{encoded}{_MARKER_SUFFIX}"
 
 
 def _parse_marker(body: str) -> dict[str, Any] | None:
@@ -684,11 +753,16 @@ def _strip_marker(body: str) -> str:
     return body[end + len(_MARKER_SUFFIX):].lstrip()
 
 
-def _format_comment_body(body: str, dedupe_key: str | None) -> str:
+def _format_comment_body(
+    body: str,
+    dedupe_key: str | None,
+    *,
+    status_comment_state: str | None = None,
+) -> str:
     text = body.strip()
     if not dedupe_key:
         return text
-    return f"{_build_marker(dedupe_key)}\n{text}"
+    return f"{_build_marker(dedupe_key, status_comment_state=status_comment_state)}\n{text}"
 
 
 def _format_marker_body(body: str, dedupe_key: str | None) -> str:
@@ -1230,12 +1304,16 @@ def linear_issue(args: dict[str, Any], **_kw) -> str:
         issue_id = str(issue.get("id") or "")
         comment_id = str(args.get("comment_id") or "").strip()
         raw_dedupe_key = str(args.get("dedupe_key") or "").strip() or None
-        dedupe_key, existing_comment, legacy_family_comments = _find_comment_family_by_dedupe(issue, raw_dedupe_key)
+        dedupe_input, status_comment_state = _resolve_comment_dedupe_key(
+            raw_dedupe_key,
+            status_comment_state=args.get("status_comment_state"),
+        )
+        dedupe_key, existing_comment, legacy_family_comments = _find_comment_family_by_dedupe(issue, dedupe_input)
         if not dedupe_key:
-            dedupe_key = raw_dedupe_key
+            dedupe_key = dedupe_input
         if raw_dedupe_key and dedupe_key != raw_dedupe_key:
             logger.info(
-                "linear_issue.comment canonicalized_dedupe_key raw=%s canonical=%s",
+                "linear_issue.comment resolved_dedupe_key raw=%s resolved=%s",
                 raw_dedupe_key,
                 dedupe_key,
             )
@@ -1245,7 +1323,11 @@ def linear_issue(args: dict[str, Any], **_kw) -> str:
         else:
             update_existing = bool(update_existing)
 
-        formatted_body = _format_comment_body(body, dedupe_key)
+        formatted_body = _format_comment_body(
+            body,
+            dedupe_key,
+            status_comment_state=status_comment_state,
+        )
         if dedupe_key and not comment_id and existing_comment is None:
             existing_comment = _find_comment_by_dedupe(issue, dedupe_key)
         if dedupe_key and not comment_id and existing_comment is None and legacy_family_comments:
@@ -1299,31 +1381,32 @@ def linear_issue(args: dict[str, Any], **_kw) -> str:
                     continue
                 _update_comment(legacy_comment_id, superseded_body)
                 superseded_comment_ids.append(legacy_comment_id)
-            return json.dumps(
-                {
-                    "success": True,
-                    "updated_existing": True,
-                    "issue_id": issue_id,
-                    "issue_identifier": issue.get("identifier"),
-                    "dedupe_key": dedupe_key,
-                    "superseded_comment_ids": superseded_comment_ids,
-                    "comment": comment,
-                },
-                ensure_ascii=False,
-            )
-
-        comment = _create_comment(issue_id, formatted_body)
-        return json.dumps(
-            {
+            response = {
                 "success": True,
-                "created": True,
+                "updated_existing": True,
                 "issue_id": issue_id,
                 "issue_identifier": issue.get("identifier"),
                 "dedupe_key": dedupe_key,
+                "superseded_comment_ids": superseded_comment_ids,
                 "comment": comment,
-            },
-            ensure_ascii=False,
-        )
+            }
+            if status_comment_state:
+                response["status_comment_state"] = status_comment_state
+            return json.dumps(response, ensure_ascii=False)
+
+        comment = _create_comment(issue_id, formatted_body)
+        response = {
+            "success": True,
+            "created": True,
+            "updated_existing": False,
+            "issue_id": issue_id,
+            "issue_identifier": issue.get("identifier"),
+            "dedupe_key": dedupe_key,
+            "comment": comment,
+        }
+        if status_comment_state:
+            response["status_comment_state"] = status_comment_state
+        return json.dumps(response, ensure_ascii=False)
 
     if action == "update_state":
         issue = _fetch_issue(issue_ref, comment_limit=1)
