@@ -33,6 +33,7 @@ _CTX_DAEMON_RECOVERY_LOCK = threading.Lock()
 _DEFAULT_DAEMON_URL = "http://127.0.0.1:19876"
 _DEFAULT_DATA_DIR = "~/.ctx-data"
 _DEFAULT_CTX_BINDING_STALE_HOURS = 12
+_ACTIVE_CODEX_HANDOFF_REASON = "ctx task handed off to delegated Codex run"
 _CTX_DAEMON_SERVICE_CANDIDATES = ("ctx-daemon.service", "ctx.service")
 _CTX_CLOSED_POOL_SIGNATURE = "attempted to acquire a connection on a closed pool"
 _CTX_RECOVERY_COOLDOWN_SECONDS = 10.0
@@ -182,6 +183,22 @@ def _set_binding_record_inactive(
     return changed
 
 
+def _set_binding_record_active(
+    record: Dict[str, Any],
+    *,
+    reason: str,
+    updated_at: Optional[str] = None,
+) -> bool:
+    updated_at = updated_at or _utcnow_iso()
+    changed = (not bool(record.get("active"))) or str(record.get("reason") or "") != reason
+    record["active"] = True
+    record["reason"] = reason
+    record["updated_at"] = updated_at
+    if "created_at" not in record:
+        record["created_at"] = updated_at
+    return changed
+
+
 def _open_session_db(*, state_db_path: Optional[Path] = None, bindings_path: Optional[Path] = None):
     db_path = Path(state_db_path).expanduser() if state_db_path is not None else _default_state_db_path(bindings_path)
     if not db_path.exists():
@@ -195,10 +212,84 @@ def _open_session_db(*, state_db_path: Optional[Path] = None, bindings_path: Opt
         return None
 
 
+def _load_active_codex_handoff_indexes(
+    *,
+    runs_path: Optional[Path] = None,
+    now: Optional[datetime] = None,
+) -> Dict[str, set[str]]:
+    indexes: Dict[str, set[str]] = {
+        "task_id": set(),
+        "ctx_session_id": set(),
+        "worktree_id": set(),
+        "worktree_path": set(),
+    }
+    try:
+        from tools.codex_delegate_tool import normalize_codex_runs
+    except Exception:
+        logger.debug("Failed to import Codex delegate helpers for ctx handoff detection", exc_info=True)
+        return indexes
+
+    try:
+        normalize_codex_runs(runs_path=runs_path, now=now)
+    except Exception:
+        logger.debug("Failed to normalize Codex runs before ctx handoff detection", exc_info=True)
+
+    resolved_runs_path = Path(runs_path).expanduser() if runs_path is not None else get_hermes_home() / "codex" / "runs.json"
+    if not resolved_runs_path.exists():
+        return indexes
+
+    try:
+        payload = json.loads(resolved_runs_path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.debug("Failed to load Codex runs from %s for ctx handoff detection", resolved_runs_path, exc_info=True)
+        return indexes
+
+    runs = payload.get("runs", {}) if isinstance(payload, dict) else {}
+    if not isinstance(runs, dict):
+        return indexes
+
+    for raw_record in runs.values():
+        if not isinstance(raw_record, dict):
+            continue
+        if str(raw_record.get("status") or "").strip().lower() not in {"running", "unknown"}:
+            continue
+        values = {
+            "task_id": str(raw_record.get("ctx_task_id") or "").strip(),
+            "ctx_session_id": str(raw_record.get("ctx_session_id") or "").strip(),
+            "worktree_id": str(raw_record.get("ctx_worktree_id") or "").strip(),
+            "worktree_path": str(_normalize_path(raw_record.get("ctx_worktree_path")) or "").strip(),
+        }
+        for key, value in values.items():
+            if value:
+                indexes[key].add(value)
+    return indexes
+
+
+def _binding_has_active_codex_handoff(
+    record: Dict[str, Any],
+    *,
+    active_codex_indexes: Optional[Dict[str, set[str]]] = None,
+) -> bool:
+    indexes = active_codex_indexes or {
+        "task_id": set(),
+        "ctx_session_id": set(),
+        "worktree_id": set(),
+        "worktree_path": set(),
+    }
+    candidates = {
+        "task_id": str(record.get("task_id") or "").strip(),
+        "ctx_session_id": str(record.get("ctx_session_id") or "").strip(),
+        "worktree_id": str(record.get("worktree_id") or "").strip(),
+        "worktree_path": str(_normalize_path(record.get("worktree_path")) or "").strip(),
+    }
+    return any(value and value in indexes.get(key, set()) for key, value in candidates.items())
+
+
 def _ctx_binding_retirement_reason(
     record: Dict[str, Any],
     *,
     session_db,
+    active_codex_indexes: Optional[Dict[str, set[str]]] = None,
     now: Optional[datetime] = None,
     stale_hours: int = _DEFAULT_CTX_BINDING_STALE_HOURS,
 ) -> Optional[str]:
@@ -208,6 +299,8 @@ def _ctx_binding_retirement_reason(
     worktree_path = record.get("worktree_path")
     if worktree_path and not Path(worktree_path).exists():
         return "ctx binding retired: worktree missing"
+    if _binding_has_active_codex_handoff(record, active_codex_indexes=active_codex_indexes):
+        return None
 
     session_id = str(record.get("session_id") or "").strip()
     if session_db and session_id:
@@ -249,6 +342,7 @@ def normalize_ctx_bindings(
     session_id: Optional[str] = None,
     bindings_path: Optional[Path] = None,
     state_db_path: Optional[Path] = None,
+    codex_runs_path: Optional[Path] = None,
     stale_hours: int = _DEFAULT_CTX_BINDING_STALE_HOURS,
     now: Optional[datetime] = None,
 ) -> Dict[str, str]:
@@ -259,6 +353,7 @@ def normalize_ctx_bindings(
     bindings_path = _ctx_bindings_path(bindings_path)
     session_db = _open_session_db(state_db_path=state_db_path, bindings_path=bindings_path)
     now = now or datetime.now(timezone.utc)
+    active_codex_indexes = _load_active_codex_handoff_indexes(runs_path=codex_runs_path, now=now)
     try:
         with _BINDINGS_LOCK:
             data = _load_bindings(bindings_path)
@@ -273,9 +368,18 @@ def normalize_ctx_bindings(
                 record = sessions.get(current_session_id)
                 if not isinstance(record, dict):
                     continue
+                if _binding_has_active_codex_handoff(record, active_codex_indexes=active_codex_indexes):
+                    if _set_binding_record_active(
+                        record,
+                        reason=_ACTIVE_CODEX_HANDOFF_REASON,
+                        updated_at=now.isoformat(),
+                    ):
+                        changed = True
+                    continue
                 reason = _ctx_binding_retirement_reason(
                     record,
                     session_db=session_db,
+                    active_codex_indexes=active_codex_indexes,
                     now=now,
                     stale_hours=stale_hours,
                 )
@@ -298,7 +402,13 @@ def normalize_ctx_bindings(
     return retired
 
 
-def retire_ctx_binding(session_id: str, *, reason: str) -> bool:
+def retire_ctx_binding(
+    session_id: str,
+    *,
+    reason: str,
+    preserve_codex_handoff: bool = False,
+    codex_runs_path: Optional[Path] = None,
+) -> bool:
     """Mark a persisted ctx binding inactive and clear its worktree override."""
 
     session_id = str(session_id or "").strip()
@@ -307,14 +417,27 @@ def retire_ctx_binding(session_id: str, *, reason: str) -> bool:
         return False
 
     changed = False
+    cleared_overrides: list[str] = []
+    active_codex_indexes = (
+        _load_active_codex_handoff_indexes(runs_path=codex_runs_path) if preserve_codex_handoff else None
+    )
     with _BINDINGS_LOCK:
         data = _load_bindings()
         record = data.get("sessions", {}).get(session_id)
-        if isinstance(record, dict) and _set_binding_record_inactive(record, reason=reason):
-            _save_bindings(data)
-            changed = True
+        if isinstance(record, dict):
+            if preserve_codex_handoff and _binding_has_active_codex_handoff(
+                record,
+                active_codex_indexes=active_codex_indexes,
+            ):
+                if _set_binding_record_active(record, reason=_ACTIVE_CODEX_HANDOFF_REASON):
+                    changed = True
+            elif _set_binding_record_inactive(record, reason=reason):
+                changed = True
+                cleared_overrides.append(session_id)
+            if changed:
+                _save_bindings(data)
 
-    _clear_binding_overrides([session_id])
+    _clear_binding_overrides(cleared_overrides)
     return changed
 
 

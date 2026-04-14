@@ -787,6 +787,7 @@ def evaluate_self_improvement_evidence(
     current = now or datetime.now(tz=timezone.utc)
     normalize_ctx_bindings(
         bindings_path=ctx_bindings_path,
+        codex_runs_path=codex_runs_path,
         stale_hours=active_stale_hours,
         now=current,
     )

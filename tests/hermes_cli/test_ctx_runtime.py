@@ -404,6 +404,85 @@ def test_normalize_ctx_bindings_deactivates_ended_cron_session(monkeypatch, tmp_
     assert record["sessions"][session_id]["reason"] == "ctx binding retired: session ended (cron_complete)"
 
 
+def test_normalize_ctx_bindings_keeps_ended_cron_session_active_during_codex_handoff(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    worktree = tmp_path / "ctx-data" / "worktrees" / "ws-1" / "wt-1"
+    worktree.mkdir(parents=True, exist_ok=True)
+    session_id = "cron_job-1_20260411_010203"
+    _write_binding_record(
+        tmp_path,
+        session_id,
+        {
+            "active": True,
+            "reason": "ctx task bound",
+            "session_id": session_id,
+            "platform": "cron",
+            "workspace_id": "ws-1",
+            "task_id": "task-1",
+            "worktree_id": "wt-1",
+            "worktree_path": str(worktree),
+            "source": "ctx-daemon",
+        },
+    )
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session(session_id, source="cron")
+        db.end_session(session_id, "cron_complete")
+    finally:
+        db.close()
+
+    monkeypatch.setattr(
+        ctx_runtime,
+        "_load_active_codex_handoff_indexes",
+        lambda **_kwargs: {"task_id": {"task-1"}, "ctx_session_id": set(), "worktree_id": set(), "worktree_path": set()},
+    )
+
+    retired = ctx_runtime.normalize_ctx_bindings()
+    record = json.loads((tmp_path / "ctx" / "session_bindings.json").read_text(encoding="utf-8"))
+
+    assert retired == {}
+    assert record["sessions"][session_id]["active"] is True
+    assert record["sessions"][session_id]["reason"] == ctx_runtime._ACTIVE_CODEX_HANDOFF_REASON
+
+
+def test_normalize_ctx_bindings_reactivates_retired_binding_during_codex_handoff(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    worktree = tmp_path / "ctx-data" / "worktrees" / "ws-1" / "wt-1"
+    worktree.mkdir(parents=True, exist_ok=True)
+    session_id = "cron_job-1_20260411_010203"
+    _write_binding_record(
+        tmp_path,
+        session_id,
+        {
+            "active": False,
+            "reason": "ctx binding retired: cron job finished",
+            "session_id": session_id,
+            "platform": "cron",
+            "workspace_id": "ws-1",
+            "task_id": "task-1",
+            "worktree_id": "wt-1",
+            "worktree_path": str(worktree),
+            "source": "ctx-daemon",
+        },
+    )
+
+    monkeypatch.setattr(
+        ctx_runtime,
+        "_load_active_codex_handoff_indexes",
+        lambda **_kwargs: {"task_id": {"task-1"}, "ctx_session_id": set(), "worktree_id": set(), "worktree_path": set()},
+    )
+
+    retired = ctx_runtime.normalize_ctx_bindings()
+    record = json.loads((tmp_path / "ctx" / "session_bindings.json").read_text(encoding="utf-8"))
+
+    assert retired == {}
+    assert record["sessions"][session_id]["active"] is True
+    assert record["sessions"][session_id]["reason"] == ctx_runtime._ACTIVE_CODEX_HANDOFF_REASON
+
+
 def test_normalize_ctx_bindings_deactivates_missing_worktree_and_clears_override(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.delenv("TERMINAL_CWD", raising=False)
@@ -545,6 +624,46 @@ def test_normalize_ctx_bindings_deactivates_stale_active_session(monkeypatch, tm
 
     assert retired == {session_id: "ctx binding retired: stale active binding (>12h)"}
     assert record["sessions"][session_id]["active"] is False
+
+
+def test_retire_ctx_binding_preserves_active_codex_handoff(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    worktree = tmp_path / "ctx-data" / "worktrees" / "ws-1" / "wt-1"
+    worktree.mkdir(parents=True, exist_ok=True)
+    session_id = "cron_job-1_20260411_010203"
+    _write_binding_record(
+        tmp_path,
+        session_id,
+        {
+            "active": True,
+            "reason": "ctx task bound",
+            "session_id": session_id,
+            "platform": "cron",
+            "workspace_id": "ws-1",
+            "task_id": "task-1",
+            "worktree_id": "wt-1",
+            "worktree_path": str(worktree),
+            "source": "ctx-daemon",
+        },
+    )
+
+    monkeypatch.setattr(
+        ctx_runtime,
+        "_load_active_codex_handoff_indexes",
+        lambda **_kwargs: {"task_id": {"task-1"}, "ctx_session_id": set(), "worktree_id": set(), "worktree_path": set()},
+    )
+
+    changed = ctx_runtime.retire_ctx_binding(
+        session_id,
+        reason="ctx binding retired: cron job finished",
+        preserve_codex_handoff=True,
+    )
+    record = json.loads((tmp_path / "ctx" / "session_bindings.json").read_text(encoding="utf-8"))
+
+    assert changed is True
+    assert record["sessions"][session_id]["active"] is True
+    assert record["sessions"][session_id]["reason"] == ctx_runtime._ACTIVE_CODEX_HANDOFF_REASON
 
 
 def test_maybe_bind_ctx_session_skips_inactive_persisted_binding(monkeypatch, tmp_path):

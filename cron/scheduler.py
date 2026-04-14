@@ -583,6 +583,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             retire_ctx_binding(
                 _cron_session_id,
                 reason="ctx binding retired: cron job finished",
+                preserve_codex_handoff=True,
             )
         except (Exception, KeyboardInterrupt) as e:
             logger.debug("Job '%s': failed to retire ctx binding: %s", job_id, e)
