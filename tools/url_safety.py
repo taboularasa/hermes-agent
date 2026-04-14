@@ -18,9 +18,13 @@ Limitations (documented, not fixable at pre-flight level):
 import ipaddress
 import logging
 import socket
+from collections.abc import Iterable
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
+
+IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
 
 # Hostnames that should always be blocked regardless of IP resolution
 _BLOCKED_HOSTNAMES = frozenset({
@@ -50,7 +54,48 @@ def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
 ALLOWED_SCHEMES = {"http", "https"}
 
 
-def is_safe_url(url: str) -> bool:
+def _split_private_allowlist(
+    allow_private_hosts: Iterable[str] | None,
+) -> tuple[set[str], set[IPAddress], tuple[IPNetwork, ...]]:
+    exact_hosts: set[str] = set()
+    exact_ips: set[IPAddress] = set()
+    networks: list[IPNetwork] = []
+
+    for raw_entry in allow_private_hosts or ():
+        entry = str(raw_entry or "").strip()
+        if not entry:
+            continue
+        try:
+            exact_ips.add(ipaddress.ip_address(entry))
+            continue
+        except ValueError:
+            pass
+        try:
+            networks.append(ipaddress.ip_network(entry, strict=False))
+            continue
+        except ValueError:
+            pass
+        exact_hosts.add(entry.casefold())
+
+    return exact_hosts, exact_ips, tuple(networks)
+
+
+def _is_allowlisted_private_target(
+    hostname: str,
+    ip: IPAddress,
+    *,
+    exact_hosts: set[str],
+    exact_ips: set[IPAddress],
+    networks: tuple[IPNetwork, ...],
+) -> bool:
+    if hostname in exact_hosts:
+        return True
+    if ip in exact_ips:
+        return True
+    return any(ip in network for network in networks)
+
+
+def is_safe_url(url: str, allow_private_hosts: Iterable[str] | None = None) -> bool:
     """Return True if the URL target is not a private/internal address.
 
     Resolves the hostname to an IP and checks against private ranges.
@@ -70,6 +115,8 @@ def is_safe_url(url: str) -> bool:
             logger.warning("Blocked request to internal hostname: %s", hostname)
             return False
 
+        exact_hosts, exact_ips, networks = _split_private_allowlist(allow_private_hosts)
+
         # Try to resolve and check IP
         try:
             addr_info = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
@@ -87,6 +134,18 @@ def is_safe_url(url: str) -> bool:
                 continue
 
             if _is_blocked_ip(ip):
+                if _is_allowlisted_private_target(
+                    hostname,
+                    ip,
+                    exact_hosts=exact_hosts,
+                    exact_ips=exact_ips,
+                    networks=networks,
+                ):
+                    logger.info(
+                        "Allowed private/internal address via explicit allowlist: %s -> %s",
+                        hostname, ip_str,
+                    )
+                    continue
                 logger.warning(
                     "Blocked request to private/internal address: %s -> %s",
                     hostname, ip_str,

@@ -1737,7 +1737,7 @@ def _benchmark_issue_defaults(benchmark_id: str) -> dict[str, Any]:
             "priority": 1,
             "target_surface": "Hermes evidence sources, scheduled jobs, and ontology freshness artifacts",
             "expected_effect": "Restore trust in the self-improvement agenda so Hermes can fund Growth and Capability work again.",
-            "verification": "Run `self_improvement_pipeline` or `self_improvement_benchmark` and confirm the reliability gate is healthy or meaningfully improved.",
+            "verification": "Run `self_improvement_pipeline` or `self_improvement_benchmark` and confirm the reliability gate is healthy or meaningfully improved. If the repair touched a user-visible surface, attach browser or screenshot evidence from the affected URL before claiming it is fixed.",
         },
         "execution_loop": {
             "title": "Increase self-improvement execution throughput",

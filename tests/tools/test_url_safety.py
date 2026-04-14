@@ -46,6 +46,42 @@ class TestIsSafeUrl:
         ]):
             assert is_safe_url("http://router.local") is False
 
+    def test_allowlisted_private_hostname_allowed(self):
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("100.72.243.76", 0)),
+        ]):
+            assert is_safe_url(
+                "http://journal.tailnet:4321",
+                allow_private_hosts=["journal.tailnet"],
+            ) is True
+
+    def test_allowlisted_private_ip_allowed(self):
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("100.72.243.76", 0)),
+        ]):
+            assert is_safe_url(
+                "http://100.72.243.76:4321",
+                allow_private_hosts=["100.72.243.76"],
+            ) is True
+
+    def test_allowlisted_private_cidr_allowed(self):
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("100.72.243.76", 0)),
+        ]):
+            assert is_safe_url(
+                "http://journal.tailnet:4321",
+                allow_private_hosts=["100.72.243.0/24"],
+            ) is True
+
+    def test_unrelated_allowlist_still_blocks_private_target(self):
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("100.72.243.76", 0)),
+        ]):
+            assert is_safe_url(
+                "http://100.72.243.76:4321",
+                allow_private_hosts=["127.0.0.1"],
+            ) is False
+
     def test_link_local_169_254_blocked(self):
         with patch("socket.getaddrinfo", return_value=[
             (2, 1, 6, "", ("169.254.169.254", 0)),
@@ -54,6 +90,12 @@ class TestIsSafeUrl:
 
     def test_metadata_google_internal_blocked(self):
         assert is_safe_url("http://metadata.google.internal/computeMetadata/v1/") is False
+
+    def test_metadata_google_internal_stays_blocked_even_if_allowlisted(self):
+        assert is_safe_url(
+            "http://metadata.google.internal/computeMetadata/v1/",
+            allow_private_hosts=["metadata.google.internal", "169.254.169.254/32"],
+        ) is False
 
     def test_ipv6_loopback_blocked(self):
         with patch("socket.getaddrinfo", return_value=[

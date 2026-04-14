@@ -35,6 +35,9 @@ Environment Variables:
   requires paid plan (default: "true")
 - BROWSERBASE_SESSION_TIMEOUT: Custom session timeout in milliseconds. Set to extend
   beyond project default. Common values: 600000 (10min), 1800000 (30min) (default: none)
+- HERMES_BROWSER_PRIVATE_HOST_ALLOWLIST: Comma-separated exact hosts, IPs, or CIDRs
+  that the browser may open even when they resolve to private/internal addresses.
+  Keep this limited to trusted local dogfood surfaces on the current host.
 
 Usage:
     from tools.browser_tool import browser_navigate, browser_snapshot, browser_click
@@ -95,6 +98,7 @@ _SANE_PATH = (
     "/opt/homebrew/bin:/opt/homebrew/sbin:"
     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 )
+_BROWSER_PRIVATE_HOST_ALLOWLIST_ENV = "HERMES_BROWSER_PRIVATE_HOST_ALLOWLIST"
 
 
 def _discover_homebrew_node_dirs() -> list[str]:
@@ -118,6 +122,15 @@ def _discover_homebrew_node_dirs() -> list[str]:
     except OSError:
         pass
     return dirs
+
+
+def _get_browser_private_host_allowlist() -> tuple[str, ...]:
+    raw = os.getenv(_BROWSER_PRIVATE_HOST_ALLOWLIST_ENV, "")
+    return tuple(entry.strip() for entry in raw.split(",") if entry.strip())
+
+
+def _is_safe_browser_url(url: str) -> bool:
+    return _is_safe_url(url, allow_private_hosts=_get_browser_private_host_allowlist())
 
 # Throttle screenshot cleanup to avoid repeated full directory scans.
 _last_screenshot_cleanup_by_dir: dict[str, float] = {}
@@ -1039,7 +1052,7 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
         JSON string with navigation result (includes stealth features info on first nav)
     """
     # SSRF protection — block private/internal addresses before navigating
-    if not _is_safe_url(url):
+    if not _is_safe_browser_url(url):
         return json.dumps({
             "success": False,
             "error": "Blocked: URL targets a private or internal address",
@@ -1081,7 +1094,7 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
         # Post-redirect SSRF check — if the browser followed a redirect to a
         # private/internal address, block the result so the model can't read
         # internal content via subsequent browser_snapshot calls.
-        if final_url and final_url != url and not _is_safe_url(final_url):
+        if final_url and final_url != url and not _is_safe_browser_url(final_url):
             # Navigate away to a blank page to prevent snapshot leaks
             _run_browser_command(effective_task_id, "open", ["about:blank"], timeout=10)
             return json.dumps({

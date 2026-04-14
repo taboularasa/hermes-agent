@@ -212,6 +212,13 @@ Do not treat the percentages as quotas. They are tie-break guidance after the re
 - If the top-scoring item is not concrete enough for Codex, keep it in planning state rather than forcing delegation.
 - If the opportunity is real but still ambiguous, prefer a strategic Slack discussion over speculative backlog churn.
 
+## Verification discipline
+
+- For user-visible repairs, treat the user-facing surface as the source of truth. Raw files, `curl`, API responses, or merged commits are not enough on their own.
+- Use the same URL or workflow the user reported, and prefer browser or screenshot evidence over inferred success.
+- If browser access is blocked, screenshot analysis fails, or the evidence conflicts, report the repair as not yet verified instead of claiming it is fixed.
+- When a user provides a screenshot that contradicts your other evidence, inspect the screenshot first and keep the issue open until the contradiction is resolved.
+
 ## Project maintenance rules
 
 - Keep at most one standing umbrella project for this loop unless there is a clear reason to split a large program out into its own project.

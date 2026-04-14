@@ -299,7 +299,7 @@ def test_browser_navigate_returns_policy_block(monkeypatch):
     from tools import browser_tool
 
     # Allow SSRF check to pass so the policy check is reached
-    monkeypatch.setattr(browser_tool, "_is_safe_url", lambda url: True)
+    monkeypatch.setattr(browser_tool, "_is_safe_url", lambda url, **kwargs: True)
     monkeypatch.setattr(
         browser_tool,
         "check_website_access",
