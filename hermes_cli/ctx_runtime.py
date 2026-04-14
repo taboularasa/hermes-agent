@@ -205,6 +205,10 @@ def _ctx_binding_retirement_reason(
     if not bool(record.get("active")):
         return None
 
+    existing_reason = str(record.get("reason") or "").strip()
+    if existing_reason.lower().startswith("ctx binding retired:"):
+        return existing_reason
+
     worktree_path = record.get("worktree_path")
     if worktree_path and not Path(worktree_path).exists():
         return "ctx binding retired: worktree missing"

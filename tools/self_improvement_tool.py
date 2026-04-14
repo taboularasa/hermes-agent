@@ -518,6 +518,29 @@ def _has_active_ctx_binding(indexes: Dict[str, Dict[str, list[Dict[str, Any]]]],
     return any(bool(record.get("active")) for record in records)
 
 
+def _codex_run_has_detached_ctx_worktree(record: Dict[str, Any]) -> bool:
+    ctx_worktree_path = str(record.get("ctx_worktree_path") or "").strip()
+    if not ctx_worktree_path:
+        return False
+
+    try:
+        ctx_worktree = Path(ctx_worktree_path).expanduser().resolve()
+    except Exception:
+        ctx_worktree = Path(ctx_worktree_path).expanduser()
+    if not ctx_worktree.exists():
+        return False
+
+    workdir = str(record.get("workdir") or "").strip()
+    if not workdir:
+        return True
+
+    try:
+        Path(workdir).expanduser().resolve().relative_to(ctx_worktree)
+        return True
+    except Exception:
+        return False
+
+
 def _issue_has_live_execution(
     issue: dict[str, Any],
     *,
@@ -634,17 +657,18 @@ def _find_planning_contradictions(
             )
         )
         if any((ctx_task_id, ctx_session_id, ctx_worktree_id, ctx_worktree_path)) and not ctx_binding_ok:
-            contradictions.append(
-                {
-                    "type": "codex_ctx_binding_missing",
-                    "message": "codex run expects an active ctx binding but none is active",
-                    "run_id": run_id,
-                    "ctx_task_id": ctx_task_id,
-                    "ctx_session_id": ctx_session_id,
-                    "ctx_worktree_id": ctx_worktree_id,
-                    "ctx_worktree_path": ctx_worktree_path,
-                }
-            )
+            if not _codex_run_has_detached_ctx_worktree(record):
+                contradictions.append(
+                    {
+                        "type": "codex_ctx_binding_missing",
+                        "message": "codex run expects an active ctx binding but none is active",
+                        "run_id": run_id,
+                        "ctx_task_id": ctx_task_id,
+                        "ctx_session_id": ctx_session_id,
+                        "ctx_worktree_id": ctx_worktree_id,
+                        "ctx_worktree_path": ctx_worktree_path,
+                    }
+                )
         if ctx_worktree_path and not Path(str(ctx_worktree_path)).exists():
             contradictions.append(
                 {
