@@ -95,10 +95,18 @@ def _seed_reward_policy(path: Path) -> Path:
             "guardrails": {
                 "max_active_issues_per_lane": 1,
                 "capability_budget_percent": 20,
+                "require_evidence_sources": True,
+                "capability_requires_healthy_lanes": ["maintenance", "growth"],
             },
             "lanes": {
                 "capability": {"default_budget_percent": 20},
             },
+            "evidence_sources": [
+                "journal_entries",
+                "codex_runs",
+                "ctx_bindings",
+                "ontology_intelligence",
+            ],
         },
     )
     return path
@@ -1432,18 +1440,101 @@ def test_self_improvement_pipeline_repairs_delegate_conflicts_and_upserts_top_is
     assert pipeline["top_candidate"]["benchmark_id"] == "reliability_gate"
     assert pipeline["strategic_conversation"]["selected"] is None
     assert pipeline["strategic_conversation"]["suppressed_reason"] == "reliability_gate_degraded"
+    assert "Evidence sources:" in linear_issue_tool._strip_marker(str(store["project"]["description"] or ""))
 
-    reliability_issue = next(
-        issue for issue in store["issues"]
-        if "issue:hermes-self-improvement:benchmark:reliability_gate" in str(issue.get("description") or "")
-    )
+    benchmark_issues = [
+        issue
+        for issue in store["issues"]
+        if "issue:hermes-self-improvement:benchmark:" in str(issue.get("description") or "")
+    ]
+    assert len(benchmark_issues) == 1
+
+    reliability_issue = benchmark_issues[0]
     assert reliability_issue["delegate"]["id"] == "user-hermes"
     assert reliability_issue["assignee"] is None
+    assert "Evidence sources:" in linear_issue_tool._strip_marker(str(reliability_issue["description"] or ""))
     assert any(
         str((linear_issue_tool._parse_marker(comment["body"]) or {}).get("dedupe_key") or "")
         == f"status:{reliability_issue['identifier']}"
         for comment in reliability_issue["comments"]
     )
+
+
+def test_benchmark_issue_specs_require_evidence_sources_and_suppress_capability_until_prerequisite_lanes_are_healthy(
+    tmp_path,
+):
+    benchmark = {
+        "score": 58.0,
+        "direction": "negative",
+        "trend": "regressing",
+        "critical_failures": ["execution_loop"],
+        "gate": {
+            "status": "healthy",
+            "provenance": {
+                "items": [
+                    {
+                        "tag": "journal",
+                        "path": str(tmp_path / "journal.json"),
+                        "status": "fresh",
+                    },
+                    {
+                        "tag": "codex",
+                        "path": str(tmp_path / "runs.json"),
+                        "status": "fresh",
+                    },
+                    {
+                        "tag": "ctx",
+                        "path": str(tmp_path / "session_bindings.json"),
+                        "status": "fresh",
+                    },
+                    {
+                        "tag": "ontology",
+                        "path": str(tmp_path / "ontology"),
+                        "status": "fresh",
+                    },
+                ],
+                "summary_markdown": "Evidence provenance:\n- [journal] status=fresh",
+            },
+        },
+        "benchmarks": [
+            {
+                "id": "execution_loop",
+                "status": "fail",
+                "score": 0.4,
+                "weight": 15,
+                "detail": "No completed Codex runs landed in the window.",
+                "critical": True,
+            },
+            {
+                "id": "recent_delivery_outcomes",
+                "status": "fail",
+                "score": 0.35,
+                "weight": 5,
+                "detail": "No completed Linear issues landed in the window.",
+                "critical": False,
+            },
+            {
+                "id": "ontology_readiness",
+                "status": "fail",
+                "score": 0.25,
+                "weight": 5,
+                "detail": "Ontology artifacts are not ready for new capability work.",
+                "critical": False,
+            },
+        ],
+    }
+    reward_policy_path = _seed_reward_policy(tmp_path / "epoch.yaml")
+    reward_policy = yaml.safe_load(reward_policy_path.read_text(encoding="utf-8"))
+
+    specs = self_improvement_tool._benchmark_issue_specs(
+        benchmark,
+        candidate_limit=5,
+        reward_policy=reward_policy,
+    )
+
+    assert [item["benchmark_id"] for item in specs] == ["execution_loop"]
+    assert "Evidence sources:" in specs[0]["description"]
+    assert f"- journal: {tmp_path / 'journal.json'} (fresh)" in specs[0]["description"]
 
 
 def test_self_improvement_pipeline_demotes_started_issue_without_live_execution(monkeypatch, tmp_path):

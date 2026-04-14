@@ -989,6 +989,192 @@ def _load_reward_policy(path: Optional[Path] = None) -> dict[str, Any]:
     return payload
 
 
+def _normalize_lane_name(value: Any) -> str:
+    normalized = str(value or "").strip().casefold()
+    if normalized == "maintenance":
+        return "Maintenance"
+    if normalized == "growth":
+        return "Growth"
+    if normalized == "capability":
+        return "Capability"
+    return ""
+
+
+def _configured_evidence_sources(reward_policy: dict[str, Any]) -> list[str]:
+    raw_sources = reward_policy.get("evidence_sources")
+    if not isinstance(raw_sources, list):
+        return []
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in raw_sources:
+        text = str(item).strip()
+        if not text:
+            continue
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(text)
+    return deduped
+
+
+def _benchmark_provenance_items(benchmark: dict[str, Any]) -> list[dict[str, Any]]:
+    provenance = (benchmark.get("gate") or {}).get("provenance") or {}
+    items = provenance.get("items")
+    return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+
+def _requires_evidence_sources(reward_policy: dict[str, Any]) -> bool:
+    guardrails = reward_policy.get("guardrails")
+    if not isinstance(guardrails, dict):
+        return False
+    return bool(guardrails.get("require_evidence_sources"))
+
+
+def _format_issue_evidence_sources(
+    benchmark: dict[str, Any],
+    reward_policy: dict[str, Any],
+) -> list[str]:
+    if not _requires_evidence_sources(reward_policy):
+        return []
+
+    lines: list[str] = []
+    seen: set[str] = set()
+    for item in _benchmark_provenance_items(benchmark):
+        tag = str(item.get("tag") or "").strip()
+        if not tag:
+            continue
+        path = str(item.get("path") or "").strip()
+        status = str(item.get("status") or "").strip()
+        line = f"{tag}: {path}" if path else tag
+        if status:
+            line += f" ({status})"
+        key = line.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.append(f"- {line}")
+
+    if lines:
+        return lines
+
+    for source in _configured_evidence_sources(reward_policy):
+        key = source.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.append(f"- {source}")
+    return lines
+
+
+def _format_project_evidence_summary(
+    benchmark: dict[str, Any],
+    reward_policy: dict[str, Any],
+) -> str:
+    if not _requires_evidence_sources(reward_policy):
+        return ""
+
+    labels: list[str] = []
+    seen: set[str] = set()
+    for item in _benchmark_provenance_items(benchmark):
+        tag = str(item.get("tag") or "").strip()
+        if not tag:
+            continue
+        key = tag.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        labels.append(tag)
+
+    if not labels:
+        labels = _configured_evidence_sources(reward_policy)
+
+    if not labels:
+        return ""
+
+    if len(labels) > 4:
+        labels = [*labels[:4], f"+{len(labels) - 4} more"]
+    return "Evidence sources: " + ", ".join(labels) + "."
+
+
+def _lane_health_summary(benchmark: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    buckets: dict[str, dict[str, Any]] = {}
+    for item in benchmark.get("benchmarks", []):
+        if not isinstance(item, dict):
+            continue
+        benchmark_id = str(item.get("id") or "").strip()
+        if not benchmark_id:
+            continue
+        lane = _normalize_lane_name(_benchmark_issue_defaults(benchmark_id).get("lane"))
+        if not lane:
+            continue
+        bucket = buckets.setdefault(
+            lane,
+            {"weighted_score": 0.0, "total_weight": 0, "failing_ids": []},
+        )
+        weight = max(1, int(item.get("weight") or 0))
+        score = max(0.0, min(1.0, float(item.get("score") or 0.0)))
+        bucket["weighted_score"] += score * weight
+        bucket["total_weight"] += weight
+        if str(item.get("status") or "") != "pass":
+            bucket["failing_ids"].append(benchmark_id)
+
+    summary: dict[str, dict[str, Any]] = {}
+    for lane, bucket in buckets.items():
+        lane_score = (
+            float(bucket["weighted_score"]) / int(bucket["total_weight"])
+            if int(bucket["total_weight"])
+            else 1.0
+        )
+        lane_status = _check_status(lane_score)
+        summary[lane] = {
+            "score": round(lane_score, 3),
+            "status": lane_status,
+            "healthy": lane_status == "pass",
+            "failing_ids": list(bucket["failing_ids"]),
+        }
+    return summary
+
+
+def _capability_prerequisite_lanes(reward_policy: dict[str, Any]) -> list[str]:
+    guardrails = reward_policy.get("guardrails")
+    if not isinstance(guardrails, dict):
+        return ["Maintenance", "Growth"]
+
+    raw_value = guardrails.get("capability_requires_healthy_lanes")
+    if raw_value is False:
+        return []
+    if isinstance(raw_value, list):
+        lanes = [_normalize_lane_name(item) for item in raw_value]
+        return [lane for lane in lanes if lane]
+    return ["Maintenance", "Growth"]
+
+
+def _capability_budget_guardrail(
+    benchmark: dict[str, Any],
+    reward_policy: dict[str, Any],
+) -> dict[str, Any]:
+    required_lanes = _capability_prerequisite_lanes(reward_policy)
+    if not required_lanes:
+        return {
+            "allowed": True,
+            "required_lanes": [],
+            "unhealthy_lanes": [],
+            "lane_health": _lane_health_summary(benchmark),
+        }
+
+    lane_health = _lane_health_summary(benchmark)
+    unhealthy_lanes = [
+        lane for lane in required_lanes if not bool((lane_health.get(lane) or {}).get("healthy"))
+    ]
+    return {
+        "allowed": not unhealthy_lanes,
+        "required_lanes": required_lanes,
+        "unhealthy_lanes": unhealthy_lanes,
+        "lane_health": lane_health,
+    }
+
+
 def _load_benchmark_history(path: Path) -> dict[str, Any]:
     payload = _load_json(path)
     if not isinstance(payload, dict):
@@ -1838,13 +2024,17 @@ def _benchmark_issue_specs(
     benchmark: dict[str, Any],
     *,
     candidate_limit: int,
+    reward_policy: Optional[dict[str, Any]] = None,
 ) -> list[dict[str, Any]]:
+    reward_policy = reward_policy or {}
     regressions = {
         str(item.get("id") or "")
         for item in benchmark.get("regressions", [])
         if isinstance(item, dict) and item.get("id")
     }
     gate_status = str((benchmark.get("gate") or {}).get("status") or "")
+    capability_guardrail = _capability_budget_guardrail(benchmark, reward_policy)
+    evidence_source_lines = _format_issue_evidence_sources(benchmark, reward_policy)
     candidates: list[dict[str, Any]] = []
 
     for item in benchmark.get("benchmarks", []):
@@ -1860,6 +2050,8 @@ def _benchmark_issue_specs(
 
         defaults = _benchmark_issue_defaults(benchmark_id)
         lane = str(defaults.get("lane") or "Capability")
+        if lane == "Capability" and not capability_guardrail["allowed"]:
+            continue
         if gate_status == "degraded":
             lane = "Maintenance"
 
@@ -1887,6 +2079,14 @@ def _benchmark_issue_specs(
         ]
         if benchmark_id in regressions:
             description_lines.append("- this check regressed versus the previous benchmark run")
+        if evidence_source_lines:
+            description_lines.extend(
+                [
+                    "",
+                    "Evidence sources:",
+                    *evidence_source_lines,
+                ]
+            )
         description_lines.extend(
             [
                 "",
@@ -1931,7 +2131,24 @@ def _benchmark_issue_specs(
             str(item.get("benchmark_id") or ""),
         ),
     )
-    return ordered[: max(1, int(candidate_limit or DEFAULT_SELF_IMPROVEMENT_CANDIDATE_LIMIT))]
+    per_lane_limit = max(
+        1,
+        int(
+            ((reward_policy.get("guardrails") or {}).get("max_active_issues_per_lane") or 1)
+        ),
+    )
+    limit = max(1, int(candidate_limit or DEFAULT_SELF_IMPROVEMENT_CANDIDATE_LIMIT))
+    selected: list[dict[str, Any]] = []
+    lane_counts: dict[str, int] = {}
+    for item in ordered:
+        lane = str(item.get("lane") or "").strip() or "Capability"
+        if lane_counts.get(lane, 0) >= per_lane_limit:
+            continue
+        selected.append(item)
+        lane_counts[lane] = lane_counts.get(lane, 0) + 1
+        if len(selected) >= limit:
+            break
+    return selected
 
 
 def _select_contract_facing_upgrade_target(ontology_context: dict[str, Any]) -> Optional[dict[str, Any]]:
@@ -1957,10 +2174,12 @@ def _build_ontology_fallback_candidate(
     *,
     benchmark: dict[str, Any],
     ontology_context: dict[str, Any],
+    reward_policy: Optional[dict[str, Any]] = None,
 ) -> Optional[dict[str, Any]]:
     if str((benchmark.get("gate") or {}).get("status") or "") != "healthy":
         return None
-    if _benchmark_issue_specs(benchmark, candidate_limit=1):
+    reward_policy = reward_policy or {}
+    if _benchmark_issue_specs(benchmark, candidate_limit=1, reward_policy=reward_policy):
         return None
 
     reliability = ontology_context.get("reliability") or {}
@@ -2039,16 +2258,23 @@ def _build_ontology_fallback_candidate(
         "",
         "Evidence:",
         *[f"- {item}" for item in evidence],
-        "",
-        "Target repo or surface:",
-        target_surface,
-        "",
-        "Verification expectation:",
-        verification,
-        "",
-        "Expected effect:",
-        expected_effect,
     ]
+    evidence_source_lines = _format_issue_evidence_sources(benchmark, reward_policy)
+    if evidence_source_lines:
+        description_lines.extend(["", "Evidence sources:", *evidence_source_lines])
+    description_lines.extend(
+        [
+            "",
+            "Target repo or surface:",
+            target_surface,
+            "",
+            "Verification expectation:",
+            verification,
+            "",
+            "Expected effect:",
+            expected_effect,
+        ]
+    )
 
     return {
         "candidate_source": "ontology_fallback",
@@ -2725,6 +2951,8 @@ def _ensure_self_improvement_linear_surface(
     codex_payload: Any,
     ctx_payload: Any,
     auto_repair_linear: bool,
+    benchmark: dict[str, Any],
+    reward_policy: dict[str, Any],
 ) -> dict[str, Any]:
     try:
         from tools import linear_issue_tool as linear_tool
@@ -2747,9 +2975,18 @@ def _ensure_self_improvement_linear_surface(
                     "action": "project_upsert",
                     "name": project_name,
                     "description": (
-                        "Benchmark-driven Hermes self-improvement work that improves "
-                        "the reliability floor, current epoch objective, and durable "
-                        "local Codex delivery."
+                        "\n".join(
+                            part
+                            for part in (
+                                (
+                                    "Benchmark-driven Hermes self-improvement work that improves "
+                                    "the reliability floor, current epoch objective, and durable "
+                                    "local Codex delivery."
+                                ),
+                                _format_project_evidence_summary(benchmark, reward_policy),
+                            )
+                            if part
+                        )
                     ),
                     "team_key": resolved_team_key,
                     "dedupe_key": DEFAULT_SELF_IMPROVEMENT_PROJECT_DEDUPE_KEY,
@@ -2852,6 +3089,7 @@ def _manage_benchmark_issues(
     benchmark: dict[str, Any],
     candidate_limit: int,
     auto_close_resolved: bool,
+    reward_policy: dict[str, Any],
 ) -> dict[str, Any]:
     try:
         from tools import linear_issue_tool as linear_tool
@@ -2878,7 +3116,11 @@ def _manage_benchmark_issues(
     }
 
     managed_issues: list[dict[str, Any]] = []
-    for spec in _benchmark_issue_specs(benchmark, candidate_limit=candidate_limit):
+    for spec in _benchmark_issue_specs(
+        benchmark,
+        candidate_limit=candidate_limit,
+        reward_policy=reward_policy,
+    ):
         existing_issue = issues_by_benchmark_id.get(spec["benchmark_id"])
         args: dict[str, Any] = {
             "action": "issue_upsert",
@@ -2998,6 +3240,7 @@ def _select_pipeline_top_candidate(
     *,
     benchmark: dict[str, Any],
     issues_by_benchmark_id: dict[str, dict[str, Any]],
+    reward_policy: Optional[dict[str, Any]] = None,
 ) -> Optional[dict[str, Any]]:
     for spec in _benchmark_issue_specs(
         benchmark,
@@ -3005,6 +3248,7 @@ def _select_pipeline_top_candidate(
             len(issues_by_benchmark_id),
             DEFAULT_SELF_IMPROVEMENT_CANDIDATE_LIMIT,
         ),
+        reward_policy=reward_policy,
     ):
         issue = issues_by_benchmark_id.get(spec["benchmark_id"])
         if not isinstance(issue, dict) or not issue:
@@ -3072,6 +3316,8 @@ def evaluate_self_improvement_pipeline(
         codex_payload=_load_json(codex_runs_path),
         ctx_payload=_load_json(ctx_bindings_path),
         auto_repair_linear=auto_repair_linear,
+        benchmark=benchmark_before,
+        reward_policy=reward_policy,
     )
 
     benchmark_for_issue_management = benchmark_before
@@ -3104,6 +3350,7 @@ def evaluate_self_improvement_pipeline(
             benchmark=benchmark_for_issue_management,
             candidate_limit=max(1, int(candidate_limit or DEFAULT_SELF_IMPROVEMENT_CANDIDATE_LIMIT)),
             auto_close_resolved=auto_close_resolved,
+            reward_policy=reward_policy,
         )
 
     benchmark_after = evaluate_self_improvement_benchmark(
@@ -3130,12 +3377,14 @@ def evaluate_self_improvement_pipeline(
     top_candidate = _select_pipeline_top_candidate(
         benchmark=benchmark_after,
         issues_by_benchmark_id=issue_management.get("issues_by_benchmark_id", {}),
+        reward_policy=reward_policy,
     )
     fallback_error = None
     if top_candidate is None:
         fallback_candidate = _build_ontology_fallback_candidate(
             benchmark=benchmark_after,
             ontology_context=ontology_context,
+            reward_policy=reward_policy,
         )
         if fallback_candidate is not None:
             top_candidate, fallback_error = _realize_ontology_fallback_candidate(
