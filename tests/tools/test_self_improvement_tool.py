@@ -1,4 +1,5 @@
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -725,6 +726,66 @@ def test_evaluate_self_improvement_evidence_detects_planning_contradictions(tmp_
     assert gate["status"] == "degraded"
     assert "planning contradictions detected" in gate["contradictions"]
     assert gate["planning_contradictions"]
+
+
+def test_evaluate_self_improvement_evidence_detects_plan_vs_runtime_contradictions(tmp_path):
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(journal_path, {"entries": [{"occurredAt": recent}]})
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_plan_runtime_mismatch": {
+                    "run_id": "codex_plan_runtime_mismatch",
+                    "status": "running",
+                    "pid": os.getpid(),
+                    "started_at": recent,
+                    "ctx_task_id": "task-plan",
+                    "ctx_worktree_path": str(tmp_path / "missing-worktree"),
+                    "prompt": "\n".join(
+                        [
+                            "Commitments:",
+                            "- keep the ctx binding active until the run finishes",
+                            "Assumptions:",
+                            "- an active ctx binding is available for this task",
+                            "- the ctx worktree exists on disk",
+                        ]
+                    ),
+                }
+            }
+        },
+    )
+    _write_json(
+        ctx_path,
+        {"sessions": {}},
+    )
+
+    gate = self_improvement_tool.evaluate_self_improvement_evidence(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        now=now,
+    )
+
+    contradiction_types = {
+        item["type"]
+        for item in gate["planning_contradictions"]
+        if item.get("run_id") == "codex_plan_runtime_mismatch"
+    }
+
+    assert gate["status"] == "degraded"
+    assert "planning contradictions detected" in gate["contradictions"]
+    assert "plan_commitment_active_ctx_binding_missing" in contradiction_types
+    assert "plan_assumption_active_ctx_binding_missing" in contradiction_types
+    assert "plan_assumption_ctx_worktree_missing" in contradiction_types
 
 
 def test_evaluate_self_improvement_evidence_restores_retired_ctx_binding_for_active_codex_handoff(
