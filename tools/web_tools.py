@@ -835,152 +835,6 @@ def _normalize_provider_results(provider: str, response_data: dict) -> list[dict
     return normalized
 
 
-def web_search_matrix_tool(query: str, limit: int = 5, providers: Optional[List[str]] = None) -> str:
-    """Search across all available web providers and fuse the evidence.
-
-    This is intended for higher-rigor research tasks where Hermes should compare
-    multiple search providers instead of trusting a single configured backend.
-    """
-    debug_call_data = {
-        "parameters": {
-            "query": query,
-            "limit": limit,
-            "providers": providers or [],
-        },
-        "error": None,
-        "results_count": 0,
-        "final_response_size": 0,
-    }
-
-    try:
-        from tools.interrupt import is_interrupted
-        if is_interrupted():
-            return json.dumps({"error": "Interrupted", "success": False})
-
-        provider_status = get_web_provider_status()
-        requested = [str(provider).strip().lower() for provider in (providers or []) if str(provider).strip()]
-        if not requested or "all" in requested:
-            requested = list(provider_status.get("available_providers", []))
-        else:
-            requested = [provider for provider in requested if provider in WEB_PROVIDER_ENV_KEYS]
-
-        available_requested = [provider for provider in requested if _provider_is_available(provider)]
-        missing_requested = [provider for provider in requested if provider not in available_requested]
-        if not available_requested:
-            payload = {
-                "success": False,
-                "error": "No configured web search providers are available for web_search_matrix.",
-                "provider_status": provider_status,
-                "requested_providers": requested,
-            }
-            result_json = json.dumps(payload, ensure_ascii=False)
-            debug_call_data["error"] = payload["error"]
-            debug_call_data["final_response_size"] = len(result_json)
-            _debug.log_call("web_search_matrix_tool", debug_call_data)
-            _debug.save()
-            return result_json
-
-        provider_dispatch = {
-            "parallel": _parallel_search,
-            "exa": _exa_search,
-            "tavily": _tavily_search,
-            "firecrawl": _firecrawl_search,
-        }
-
-        provider_results: dict[str, dict[str, Any]] = {}
-        fused_index: dict[str, dict[str, Any]] = {}
-
-        for provider in available_requested:
-            try:
-                response_data = provider_dispatch[provider](query, limit)
-                normalized = _normalize_provider_results(provider, response_data)
-                provider_results[provider] = {
-                    "success": True,
-                    "result_count": len(normalized),
-                    "results": normalized,
-                }
-                for item in normalized:
-                    key = _canonicalize_result_url(item["url"]) or item["url"] or f"{provider}:{item['position']}"
-                    entry = fused_index.setdefault(
-                        key,
-                        {
-                            "url": item["url"],
-                            "title": item["title"],
-                            "description": item["description"],
-                            "providers": [],
-                            "positions": {},
-                        },
-                    )
-                    if item["provider"] not in entry["providers"]:
-                        entry["providers"].append(item["provider"])
-                    entry["positions"][item["provider"]] = item["position"]
-                    if not entry.get("title") and item["title"]:
-                        entry["title"] = item["title"]
-                    if not entry.get("description") and item["description"]:
-                        entry["description"] = item["description"]
-            except Exception as exc:
-                provider_results[provider] = {
-                    "success": False,
-                    "result_count": 0,
-                    "error": str(exc),
-                    "results": [],
-                }
-
-        fused_results = []
-        for entry in fused_index.values():
-            provider_hits = len(entry["providers"])
-            avg_position = sum(entry["positions"].values()) / max(1, provider_hits)
-            fused_results.append(
-                {
-                    "url": entry["url"],
-                    "title": entry["title"],
-                    "description": entry["description"],
-                    "providers": sorted(entry["providers"]),
-                    "provider_hits": provider_hits,
-                    "positions": entry["positions"],
-                    "position": min(entry["positions"].values()) if entry["positions"] else None,
-                    "_avg_position": avg_position,
-                }
-            )
-
-        fused_results.sort(
-            key=lambda item: (
-                -int(item.get("provider_hits") or 0),
-                float(item.get("_avg_position") or 999.0),
-                str(item.get("title") or ""),
-            )
-        )
-        trimmed_results = []
-        for item in fused_results[:limit]:
-            payload = dict(item)
-            payload.pop("_avg_position", None)
-            trimmed_results.append(payload)
-
-        response_payload = {
-            "success": True,
-            "query": query,
-            "strategy": "all_available",
-            "data": {"web": trimmed_results},
-            "provider_status": provider_status,
-            "providers_used": available_requested,
-            "providers_missing": missing_requested,
-            "provider_results": provider_results,
-        }
-        result_json = json.dumps(response_payload, indent=2, ensure_ascii=False)
-        debug_call_data["results_count"] = len(trimmed_results)
-        debug_call_data["final_response_size"] = len(result_json)
-        _debug.log_call("web_search_matrix_tool", debug_call_data)
-        _debug.save()
-        return result_json
-
-    except Exception as e:
-        error_msg = f"Error searching across provider matrix: {str(e)}"
-        debug_call_data["error"] = error_msg
-        _debug.log_call("web_search_matrix_tool", debug_call_data)
-        _debug.save()
-        return json.dumps({"error": error_msg, "success": False}, ensure_ascii=False)
-
-
 async def _parallel_extract(urls: List[str]) -> List[Dict[str, Any]]:
     """Extract content from URLs using the Parallel async SDK.
 
@@ -1073,44 +927,6 @@ def web_search_tool(query: str, limit: int = 5, user_task: Optional[str] = None)
         from tools.interrupt import is_interrupted
         if is_interrupted():
             return json.dumps({"error": "Interrupted", "success": False})
-
-        lowered_query = (query or "").strip().lower()
-        lowered_user_task = (user_task or "").strip().lower()
-        matrix_scope_text = " ".join(part for part in (lowered_query, lowered_user_task) if part)
-        matrix_keywords = (
-            "ontology",
-            "business domain",
-            "market research",
-            "consulting domain",
-            "competency question",
-            "competency-question",
-            "vertical",
-        )
-        provider_status = get_web_provider_status()
-        if (
-            any(keyword in matrix_scope_text for keyword in matrix_keywords)
-            and len(provider_status.get("available_providers", [])) > 1
-        ):
-            matrix_payload = json.loads(
-                web_search_matrix_tool(query=query, limit=limit)
-            )
-            if isinstance(matrix_payload, dict):
-                matrix_payload["delegated_from"] = "web_search"
-                matrix_payload["recommended_tool"] = "web_search_matrix"
-                matrix_payload.setdefault(
-                    "note",
-                    "Ontology and business-domain research was auto-upgraded to the provider matrix.",
-                )
-            result_json = json.dumps(matrix_payload, ensure_ascii=False)
-            debug_call_data["results_count"] = len(
-                matrix_payload.get("data", {}).get("web", [])
-                if isinstance(matrix_payload, dict)
-                else []
-            )
-            debug_call_data["final_response_size"] = len(result_json)
-            _debug.log_call("web_search_tool", debug_call_data)
-            _debug.save()
-            return result_json
 
         # Dispatch to the configured backend
         backend = _get_backend()
@@ -2035,9 +1851,7 @@ from tools.registry import registry
 WEB_SEARCH_SCHEMA = {
     "name": "web_search",
     "description": (
-        "Search the web for information on any topic using a single backend. "
-        "For ontology business-domain research, market research, or any task where comparing provider overlap matters, "
-        "use web_search_matrix instead."
+        "Search the web for information on any topic using a single backend."
     ),
     "parameters": {
         "type": "object",
@@ -2046,39 +1860,6 @@ WEB_SEARCH_SCHEMA = {
                 "type": "string",
                 "description": "The search query to look up on the web"
             }
-        },
-        "required": ["query"]
-    }
-}
-
-WEB_SEARCH_MATRIX_SCHEMA = {
-    "name": "web_search_matrix",
-    "description": (
-        "Search across all configured web-search providers and fuse the results. "
-        "This is the canonical first step for higher-rigor research where provider overlap and novelty matter, "
-        "such as ontology domain discovery or market research. Do not substitute plain web_search when provider comparison matters."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": "The search query to look up across the provider matrix"
-            },
-            "limit": {
-                "type": "integer",
-                "description": "Maximum number of fused results to return",
-                "minimum": 1,
-                "maximum": 10,
-            },
-            "providers": {
-                "type": "array",
-                "description": "Optional provider subset to use; defaults to all available providers.",
-                "items": {
-                    "type": "string",
-                    "enum": ["all", "parallel", "exa", "tavily", "firecrawl"],
-                },
-            },
         },
         "required": ["query"]
     }
@@ -2113,19 +1894,6 @@ registry.register(
     check_fn=check_web_api_key,
     requires_env=["EXA_API_KEY", "PARALLEL_API_KEY", "FIRECRAWL_API_KEY", "TAVILY_API_KEY"],
     emoji="🔍",
-)
-registry.register(
-    name="web_search_matrix",
-    toolset="web",
-    schema=WEB_SEARCH_MATRIX_SCHEMA,
-    handler=lambda args, **kw: web_search_matrix_tool(
-        args.get("query", ""),
-        limit=max(1, min(int(args.get("limit") or 5), 10)),
-        providers=args.get("providers") if isinstance(args.get("providers"), list) else None,
-    ),
-    check_fn=check_web_api_key,
-    requires_env=["EXA_API_KEY", "PARALLEL_API_KEY", "FIRECRAWL_API_KEY", "TAVILY_API_KEY"],
-    emoji="🧭",
 )
 registry.register(
     name="web_extract",

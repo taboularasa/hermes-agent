@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# HADTO-PATCH: security
 """File Tools Module - LLM agent file manipulation tools."""
 
 import errno

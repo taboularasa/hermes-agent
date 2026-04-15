@@ -1,3 +1,4 @@
+# HADTO-PATCH: security
 """SMS (Twilio) platform adapter.
 
 Connects to the Twilio REST API for outbound SMS and runs an aiohttp

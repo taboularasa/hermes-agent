@@ -1,3 +1,4 @@
+# HADTO-PATCH: process registry checkpoint recovery
 """
 Process Registry -- In-memory registry for managed background processes.
 

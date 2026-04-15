@@ -1,3 +1,4 @@
+# HADTO-PATCH: security
 """Built-in boot-md hook — run ~/.hermes/BOOT.md on gateway startup.
 
 This hook is always registered. It silently skips if no BOOT.md exists.

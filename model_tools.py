@@ -154,11 +154,6 @@ def _discover_tools():
         "tools.clarify_tool",
         "tools.code_execution_tool",
         "tools.delegate_tool",
-        "tools.codex_delegate_tool",
-        "tools.linear_issue_tool",
-        "tools.workspace_backlog_tool",
-        "tools.ontology_context_tool",
-        "tools.self_improvement_tool",
         "tools.process_registry",
         "tools.send_message_tool",
         "tools.honcho_tools",
@@ -207,7 +202,7 @@ _last_resolved_tool_names: List[str] = []
 # =============================================================================
 
 _LEGACY_TOOLSET_MAP = {
-    "web_tools": ["web_search", "web_search_matrix", "web_extract"],
+    "web_tools": ["web_search", "web_extract"],
     "terminal_tools": ["terminal"],
     "vision_tools": ["vision_analyze"],
     "moa_tools": ["mixture_of_agents"],

@@ -1,3 +1,4 @@
+# HADTO-PATCH: ctx.rs integration
 """ctx-native runtime helpers for Hermes coding sessions.
 
 This module binds Hermes coding sessions to ctx-managed tasks and worktrees.
@@ -15,6 +16,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -225,7 +227,7 @@ def _load_active_codex_handoff_indexes(
         "worktree_path": set(),
     }
     try:
-        from tools.codex_delegate_tool import normalize_codex_runs
+        normalize_codex_runs = _load_normalize_codex_runs()
     except Exception:
         logger.debug("Failed to import Codex delegate helpers for ctx handoff detection", exc_info=True)
         return indexes
@@ -265,6 +267,29 @@ def _load_active_codex_handoff_indexes(
             if value:
                 indexes[key].add(value)
     return indexes
+
+
+def _load_normalize_codex_runs():
+    """Load Codex run normalization from the Hadto plugin or legacy core path."""
+    try:
+        from hadto_hermes_plugin.tools.codex_delegate import normalize_codex_runs
+
+        return normalize_codex_runs
+    except ImportError:
+        plugin_root = get_hermes_home() / "plugins" / "hadto"
+        plugin_root_str = str(plugin_root)
+        if plugin_root.exists() and plugin_root_str not in sys.path:
+            sys.path.insert(0, plugin_root_str)
+            try:
+                from hadto_hermes_plugin.tools.codex_delegate import normalize_codex_runs
+
+                return normalize_codex_runs
+            except ImportError:
+                pass
+
+    from tools.codex_delegate_tool import normalize_codex_runs
+
+    return normalize_codex_runs
 
 
 def _binding_has_active_codex_handoff(

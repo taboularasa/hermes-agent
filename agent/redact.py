@@ -1,3 +1,4 @@
+# HADTO-PATCH: security
 """Regex-based secret redaction for logs and tool output.
 
 Applies pattern matching to mask API keys, tokens, and credentials

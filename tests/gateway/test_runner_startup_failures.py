@@ -101,12 +101,12 @@ async def test_runner_startup_resumes_interrupted_codex_runs(monkeypatch, tmp_pa
     runner = GatewayRunner(config)
     calls = []
 
-    from tools import codex_delegate_tool
+    import gateway.run as gateway_run
 
     monkeypatch.setattr(
-        codex_delegate_tool,
-        "resume_interrupted_codex_runs",
-        lambda: calls.append("called") or {"enabled": True, "resumed": [], "skipped": [], "errors": []},
+        gateway_run,
+        "_load_resume_interrupted_codex_runs",
+        lambda: (lambda: calls.append("called") or {"enabled": True, "resumed": [], "skipped": [], "errors": []}),
     )
 
     ok = await runner.start()

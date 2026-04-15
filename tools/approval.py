@@ -1,3 +1,4 @@
+# HADTO-PATCH: security
 """Dangerous command approval -- detection, prompting, and per-session state.
 
 This module is the single source of truth for the dangerous command system:
