@@ -218,6 +218,7 @@ def _load_active_codex_handoff_indexes(
     now: Optional[datetime] = None,
 ) -> Dict[str, set[str]]:
     indexes: Dict[str, set[str]] = {
+        "binding_session_id": set(),
         "task_id": set(),
         "ctx_session_id": set(),
         "worktree_id": set(),
@@ -254,6 +255,7 @@ def _load_active_codex_handoff_indexes(
         if str(raw_record.get("status") or "").strip().lower() not in {"running", "unknown"}:
             continue
         values = {
+            "binding_session_id": str(raw_record.get("task_id") or "").strip(),
             "task_id": str(raw_record.get("ctx_task_id") or "").strip(),
             "ctx_session_id": str(raw_record.get("ctx_session_id") or "").strip(),
             "worktree_id": str(raw_record.get("ctx_worktree_id") or "").strip(),
@@ -271,12 +273,14 @@ def _binding_has_active_codex_handoff(
     active_codex_indexes: Optional[Dict[str, set[str]]] = None,
 ) -> bool:
     indexes = active_codex_indexes or {
+        "binding_session_id": set(),
         "task_id": set(),
         "ctx_session_id": set(),
         "worktree_id": set(),
         "worktree_path": set(),
     }
     candidates = {
+        "binding_session_id": str(record.get("session_id") or "").strip(),
         "task_id": str(record.get("task_id") or "").strip(),
         "ctx_session_id": str(record.get("ctx_session_id") or "").strip(),
         "worktree_id": str(record.get("worktree_id") or "").strip(),

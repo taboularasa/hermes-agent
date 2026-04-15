@@ -863,6 +863,80 @@ def test_evaluate_self_improvement_evidence_restores_retired_ctx_binding_for_act
     )
 
 
+def test_evaluate_self_improvement_evidence_restores_retired_ctx_binding_by_binding_session_id(
+    tmp_path,
+):
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    _write_json(journal_path, {"entries": [{"occurredAt": recent}]})
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_handoff": {
+                    "run_id": "codex_handoff",
+                    "status": "running",
+                    "pid": os.getpid(),
+                    "started_at": recent,
+                    "task_id": "cron_session",
+                    "prompt": "\n".join(
+                        [
+                            "Commitments:",
+                            "- keep the ctx binding active until the run finishes",
+                            "Assumptions:",
+                            "- an active ctx binding is available for this task",
+                        ]
+                    ),
+                }
+            }
+        },
+    )
+    _write_json(
+        ctx_path,
+        {
+            "sessions": {
+                "cron_session": {
+                    "session_id": "cron_session",
+                    "task_id": "task-1",
+                    "active": False,
+                    "reason": "ctx binding retired: cron job finished",
+                    "updated_at": recent,
+                    "worktree_id": "wt-1",
+                    "worktree_path": str(worktree),
+                    "platform": "cron",
+                }
+            }
+        },
+    )
+
+    gate = self_improvement_tool.evaluate_self_improvement_evidence(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        now=now,
+    )
+    persisted_ctx = json.loads(ctx_path.read_text(encoding="utf-8"))
+    persisted_codex = json.loads(codex_path.read_text(encoding="utf-8"))
+
+    assert gate["status"] == "healthy"
+    assert gate["planning_contradictions"] == []
+    assert persisted_ctx["sessions"]["cron_session"]["active"] is True
+    assert (
+        persisted_ctx["sessions"]["cron_session"]["reason"]
+        == "ctx task handed off to delegated Codex run"
+    )
+    assert persisted_codex["runs"]["codex_handoff"]["status"] == "unknown"
+
+
 def test_evaluate_self_improvement_evidence_restores_retired_ctx_binding_for_checkpoint_backed_handoff(
     monkeypatch, tmp_path
 ):

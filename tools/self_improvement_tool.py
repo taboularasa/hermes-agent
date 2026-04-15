@@ -493,6 +493,7 @@ def _iter_codex_records(payload: Any) -> Iterable[Dict[str, Any]]:
 
 def _build_ctx_indexes(payload: Any) -> Dict[str, Dict[str, list[Dict[str, Any]]]]:
     indexes: Dict[str, Dict[str, list[Dict[str, Any]]]] = {
+        "binding_session_id": {},
         "task_id": {},
         "ctx_session_id": {},
         "worktree_id": {},
@@ -500,6 +501,7 @@ def _build_ctx_indexes(payload: Any) -> Dict[str, Dict[str, list[Dict[str, Any]]
     }
     for record in _iter_ctx_records(payload):
         for key, index_name in (
+            ("session_id", "binding_session_id"),
             ("task_id", "task_id"),
             ("ctx_session_id", "ctx_session_id"),
             ("worktree_id", "worktree_id"),
@@ -734,6 +736,7 @@ def _find_planning_contradictions(
         if status not in {"running", "unknown"}:
             continue
         run_id = record.get("run_id")
+        binding_session_id = record.get("task_id")
         if record.get("completed_at") is not None or record.get("exit_code") is not None:
             contradictions.append(
                 {
@@ -757,6 +760,7 @@ def _find_planning_contradictions(
         ctx_worktree_path = record.get("ctx_worktree_path")
         ctx_binding_ok = any(
             (
+                _has_active_ctx_binding(ctx_indexes, "binding_session_id", binding_session_id),
                 _has_active_ctx_binding(ctx_indexes, "task_id", ctx_task_id),
                 _has_active_ctx_binding(ctx_indexes, "ctx_session_id", ctx_session_id),
                 _has_active_ctx_binding(ctx_indexes, "worktree_id", ctx_worktree_id),
