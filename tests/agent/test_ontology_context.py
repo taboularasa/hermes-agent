@@ -5,8 +5,10 @@ from pathlib import Path
 
 from unittest.mock import patch
 
+import pytest
 import yaml
 
+import agent.ontology_context as ontology_context
 from agent.ontology_context import (
     build_consulting_context,
     build_ontology_engineering_context,
@@ -237,6 +239,11 @@ def _seed_ontology_repo(tmp_path: Path, *, now: datetime) -> Path:
     return repo
 
 
+@pytest.fixture(autouse=True)
+def _stub_provider_env_fallback(monkeypatch):
+    monkeypatch.setattr(ontology_context, "_fallback_search_provider_env_keys", lambda: frozenset())
+
+
 def test_load_ontology_snapshot_summarizes_candidates_and_assets(tmp_path):
     now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
     repo = _seed_ontology_repo(tmp_path, now=now)
@@ -463,6 +470,48 @@ def test_ontology_engineering_context_uses_provider_inventory_when_env_missing(t
         "Provider coverage is declared in the ontology repo" in step
         for step in context["research_protocol"]["steps"]
     )
+
+
+def test_ontology_engineering_context_uses_runtime_provider_fallback_when_process_env_missing(monkeypatch, tmp_path):
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
+    repo = _seed_ontology_repo(tmp_path, now=now)
+    monkeypatch.setattr(
+        ontology_context,
+        "_fallback_search_provider_env_keys",
+        lambda: frozenset({"EXA_API_KEY", "TAVILY_API_KEY"}),
+    )
+
+    with patch.dict(os.environ, {}, clear=True):
+        context = build_ontology_engineering_context(repo, limit=4)
+
+    provider_status = context["research_protocol"]["provider_status"]
+    assert provider_status["available_providers"] == ["exa", "tavily"]
+    assert provider_status["coverage_source"] == "env"
+    assert provider_status["inventory_path"] is None
+    assert provider_status["providers"]["exa"]["present_env_keys"] == ["EXA_API_KEY"]
+    assert provider_status["providers"]["tavily"]["present_env_keys"] == ["TAVILY_API_KEY"]
+
+
+def test_self_improvement_context_uses_runtime_provider_fallback_when_process_env_missing(monkeypatch, tmp_path):
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
+    repo = _seed_ontology_repo(tmp_path, now=now)
+    monkeypatch.setattr(
+        ontology_context,
+        "_fallback_search_provider_env_keys",
+        lambda: frozenset({"EXA_API_KEY", "TAVILY_API_KEY"}),
+    )
+
+    with patch.dict(os.environ, {}, clear=True):
+        context = build_self_improvement_context(repo, now=now, freshness_hours=72)
+
+    provider_status = context["research_provider_policy"]
+    assert provider_status["summary"]["available_provider_count"] == 2
+    assert provider_status["available_providers"] == ["exa", "tavily"]
+    assert not any(
+        item["candidate_type"] == "provider_coverage_repair"
+        for item in context["candidates"]["maintenance"]
+    )
+    assert context["prioritization"]["gate_status"] == "open"
 
 
 def test_consulting_context_includes_multi_provider_research_protocol(tmp_path):

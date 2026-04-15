@@ -5,6 +5,7 @@ from pathlib import Path
 
 import yaml
 
+import agent.ontology_context as ontology_context
 from tools import codex_delegate_tool
 from tools import linear_issue_tool
 from tools import self_improvement_tool
@@ -1326,6 +1327,82 @@ def test_self_improvement_benchmark_scores_positive_and_persists_history(monkeyp
     persisted = json.loads(history_path.read_text(encoding="utf-8"))
     assert persisted["evaluations"][0]["score"] == benchmark["score"]
     assert "delegate_assignment_hygiene" in persisted["evaluations"][0]["checks"]
+
+
+def test_self_improvement_benchmark_counts_runtime_provider_fallback_in_ontology_readiness(monkeypatch, tmp_path):
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
+    recent = (now - timedelta(hours=2)).isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+    objective_path = _seed_reward_policy(tmp_path / "epoch.yaml")
+    history_path = tmp_path / "benchmarks.json"
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    _write_json(journal_path, {"entries": [{"occurredAt": recent}]})
+    _write_json(
+        codex_path,
+        {"runs": {"codex_1": {"run_id": "codex_1", "status": "completed", "completed_at": recent}}},
+    )
+    _write_json(
+        ctx_path,
+        {"sessions": {"ctx_1": {"session_id": "ctx_1", "active": False, "updated_at": recent, "worktree_path": str(worktree)}}},
+    )
+
+    for key in ("EXA_API_KEY", "PARALLEL_API_KEY", "FIRECRAWL_API_KEY", "FIRECRAWL_API_URL", "TAVILY_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(
+        ontology_context,
+        "_fallback_search_provider_env_keys",
+        lambda: frozenset({"EXA_API_KEY", "TAVILY_API_KEY"}),
+    )
+    monkeypatch.setattr(
+        self_improvement_tool,
+        "_load_linear_benchmark_surface",
+        lambda **kwargs: {
+            "available": True,
+            "project": {"id": "project-1", "name": "Hermes Self-Improvement"},
+            "issues": [
+                _linear_issue(
+                    "HAD-230",
+                    state_type="started",
+                    state_name="In Progress",
+                    lane="Maintenance",
+                    include_status_comment=True,
+                    updated_at=recent,
+                ),
+                _linear_issue(
+                    "HAD-231",
+                    state_type="completed",
+                    state_name="Done",
+                    lane="Growth",
+                    updated_at=recent,
+                    completed_at=recent,
+                ),
+            ],
+            "error": None,
+        },
+    )
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        objective_path=objective_path,
+        history_path=history_path,
+        now=now,
+        persist=False,
+    )
+    items = {item["id"]: item for item in benchmark["benchmarks"]}
+
+    assert items["ontology_readiness"]["status"] == "pass"
+    assert "providers=2" in items["ontology_readiness"]["detail"]
+    assert benchmark["ontology_prioritization"]["gate_status"] == "open"
+    assert benchmark["ontology_prioritization"]["selected_lane"] == "Growth"
 
 
 def test_self_improvement_benchmark_keeps_slow_source_cadence_healthy(monkeypatch, tmp_path):
