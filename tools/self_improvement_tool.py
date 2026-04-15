@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
+from agent.execution_frame import build_execution_frame
 from agent.ontology_context import (
     DEFAULT_ONTOLOGY_REPO_ROOT,
     build_self_improvement_context,
@@ -541,6 +542,112 @@ def _codex_run_has_detached_ctx_worktree(record: Dict[str, Any]) -> bool:
         return False
 
 
+def _planning_frame_from_record(record: Dict[str, Any]):
+    frame_input = record.get("execution_frame")
+    context_parts = [
+        str(record.get(key) or "").strip()
+        for key in ("prompt", "context")
+        if str(record.get(key) or "").strip()
+    ]
+    if frame_input is None and not context_parts:
+        return None
+
+    frame = build_execution_frame(
+        goal=str(record.get("phase") or record.get("goal") or record.get("run_id") or "").strip() or None,
+        context="\n\n".join(context_parts) if context_parts else None,
+        frame=frame_input,
+        source="self_improvement_evidence_gate",
+        include_default_actors=False,
+    )
+    if not frame.commitments and not frame.assumptions:
+        return None
+    return frame
+
+
+def _normalize_planning_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().casefold())
+
+
+def _plan_text_asserts_active_ctx_binding(text: str) -> bool:
+    normalized = _normalize_planning_text(text)
+    if "ctx binding" not in normalized:
+        return False
+    if any(token in normalized for token in ("inactive", "retired", "missing", "stale", "closed", "absent")):
+        return False
+    return any(token in normalized for token in ("active", "available", "present", "live", "running"))
+
+
+def _plan_text_asserts_ctx_worktree_presence(text: str) -> bool:
+    normalized = _normalize_planning_text(text)
+    if "worktree" not in normalized or "ctx" not in normalized:
+        return False
+    if any(token in normalized for token in ("missing", "deleted", "removed", "gone", "absent", "stale")):
+        return False
+    return any(
+        token in normalized
+        for token in ("exists", "available", "present", "mounted", "attached", "accessible", "on disk")
+    )
+
+
+def _record_plan_runtime_contradictions(
+    *,
+    record: Dict[str, Any],
+    ctx_binding_ok: bool,
+    ctx_worktree_exists: bool,
+) -> list[Dict[str, Any]]:
+    frame = _planning_frame_from_record(record)
+    if frame is None:
+        return []
+
+    contradictions: list[Dict[str, Any]] = []
+    run_id = record.get("run_id")
+    seen: set[tuple[str, str, str]] = set()
+
+    plan_items = [
+        *[
+            ("commitment", str(item.commitment or "").strip())
+            for item in frame.commitments
+            if str(item.commitment or "").strip()
+        ],
+        *[
+            ("assumption", str(item or "").strip())
+            for item in frame.assumptions
+            if str(item or "").strip()
+        ],
+    ]
+    for kind, statement in plan_items:
+        if _plan_text_asserts_active_ctx_binding(statement) and not ctx_binding_ok:
+            contradiction_type = f"plan_{kind}_active_ctx_binding_missing"
+            key = (contradiction_type, kind, statement)
+            if key not in seen:
+                seen.add(key)
+                contradictions.append(
+                    {
+                        "type": contradiction_type,
+                        "message": f"plan {kind} expects an active ctx binding but none is active",
+                        "run_id": run_id,
+                        "planning_field": kind,
+                        "statement": statement,
+                    }
+                )
+        if _plan_text_asserts_ctx_worktree_presence(statement) and not ctx_worktree_exists:
+            contradiction_type = f"plan_{kind}_ctx_worktree_missing"
+            key = (contradiction_type, kind, statement)
+            if key not in seen:
+                seen.add(key)
+                contradictions.append(
+                    {
+                        "type": contradiction_type,
+                        "message": f"plan {kind} expects a ctx worktree on disk but it is missing",
+                        "run_id": run_id,
+                        "planning_field": kind,
+                        "statement": statement,
+                        "ctx_worktree_path": record.get("ctx_worktree_path"),
+                    }
+                )
+    return contradictions
+
+
 def _issue_has_live_execution(
     issue: dict[str, Any],
     *,
@@ -669,7 +776,8 @@ def _find_planning_contradictions(
                         "ctx_worktree_path": ctx_worktree_path,
                     }
                 )
-        if ctx_worktree_path and not Path(str(ctx_worktree_path)).exists():
+        ctx_worktree_exists = bool(ctx_worktree_path) and Path(str(ctx_worktree_path)).exists()
+        if ctx_worktree_path and not ctx_worktree_exists:
             contradictions.append(
                 {
                     "type": "codex_worktree_missing",
@@ -678,6 +786,13 @@ def _find_planning_contradictions(
                     "ctx_worktree_path": ctx_worktree_path,
                 }
             )
+        contradictions.extend(
+            _record_plan_runtime_contradictions(
+                record=record,
+                ctx_binding_ok=ctx_binding_ok,
+                ctx_worktree_exists=ctx_worktree_exists,
+            )
+        )
 
     return contradictions
 

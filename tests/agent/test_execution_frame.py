@@ -21,6 +21,8 @@ Evidence:
 - journal entry 2026-04-10
 Commitments:
 - deliver by Friday
+Assumptions:
+- ctx binding stays active
 Verification:
 - run pytest tests/tools/test_delegate.py
 """
@@ -30,7 +32,9 @@ Verification:
     assert frame.artifacts[0].name == "docs/plan.md"
     assert frame.evidence[0].description == "journal entry 2026-04-10"
     assert frame.commitments[0].commitment == "deliver by Friday"
+    assert frame.assumptions == ["ctx binding stays active"]
     assert frame.verification_targets[0].target == "run pytest tests/tools/test_delegate.py"
+    assert "Assumptions:" in frame.to_prompt()
 
 
 def test_build_execution_frame_does_not_override_explicit_goals():

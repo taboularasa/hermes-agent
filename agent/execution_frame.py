@@ -129,6 +129,8 @@ class ExecutionFrame(BaseModel):
                 lines.append(f"- {commitment.commitment}{owner}")
         else:
             lines.append("- (none specified)")
+        lines.append("Assumptions:")
+        lines.extend(render_list(self.assumptions))
         lines.append("Verification targets:")
         if self.verification_targets:
             for target in self.verification_targets:
@@ -155,6 +157,7 @@ _SECTION_MAP = {
     "artifacts": {"artifacts", "deliverables", "outputs", "files"},
     "evidence": {"evidence", "sources", "references"},
     "commitments": {"commitments", "promises", "agreements"},
+    "assumptions": {"assumption", "assumptions", "expectations"},
     "verification_targets": {"verification", "validation", "tests", "checks"},
     "assumptions": {"assumption", "assumptions"},
     "notes": {"note", "notes"},
@@ -249,6 +252,8 @@ def build_execution_frame(
             model.evidence = [Evidence(description=text) for text in parsed["evidence"]]
         if parsed.get("commitments") and not model.commitments:
             model.commitments = [Commitment(commitment=text) for text in parsed["commitments"]]
+        if parsed.get("assumptions") and not model.assumptions:
+            model.assumptions = parsed["assumptions"]
         if parsed.get("verification_targets") and not model.verification_targets:
             model.verification_targets = [VerificationTarget(target=text) for text in parsed["verification_targets"]]
         if parsed.get("assumptions") and not model.assumptions:
