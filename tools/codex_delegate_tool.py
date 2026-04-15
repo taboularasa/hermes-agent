@@ -239,6 +239,27 @@ def _coerce_now_epoch(now: Optional[Any] = None) -> float:
         return _utc_now()
 
 
+def _restart_resume_enabled() -> bool:
+    value = str(os.getenv("HERMES_CODEX_RESTART_RESUME", "1") or "").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _restart_resume_window_seconds() -> int:
+    raw = str(os.getenv("HERMES_CODEX_RESTART_RESUME_WINDOW_SECONDS", "21600") or "").strip()
+    try:
+        return max(60, int(raw))
+    except (TypeError, ValueError):
+        return 21600
+
+
+def _restart_resume_limit() -> int:
+    raw = str(os.getenv("HERMES_CODEX_RESTART_RESUME_LIMIT", "5") or "").strip()
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 5
+
+
 def _infer_ctx_platform(task_id: str, binding: Optional[Any] = None) -> str:
     source = str(os.getenv("HERMES_SESSION_SOURCE") or "").strip().lower()
     if source:
@@ -381,6 +402,98 @@ def _read_text(path: Optional[str]) -> str:
     except Exception:
         logger.debug("Failed to read %s", p, exc_info=True)
         return ""
+
+
+def _record_epoch(record: Dict[str, Any], *fields: str) -> float:
+    best = 0.0
+    for field in fields:
+        try:
+            value = float(record.get(field) or 0)
+        except (TypeError, ValueError):
+            continue
+        if value > best:
+            best = value
+    return best
+
+
+def _normalized_record_workdir(record: Dict[str, Any]) -> str:
+    workdir = str(record.get("workdir") or "").strip()
+    if not workdir:
+        return ""
+    try:
+        return _normalize_path(workdir)
+    except Exception:
+        return workdir
+
+
+def _recovery_group_key(record: Dict[str, Any]) -> tuple[Any, ...]:
+    external_key = str(record.get("external_key") or "").strip()
+    if external_key:
+        return ("external_key", external_key)
+    return (
+        "task",
+        str(record.get("task_id") or "").strip(),
+        _normalized_record_workdir(record),
+        str(record.get("phase") or "").strip(),
+        str(record.get("parent_run_id") or "").strip(),
+        str(record.get("prompt") or "").strip(),
+    )
+
+
+def _lookup_live_session(record: Dict[str, Any]) -> Any:
+    session_id = str(record.get("process_session_id") or "").strip()
+    session = process_registry.get(session_id) if session_id else None
+    if session is None and session_id:
+        recover_session = getattr(process_registry, "recover_session_from_checkpoint", None)
+        if callable(recover_session):
+            try:
+                session = recover_session(session_id)
+            except Exception:
+                logger.debug("Failed to recover detached process session %s from checkpoint", session_id, exc_info=True)
+                session = None
+    if session and not getattr(session, "exited", False) and _pid_is_running(getattr(session, "pid", None)):
+        return session
+    return None
+
+
+def _record_has_terminal_output(record: Dict[str, Any]) -> bool:
+    final_message = _read_text(record.get("last_message_path"))
+    if final_message:
+        record["final_message"] = final_message.strip()
+    return _infer_terminal_state(record)[0] == "completed"
+
+
+def _should_restart_resume(record: Dict[str, Any], *, now: Optional[Any] = None) -> bool:
+    status = str(record.get("status") or "").strip().lower()
+    if status in {"running", "unknown"}:
+        return True
+    if status != "failed":
+        return False
+    if str(record.get("stale_reason") or "").strip().lower() != "process_missing":
+        return False
+    interrupted_at = _record_epoch(record, "completed_at", "started_at", "process_started_at")
+    if interrupted_at <= 0:
+        return False
+    return (_coerce_now_epoch(now) - interrupted_at) <= _restart_resume_window_seconds()
+
+
+def _build_restart_recovery_prompt(record: Dict[str, Any]) -> str:
+    original_prompt = str(record.get("prompt") or "").strip()
+    external_key = str(record.get("external_key") or "").strip()
+    lines = [
+        "[Hermes gateway restart recovery]",
+        "The previous local Codex worker for this work item was interrupted by a Hermes gateway restart before it reported completion.",
+        "",
+        "Continue from the current filesystem state in the existing checkout/worktree.",
+        "- Start by inspecting `git status`, the current branch, and any files already changed.",
+        "- Preserve unrelated user changes and any partial worker progress.",
+        "- Do not restart the task from scratch or repeat work that already landed.",
+        "- Finish the remaining work, run relevant verification, and report the result clearly.",
+    ]
+    if external_key:
+        lines.append(f"- Work item key: {external_key}")
+    lines.extend(["", "Original delegated task:", original_prompt or "(missing original prompt)"])
+    return "\n".join(lines).strip()
 
 
 def _parse_codex_events(text: str) -> Dict[str, Any]:
@@ -603,6 +716,122 @@ def normalize_codex_runs(
         refreshed = _refresh_record(dict(record), runs_path=runs_path, now=now)
         statuses[current_run_id] = str(refreshed.get("status") or "")
     return statuses
+
+
+def resume_interrupted_codex_runs(
+    *,
+    runs_path: Optional[Path] = None,
+    now: Optional[Any] = None,
+) -> Dict[str, Any]:
+    current_time = _coerce_now_epoch(now)
+    result: Dict[str, Any] = {
+        "enabled": False,
+        "resumed": [],
+        "skipped": [],
+        "errors": [],
+    }
+    if not _restart_resume_enabled():
+        result["skipped"].append({"reason": "disabled"})
+        return result
+    if not check_codex_delegate_requirements():
+        result["skipped"].append({"reason": "codex_unavailable"})
+        return result
+
+    result["enabled"] = True
+    data = _load_runs(runs_path)
+    runs = data.get("runs", {})
+    if not isinstance(runs, dict) or not runs:
+        return result
+
+    records = [dict(record) for record in runs.values() if isinstance(record, dict)]
+    records.sort(
+        key=lambda record: (
+            _record_epoch(record, "completed_at", "started_at", "process_started_at"),
+            _record_epoch(record, "started_at", "process_started_at"),
+        ),
+        reverse=True,
+    )
+
+    seen_groups: set[tuple[Any, ...]] = set()
+    for record in records:
+        group_key = _recovery_group_key(record)
+        if group_key in seen_groups:
+            continue
+        seen_groups.add(group_key)
+
+        run_id = str(record.get("run_id") or "").strip()
+        if len(result["resumed"]) >= _restart_resume_limit():
+            result["skipped"].append({"run_id": run_id, "reason": "resume_limit"})
+            continue
+        if _is_probe_record(record):
+            result["skipped"].append({"run_id": run_id, "reason": "probe"})
+            continue
+        if record.get("resumed_by_run_id"):
+            result["skipped"].append({"run_id": run_id, "reason": "already_resumed"})
+            continue
+        prompt = str(record.get("prompt") or "").strip()
+        workdir = str(record.get("workdir") or "").strip()
+        if not prompt or not workdir:
+            result["skipped"].append({"run_id": run_id, "reason": "missing_recovery_context"})
+            continue
+        if _lookup_live_session(record) or _pid_is_running(record.get("pid")):
+            result["skipped"].append({"run_id": run_id, "reason": "active_process"})
+            continue
+        if _record_has_terminal_output(record):
+            if record.get("status") != "completed":
+                _normalize_stale_record(
+                    record,
+                    reason=str(record.get("stale_reason") or "process_missing"),
+                    now=current_time,
+                )
+                _persist_record(record, runs_path=runs_path)
+            result["skipped"].append({"run_id": run_id, "reason": "terminal"})
+            continue
+        if not _should_restart_resume(record, now=current_time):
+            result["skipped"].append({"run_id": run_id, "reason": "not_restart_resumable"})
+            continue
+
+        effective_model = str(record.get("model") or _load_codex_config()["default_model"]).strip()
+        codex_session_id = str(record.get("codex_session_id") or "").strip()
+        try:
+            next_record = _start_run(
+                prompt=_build_restart_recovery_prompt(record),
+                phase=str(record.get("phase") or "implement").strip() or "implement",
+                model=effective_model,
+                workdir=workdir,
+                repo_root=_resolve_repo_root(workdir),
+                task_id=str(record.get("task_id") or ""),
+                parent_run_id=run_id if codex_session_id else "",
+                codex_session_id=codex_session_id,
+                external_key=str(record.get("external_key") or ""),
+            )
+        except Exception as exc:
+            logger.warning("Failed to resume interrupted Codex run %s", run_id, exc_info=True)
+            result["errors"].append({"run_id": run_id, "error": str(exc)})
+            continue
+
+        next_record["restart_recovery"] = True
+        next_record["recovered_from_run_id"] = run_id
+        next_record["recovery_reason"] = "gateway_restart"
+        _persist_record(next_record, runs_path=runs_path)
+
+        record["status"] = "failed"
+        record["completed_at"] = record.get("completed_at") or current_time
+        record["stale_reason"] = "gateway_restart_interrupted"
+        record["resumed_by_run_id"] = next_record["run_id"]
+        record["recovery_reason"] = "gateway_restart"
+        if record.get("exit_code") is None:
+            record["exit_code"] = -15
+        _persist_record(record, runs_path=runs_path)
+
+        result["resumed"].append({
+            "from_run_id": run_id,
+            "run_id": next_record["run_id"],
+            "external_key": record.get("external_key"),
+            "used_codex_resume": bool(codex_session_id),
+        })
+
+    return result
 
 
 def _build_response(record: Dict[str, Any], **extra: Any) -> str:
