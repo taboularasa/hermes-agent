@@ -1,3 +1,4 @@
+# HADTO-PATCH: security
 """Trajectory saving utilities and static helpers.
 
 _convert_to_trajectory_format stays as an AIAgent method (batch_runner.py

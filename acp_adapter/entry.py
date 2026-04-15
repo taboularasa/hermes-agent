@@ -1,3 +1,4 @@
+# HADTO-PATCH: env
 """CLI entry point for the hermes-agent ACP adapter.
 
 Loads runtime secrets from Doppler, configures logging

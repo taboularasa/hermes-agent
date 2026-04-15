@@ -1,3 +1,4 @@
+# HADTO-PATCH: security
 """
 Gateway configuration management.
 
@@ -915,5 +916,4 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             config.default_reset_policy.at_hour = int(reset_hour)
         except ValueError:
             pass
-
 

@@ -1,3 +1,4 @@
+# HADTO-PATCH: security
 """Generic webhook platform adapter.
 
 Runs an aiohttp HTTP server that receives webhook POSTs from external

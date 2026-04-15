@@ -1,3 +1,4 @@
+# HADTO-PATCH: provider/auth
 """Anthropic Messages API adapter for Hermes Agent.
 
 Translates between Hermes's internal OpenAI-style message format and

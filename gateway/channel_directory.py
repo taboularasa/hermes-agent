@@ -1,3 +1,4 @@
+# HADTO-PATCH: security
 """
 Channel directory -- cached map of reachable channels/contacts per platform.
 

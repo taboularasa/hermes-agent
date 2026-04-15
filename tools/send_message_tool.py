@@ -1,3 +1,4 @@
+# HADTO-PATCH: messaging
 """Send Message Tool -- cross-channel messaging via platform APIs.
 
 Sends a message to a user or channel on any connected messaging platform

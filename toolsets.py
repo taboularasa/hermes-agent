@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# HADTO-PATCH: plugin registry
 """
 Toolsets Module
 

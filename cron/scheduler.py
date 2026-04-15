@@ -1,3 +1,4 @@
+# HADTO-PATCH: cron topology
 """
 Cron job scheduler - executes due jobs.
 

@@ -1,3 +1,4 @@
+# HADTO-PATCH: gateway composition
 """
 Gateway subcommand for hermes CLI.
 

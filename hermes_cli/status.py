@@ -1,3 +1,4 @@
+# HADTO-PATCH: ctx.rs integration
 """
 Status command for hermes CLI.
 

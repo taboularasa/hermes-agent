@@ -1,3 +1,4 @@
+# HADTO-PATCH: plugin registry
 """Central registry for all hermes-agent tools.
 
 Each tool file calls ``registry.register()`` at module level to declare its

@@ -1,3 +1,4 @@
+# HADTO-PATCH: security
 """
 Slack platform adapter.
 

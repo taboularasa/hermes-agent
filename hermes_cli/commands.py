@@ -1,3 +1,4 @@
+# HADTO-PATCH: gateway composition
 """Slash command definitions and autocomplete for the Hermes CLI.
 
 Central registry for all slash commands. Every consumer -- CLI help, gateway

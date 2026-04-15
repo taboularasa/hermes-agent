@@ -1,3 +1,4 @@
+# HADTO-PATCH: security
 """
 OpenAI-compatible API server platform adapter.
 

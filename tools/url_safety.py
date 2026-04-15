@@ -1,3 +1,4 @@
+# HADTO-PATCH: security
 """URL safety checks — blocks requests to private/internal network addresses.
 
 Prevents SSRF (Server-Side Request Forgery) where a malicious prompt or
