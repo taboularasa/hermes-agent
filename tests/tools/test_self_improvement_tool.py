@@ -107,6 +107,22 @@ def _seed_reward_policy(path: Path) -> Path:
                 "ctx_bindings",
                 "ontology_intelligence",
             ],
+            "growth_signals": [
+                {
+                    "type": "client_pipeline",
+                    "summary": "Active client follow-ups are waiting on proposal-ready artifacts or demos.",
+                    "priority_effect": "Increase urgency for proposal, backlog, and contract-facing delivery work.",
+                    "priority_boost": 0.2,
+                    "keywords": ["proposal", "backlog", "contract", "demo"],
+                },
+                {
+                    "type": "social_proof",
+                    "summary": "Recent wins need visible packaging as case studies or proof-of-execution.",
+                    "priority_effect": "Increase urgency for completed delivery outcomes and visible social-proof surfaces.",
+                    "priority_boost": 0.15,
+                    "keywords": ["delivery", "completed", "case study", "social proof"],
+                },
+            ],
         },
     )
     return path
@@ -1547,6 +1563,54 @@ def test_benchmark_issue_specs_require_evidence_sources_and_suppress_capability_
     assert [item["benchmark_id"] for item in specs] == ["execution_loop"]
     assert "Evidence sources:" in specs[0]["description"]
     assert f"- journal: {tmp_path / 'journal.json'} (fresh)" in specs[0]["description"]
+    assert "Growth signals affecting prioritization:" in specs[0]["description"]
+    assert "Client pipeline" in specs[0]["description"]
+    assert specs[0]["growth_priority_boost"] > 0
+    assert specs[0]["growth_signal_summary"].startswith("Active growth signals")
+
+
+def test_benchmark_issue_specs_uses_growth_signals_to_break_growth_vs_capability_ties(tmp_path):
+    benchmark = {
+        "score": 61.0,
+        "direction": "positive",
+        "trend": "flat",
+        "critical_failures": [],
+        "gate": {"status": "healthy", "provenance": {"items": [], "summary_markdown": ""}},
+        "benchmarks": [
+            {
+                "id": "recent_delivery_outcomes",
+                "status": "fail",
+                "score": 0.4,
+                "weight": 5,
+                "detail": "Completed delivery artifacts are not being packaged into visible proof.",
+                "critical": False,
+            },
+            {
+                "id": "ontology_readiness",
+                "status": "fail",
+                "score": 0.4,
+                "weight": 5,
+                "detail": "Ontology artifacts need one more refinement pass.",
+                "critical": False,
+            },
+        ],
+    }
+    reward_policy_path = _seed_reward_policy(tmp_path / "epoch.yaml")
+    reward_policy = yaml.safe_load(reward_policy_path.read_text(encoding="utf-8"))
+    reward_policy["guardrails"]["capability_requires_healthy_lanes"] = False
+
+    specs = self_improvement_tool._benchmark_issue_specs(
+        benchmark,
+        candidate_limit=2,
+        reward_policy=reward_policy,
+    )
+
+    assert [item["benchmark_id"] for item in specs] == [
+        "recent_delivery_outcomes",
+        "ontology_readiness",
+    ]
+    assert specs[0]["growth_priority_boost"] > 0
+    assert specs[1]["growth_priority_boost"] == 0
 
 
 def test_self_improvement_pipeline_demotes_started_issue_without_live_execution(monkeypatch, tmp_path):
@@ -1824,7 +1888,11 @@ def test_self_improvement_pipeline_surfaces_ontology_fallback_candidate_when_ben
     assert candidate["identifier"] == "HAD-700"
     assert "query-ready competency-question contracts" in candidate["description"]
     assert "Verification expectation:" in candidate["description"]
+    assert "Growth signals affecting prioritization:" in candidate["description"]
+    assert "Client pipeline" in candidate["description"]
+    assert "Social proof" in candidate["description"]
     assert "Client Revenue and Social Proof" in candidate["why_now"]
+    assert candidate["growth_priority_boost"] > 0
     assert candidate["state"]["type"] == "backlog"
 
     fallback_issue = next(issue for issue in store["issues"] if issue["identifier"] == "HAD-700")
@@ -1836,6 +1904,8 @@ def test_self_improvement_pipeline_surfaces_ontology_fallback_candidate_when_ben
         and str((linear_issue_tool._parse_marker(comment["body"]) or {}).get("status_comment_state") or "")
         == "verified"
         and "ontology-backed self-improvement candidate selected" in str(comment["body"] or "")
+        and "Growth signals affecting prioritization:" in str(comment["body"] or "")
+        and "Client pipeline" in str(comment["body"] or "")
         for comment in fallback_issue["comments"]
     )
 

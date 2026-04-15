@@ -56,3 +56,25 @@ evidence_sources:
   - ci_and_logs
   - linear_history
   - slack_or_client_signals
+
+growth_signals:
+  - type: client_pipeline
+    summary: "Active client follow-ups are waiting on proposal-ready artifacts or demos."
+    priority_effect: "Increase urgency for proposal, backlog, and contract-facing delivery work."
+    priority_boost: 0.2
+    keywords:
+      - proposal
+      - backlog
+      - contract
+      - demo
+      - follow-up
+  - type: social_proof
+    summary: "Recent wins need visible packaging as case studies, testimonials, or proof-of-execution."
+    priority_effect: "Increase urgency for completed delivery outcomes and visible social-proof surfaces."
+    priority_boost: 0.15
+    keywords:
+      - delivery
+      - completed
+      - case study
+      - testimonial
+      - social proof
