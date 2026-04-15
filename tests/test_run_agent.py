@@ -537,9 +537,9 @@ class TestHydrateTodoStore:
             agent._hydrate_todo_store(history)
         assert agent._todo_store.has_items()
         restored = json.loads(todo_tool(store=agent._todo_store))
-        assert restored["execution_frame"]["goals"] == ["do thing"]
+        assert restored["todos"] == todos
 
-    def test_recovers_execution_frame_from_history(self, agent):
+    def test_legacy_execution_frame_in_history_does_not_break_restore(self, agent):
         todos = [{"id": "1", "content": "do thing", "status": "pending"}]
         history = [
             {
@@ -559,8 +559,7 @@ class TestHydrateTodoStore:
         with patch("run_agent._set_interrupt"):
             agent._hydrate_todo_store(history)
         restored = json.loads(todo_tool(store=agent._todo_store))
-        assert restored["execution_frame"]["goals"] == ["Ship HAD-140"]
-        assert restored["execution_frame"]["constraints"] == ["Keep scope tight"]
+        assert restored["todos"] == todos
 
     def test_skips_non_todo_tools(self, agent):
         history = [
