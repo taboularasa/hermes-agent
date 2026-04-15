@@ -1167,7 +1167,18 @@ class GatewayRunner:
                 logger.info("Recovered %s background process(es) from previous run", recovered)
         except Exception as e:
             logger.warning("Process checkpoint recovery: %s", e)
-        
+        try:
+            from tools.codex_delegate_tool import resume_interrupted_codex_runs
+            codex_recovery = resume_interrupted_codex_runs()
+            resumed_runs = codex_recovery.get("resumed", []) if isinstance(codex_recovery, dict) else []
+            recovery_errors = codex_recovery.get("errors", []) if isinstance(codex_recovery, dict) else []
+            if resumed_runs:
+                logger.info("Resumed %s interrupted Codex run(s) after gateway restart", len(resumed_runs))
+            for entry in recovery_errors:
+                logger.warning("Codex restart recovery error: %s", entry)
+        except Exception as e:
+            logger.warning("Codex restart recovery: %s", e)
+
         connected_count = 0
         enabled_platform_count = 0
         startup_nonretryable_errors: list[str] = []

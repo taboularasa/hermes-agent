@@ -87,3 +87,29 @@ async def test_runner_allows_cron_only_mode_when_no_platforms_are_enabled(monkey
     assert runner.adapters == {}
     state = read_runtime_status()
     assert state["gateway_state"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_runner_startup_resumes_interrupted_codex_runs(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config = GatewayConfig(
+        platforms={
+            Platform.TELEGRAM: PlatformConfig(enabled=False, token="***")
+        },
+        sessions_dir=tmp_path / "sessions",
+    )
+    runner = GatewayRunner(config)
+    calls = []
+
+    from tools import codex_delegate_tool
+
+    monkeypatch.setattr(
+        codex_delegate_tool,
+        "resume_interrupted_codex_runs",
+        lambda: calls.append("called") or {"enabled": True, "resumed": [], "skipped": [], "errors": []},
+    )
+
+    ok = await runner.start()
+
+    assert ok is True
+    assert calls == ["called"]
