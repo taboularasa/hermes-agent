@@ -9,12 +9,15 @@ git diff --name-only upstream/main...HEAD
 
 Baseline before the first sealing pass: `98 files changed, 6680 insertions, 498 deletions`.
 
-Current state after the second sealing pass:
+Current state after the third sealing pass:
 - fork-facing `HADTO-PATCH` markers remain at `46`
 - cron, toolset/registry, and most gateway transport modules now sit behind
   compatibility wrappers backed by `hadto_patches/*`
-- raw diff file count is `105` because the sealed package and documentation are
-  tracked files, even though the public patch surface is narrower
+- `run_agent.py`, `tools/web_tools.py`, `agent/anthropic_adapter.py`,
+  `hermes_cli/status.py`, and `trajectory_compressor.py` now also sit behind
+  compatibility wrappers backed by `hadto_patches/*`
+- raw diff file count will rise as more sealed modules are tracked, even though
+  the public patch surface keeps shrinking
 
 ## Inventory
 
@@ -31,7 +34,7 @@ Current state after the second sealing pass:
 | `AGENTS.md` | policy/config | yes | Local operator rules for this host. |
 | `Dockerfile` | policy/config | yes | Local build and security defaults. |
 | `acp_adapter/entry.py` | adapter | yes | Thin Doppler bootstrap at process start. |
-| `agent/anthropic_adapter.py` | upstream candidate | no | Generic Anthropic auth/output-limit improvements. |
+| `agent/anthropic_adapter.py` | adapter | yes | Wrapper onto sealed Anthropic auth/provider behavior. |
 | `agent/redact.py` | upstream candidate | no | Generic secret redaction hardening. |
 | `agent/trajectory.py` | upstream candidate | no | Redacts trajectories before persistence. |
 | `cli.py` | adapter | yes | CLI Doppler bootstrap and local startup policy. |
@@ -54,10 +57,10 @@ Current state after the second sealing pass:
 | `hermes_cli/env_loader.py` | adapter | yes | Wrapper for sealed Doppler domain. |
 | `hermes_cli/gateway.py` | adapter | yes | Wrapper onto sealed gateway CLI behavior. |
 | `hermes_cli/main.py` | policy/config | yes | Env-aware provider setup flows and local CLI UX. |
-| `hermes_cli/status.py` | inline patch | no | ctx/runtime-specific status reporting. |
+| `hermes_cli/status.py` | adapter | yes | Wrapper onto sealed status CLI behavior. |
 | `hermes_state.py` | upstream candidate | no | Secret redaction before DB persistence. |
 | `rl_cli.py` | policy/config | yes | RL startup uses Doppler and local cwd policy. |
-| `run_agent.py` | inline patch | no | Mixed ctx.rs binding, provider, and runtime behavior. |
+| `run_agent.py` | adapter | yes | Wrapper onto the sealed agent runtime composition domain. |
 | `slack-manifest.json` | policy/config | yes | Local Slack app surface definition. |
 | `slack-manifest.yaml` | policy/config | yes | Local Slack app surface definition. |
 | `tests/agent/test_subagent_progress.py` | policy/config | yes | Regression coverage for delegate behavior. |
@@ -112,9 +115,9 @@ Current state after the second sealing pass:
 | `tools/tirith_security.py` | upstream candidate | no | Generic fail-closed scanner behavior. |
 | `tools/todo_tool.py` | upstream candidate | no | Todo behavior divergence is generic, not Hadto-specific. |
 | `tools/url_safety.py` | upstream candidate | no | Generic URL scheme restriction. |
-| `tools/web_tools.py` | inline patch | no | Provider routing and availability inspection. |
+| `tools/web_tools.py` | adapter | yes | Wrapper onto sealed web-provider routing behavior. |
 | `toolsets.py` | adapter | yes | Wrapper onto sealed toolset synthesis and resolution. |
-| `trajectory_compressor.py` | upstream candidate | no | Generic async client injection. |
+| `trajectory_compressor.py` | adapter | yes | Wrapper onto sealed trajectory compression behavior. |
 | `website/docs/developer-guide/cron-internals.md` | policy/config | yes | Docs only. |
 | `website/docs/user-guide/configuration.md` | policy/config | yes | Docs only. |
 | `website/docs/user-guide/features/cron.md` | policy/config | yes | Docs only. |
@@ -130,7 +133,7 @@ Current state after the second sealing pass:
 | `GatewayTransportHooks` | `before_send(platform, payload) -> payload`; `validate_inbound(platform, request) -> ValidationResult`; `list_host_apps() -> list[HostApp]`; `augment_commands(commands) -> commands` | `gateway/run.py`, `gateway/platforms/*`, `gateway/channel_directory.py` | `gateway/platforms/sms.py`, `gateway/platforms/webhook.py`, `gateway/platforms/api_server.py`, `gateway/host_apps.py`, parts of `hermes_cli/commands.py` | plugin system covers hooks broadly, but not transport-specific validation yet |
 | `SecurityPolicyHooks` | `check_file_read(path) -> bool`; `check_boot_integrity() -> None`; `sanitize_persisted_content(text) -> str`; `normalize_url(url) -> bool` | file tools, gateway boot hooks, persistence, web tools | `tools/file_tools.py`, `gateway/builtin_hooks/boot_md.py`, `hermes_state.py`, `agent/redact.py`, `tools/url_safety.py` | partially present via existing hooks; new explicit port needed |
 | `ToolsetResolver` | `register_toolset(name, tools, description, aliases=None)`; `resolve_toolset(name) -> list[str]`; `list_toolsets() -> dict[str, dict]` | `toolsets.py`, `tools/registry.py`, CLI toolset UX | current plugin-registry and toolset synthesis logic | plugin system registers tools, but not first-class toolsets |
-| `ProviderRouter` | `resolve_provider(config, env) -> ProviderSelection`; `describe_provider_status() -> dict`; `resolve_web_backend() -> str` | `run_agent.py`, status CLI, web tools, Anthropic adapter | mixed provider logic in `run_agent.py`, `hermes_cli/status.py`, `tools/web_tools.py`, `agent/anthropic_adapter.py` | partially exists; needs explicit seam |
+| `ProviderRouter` | `resolve_provider(config, env) -> ProviderSelection`; `describe_provider_status() -> dict`; `resolve_web_backend() -> str` | `run_agent.py`, status CLI, web tools, Anthropic adapter | sealed behind `hadto_patches/agent_runner.py`, `hadto_patches/status_cli.py`, `hadto_patches/web_tools.py`, `hadto_patches/anthropic_adapter.py` | partially exists; now sealed but still worth upstreaming |
 | `TelemetryStatusHooks` | `describe_runtime_status() -> list[StatusItem]`; `describe_cron_topology() -> dict`; `describe_ctx_status() -> dict` | `hermes_cli/status.py`, gateway status surfaces, host diagnostics | status and topology logic currently spread across CLI + gateway | new |
 
 ## Existing vs New
@@ -152,10 +155,13 @@ Current state after the second sealing pass:
 
 ## Recommended Next Upstream Candidates
 
-- `agent/anthropic_adapter.py`
 - `agent/redact.py`
 - `agent/trajectory.py`
 - `hermes_state.py`
 - `tools/tirith_security.py`
 - `tools/url_safety.py`
-- `trajectory_compressor.py`
+| `hadto_patches/agent_runner.py` | adapter | yes | Sealed agent runtime domain containing ctx.rs, provider, and runtime behavior. |
+| `hadto_patches/anthropic_adapter.py` | adapter | yes | Sealed Anthropic auth/output-capacity behavior. |
+| `hadto_patches/status_cli.py` | adapter | yes | Sealed status CLI behavior including ctx/runtime reporting. |
+| `hadto_patches/trajectory_compressor.py` | adapter | yes | Sealed trajectory compression behavior. |
+| `hadto_patches/web_tools.py` | adapter | yes | Sealed web-provider routing and availability behavior. |
