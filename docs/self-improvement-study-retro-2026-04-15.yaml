@@ -1,0 +1,145 @@
+version: v1
+date: 2026-04-15
+source_doc: docs/self-improvement-study-retro-2026-04-15.md
+project_name: Hermes Self-Improvement
+team_key: HAD
+delegate_name: Hermes
+issues:
+  - title: Add a study candidate ledger for Hermes-owned follow-through
+    dedupe_key: issue:hermes-self-improvement:study-candidate-ledger
+    lane: Growth
+    priority: 1
+    capability_gap: >
+      Study findings can update domain trackers or process notes without landing in a
+      durable Hermes-owned candidate surface, so Hermes loses the disposition record
+      for whether a finding became domain backlog, self-improvement, process doctrine,
+      strategic discussion, or explicit no-action.
+    why_now: >
+      The 2026-04-15 retro showed the same structural gap across ontology study and
+      E-Myth study. ONT-026 says bottom-up ontology work needs a reviewable candidate
+      ledger before commitments. The E-Myth business-development stack says repeated
+      improvements need an ordered program with checkpoints and default conversion.
+      Hermes currently has neither for study-derived self-improvement.
+    evidence:
+      - /home/david/stacks/hermes-agent/docs/self-improvement-study-retro-2026-04-15.md
+      - /home/david/stacks/smb-ontology-platform/docs/issues/ONT-026-add-semantic-lifting-governance-for-source-schema-classification-and-app-boundaries.md
+      - /home/david/stacks/smb-ontology-platform/docs/plans/2026-03-31-keet-ontology-engineering-progress-tracker.md
+      - d169839:docs/plans/2026-04-10-e-myth-progress-tracker.md
+    target_surface:
+      - /home/david/stacks/hermes-agent
+      - study-loop write-back surfaces
+      - self-improvement backlog and candidate selection logic
+    verification_expectation:
+      - add one machine-readable study candidate ledger or equivalent durable control surface
+      - every study-derived candidate records evidence, lane, owner, disposition, and closure reason
+      - the ontology research loop and future study loops can write into that surface deterministically
+      - at least one retro historical finding is captured in the new surface as proof it works on past study, not only future runs
+    expected_effect: >
+      Hermes will stop losing study-derived self-improvement opportunities between
+      reading, summarizing, and execution.
+
+  - title: Enforce managerial contracts for delegation and recurring loops
+    dedupe_key: issue:hermes-self-improvement:managerial-contracts-for-delegation
+    lane: Growth
+    priority: 1
+    capability_gap: >
+      Hermes can delegate work or run recurring loops without consistently attaching
+      the managerial contract around them: named outcome, proof requirements, review
+      cadence, escalation boundary, and closure rule.
+    why_now: >
+      The E-Myth role-balance note says Hermes should own managerial order, not just
+      narrate completed work. The management scorecard says repeated exceptions should
+      become checklist or system changes instead of founder rescue. The recent study
+      retro shows that Hermes still lets important loops end at summary-level output
+      even when the missing piece is managerial follow-through.
+    evidence:
+      - /home/david/stacks/hermes-agent/docs/self-improvement-study-retro-2026-04-15.md
+      - d169839:docs/plans/2026-04-11-e-myth-role-balance-operating-note.md
+      - d169839:docs/plans/2026-04-14-e-myth-management-system-scorecard.md
+      - /home/david/stacks/smb-ontology-platform/docs/issues/ONT-016-run-continuous-e-myth-study-program.md
+    target_surface:
+      - /home/david/stacks/hermes-agent
+      - delegation prompts
+      - ctx handoffs
+      - recurring cron loop contracts
+    verification_expectation:
+      - delegated Codex tasks and recurring Hermes loops expose an explicit managerial contract
+      - the contract includes outcome, proof surface, review cadence, escalation boundary, and closure rule
+      - tests or fixtures prove the contract is emitted for non-trivial delegated work
+      - Hermes can restart and still recover the contract state for in-flight work
+    expected_effect: >
+      Hermes will manage workstreams as a responsible operator instead of oscillating
+      between raw delegation and post-hoc reporting.
+
+  - title: Quantify workflow experiments and promote verified improvements into defaults
+    dedupe_key: issue:hermes-self-improvement:quantify-and-orchestrate-workflow-experiments
+    lane: Growth
+    priority: 2
+    capability_gap: >
+      Hermes can make workflow changes or claim process improvements without a durable
+      before/after signal and without a reliable path for promoting successful
+      experiments into prompts, checklists, guardrails, or defaults.
+    why_now: >
+      The E-Myth study repeatedly says improvement must follow Innovation ->
+      Quantification -> Orchestration. Chapter 15 says the system is the solution.
+      Chapter 19 says comfort-driven relapse starts when rescue or private memory
+      feels easier than the written system. Hermes needs the same discipline for its
+      own workflow changes.
+    evidence:
+      - /home/david/stacks/hermes-agent/docs/self-improvement-study-retro-2026-04-15.md
+      - d169839:docs/plans/2026-04-10-e-myth-progress-tracker.md
+      - d169839:docs/plans/2026-04-14-e-myth-systems-strategy-register.md
+      - d169839:docs/plans/2026-04-14-e-myth-final-operating-doctrine.md
+    target_surface:
+      - /home/david/stacks/hermes-agent
+      - self-improvement benchmarks
+      - prompt defaults
+      - SOP notes
+      - runtime guardrails
+    verification_expectation:
+      - workflow-improvement changes record an explicit before/after signal or benchmark
+      - successful experiments have a deterministic promotion path into prompts, checklists, tests, or runtime guardrails
+      - recurring rescue or undocumented exception patterns are visible as comfort-zone alarms or equivalent signals
+      - a focused verification run shows at least one workflow improvement being measured and promoted instead of remaining a one-off insight
+    expected_effect: >
+      Hermes will stop confusing interesting changes with verified improvements and
+      will accumulate durable operating defaults faster.
+
+  - title: Carry contract-first ontology review heuristics into Hermes prompts
+    dedupe_key: issue:hermes-self-improvement:contract-first-ontology-review-heuristics
+    lane: Capability
+    priority: 2
+    capability_gap: >
+      Hermes still treats too much ontology work as free-form notes plus green
+      validation. The Keet study shows Hermes needs reusable contract-first review
+      heuristics: query-ready competency-question contracts, pitfall guidance,
+      role-vs-kind scrutiny, relation semantics review, explanation-grade debugging
+      evidence, and explicit micro-level modeling governance.
+    why_now: >
+      The ontology study created a long chain of domain issues, but those lessons only
+      partially became Hermes reasoning behavior. That means Hermes can read the right
+      principle and still propose or review ontology work without asking the contract
+      and governance questions the study already proved were necessary.
+    evidence:
+      - /home/david/stacks/hermes-agent/docs/self-improvement-study-retro-2026-04-15.md
+      - /home/david/stacks/smb-ontology-platform/docs/plans/2026-03-31-keet-ontology-engineering-progress-tracker.md
+      - /home/david/stacks/smb-ontology-platform/docs/issues/ONT-026-add-semantic-lifting-governance-for-source-schema-classification-and-app-boundaries.md
+      - /home/david/stacks/smb-ontology-platform/docs/issues/ONT-010-add-competency-question-authoring-templates-and-query-ready-cq-contracts.md
+      - /home/david/stacks/smb-ontology-platform/docs/issues/ONT-008-add-ontology-pitfall-scanning-and-tips-style-authoring-guidance.md
+      - /home/david/stacks/smb-ontology-platform/docs/issues/ONT-007-add-rbox-compatibility-and-safe-property-chain-audit.md
+      - /home/david/stacks/smb-ontology-platform/docs/issues/ONT-006-add-taxonomy-metaproperty-governance-and-ontoclean-audit.md
+      - /home/david/stacks/smb-ontology-platform/docs/issues/ONT-005-add-structured-logical-justification-and-explanation-artifacts.md
+      - /home/david/stacks/smb-ontology-platform/docs/issues/ONT-004-add-micro-level-ontology-authoring-contract-and-governance.md
+    target_surface:
+      - /home/david/stacks/hermes-agent
+      - ontology prompts
+      - skills
+      - proposal loops
+      - self-improvement context building
+    verification_expectation:
+      - ontology-facing prompts or skills explicitly require competency-question contracts, pitfall and TIPS review, taxonomy and relation-semantics review, and explanation-grade evidence where relevant
+      - tests or fixtures prove the new heuristics are present in the ontology reasoning context Hermes actually consumes
+      - a future ontology study run can name which contract-first heuristics were applied instead of only summarizing the lesson
+    expected_effect: >
+      Hermes will use the ontology study as an operating discipline, not just as
+      reading comprehension.
