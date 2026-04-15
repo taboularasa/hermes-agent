@@ -2312,7 +2312,6 @@ class AIAgent:
         """
         # Walk history backwards to find the most recent todo tool response
         last_todo_response = None
-        last_execution_frame = None
         for msg in reversed(history):
             if msg.get("role") != "tool":
                 continue
@@ -2324,19 +2323,13 @@ class AIAgent:
                 data = json.loads(content)
                 if "todos" in data and isinstance(data["todos"], list):
                     last_todo_response = data["todos"]
-                    if isinstance(data.get("execution_frame"), dict):
-                        last_execution_frame = data["execution_frame"]
                     break
             except (json.JSONDecodeError, TypeError):
                 continue
         
         if last_todo_response:
             # Replay the items into the store (replace mode)
-            self._todo_store.write(
-                last_todo_response,
-                merge=False,
-                execution_frame=last_execution_frame,
-            )
+            self._todo_store.write(last_todo_response, merge=False)
             if not self.quiet_mode:
                 self._vprint(f"{self.log_prefix}📋 Restored {len(last_todo_response)} todo item(s) from history")
         _set_interrupt(False)
@@ -2847,7 +2840,7 @@ class AIAgent:
 
     @staticmethod
     def _cap_delegate_task_calls(tool_calls: list) -> list:
-        """Truncate excess delegate_task calls to MAX_CONCURRENT_CHILDREN.
+        """Truncate excess delegate_task calls to max_concurrent_children.
 
         The delegate_tool caps the task list inside a single call, but the
         model can emit multiple separate delegate_task tool_calls in one
@@ -2855,23 +2848,24 @@ class AIAgent:
 
         Returns the original list if no truncation was needed.
         """
-        from tools.delegate_tool import MAX_CONCURRENT_CHILDREN
+        from tools.delegate_tool import _get_max_concurrent_children
+        max_children = _get_max_concurrent_children()
         delegate_count = sum(1 for tc in tool_calls if tc.function.name == "delegate_task")
-        if delegate_count <= MAX_CONCURRENT_CHILDREN:
+        if delegate_count <= max_children:
             return tool_calls
         kept_delegates = 0
         truncated = []
         for tc in tool_calls:
             if tc.function.name == "delegate_task":
-                if kept_delegates < MAX_CONCURRENT_CHILDREN:
+                if kept_delegates < max_children:
                     truncated.append(tc)
                     kept_delegates += 1
             else:
                 truncated.append(tc)
         logger.warning(
             "Truncated %d excess delegate_task call(s) to enforce "
-            "MAX_CONCURRENT_CHILDREN=%d limit",
-            delegate_count - MAX_CONCURRENT_CHILDREN, MAX_CONCURRENT_CHILDREN,
+            "max_concurrent_children=%d limit",
+            delegate_count - max_children, max_children,
         )
         return truncated
 
@@ -5478,7 +5472,6 @@ class AIAgent:
             return _todo_tool(
                 todos=function_args.get("todos"),
                 merge=function_args.get("merge", False),
-                execution_frame=function_args.get("execution_frame"),
                 store=self._todo_store,
             )
         elif function_name == "session_search":
@@ -5803,7 +5796,6 @@ class AIAgent:
                 function_result = _todo_tool(
                     todos=function_args.get("todos"),
                     merge=function_args.get("merge", False),
-                    execution_frame=function_args.get("execution_frame"),
                     store=self._todo_store,
                 )
                 tool_duration = time.time() - tool_start_time

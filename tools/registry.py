@@ -271,5 +271,13 @@ class ToolRegistry:
         return available, unavailable
 
 
+def tool_error(message, **extra) -> str:
+    """Return a JSON error string for tool handlers."""
+    result = {"error": str(message)}
+    if extra:
+        result.update(extra)
+    return json.dumps(result, ensure_ascii=False)
+
+
 # Module-level singleton
 registry = ToolRegistry()

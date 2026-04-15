@@ -30,7 +30,6 @@ Write a markdown plan that is concrete and actionable.
 
 Include, when relevant:
 - Goal
-- Execution frame (goals, constraints, actors, artifacts, evidence, commitments, verification targets) <!-- # HADTO-PATCH: execution frame planning guidance -->
 - Current context / assumptions
 - Proposed approach
 - Step-by-step plan
