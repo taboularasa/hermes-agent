@@ -1018,6 +1018,151 @@ def _configured_evidence_sources(reward_policy: dict[str, Any]) -> list[str]:
     return deduped
 
 
+def _growth_signal_label(signal_type: str) -> str:
+    normalized = str(signal_type or "").strip().casefold()
+    if normalized == "client_pipeline":
+        return "Client pipeline"
+    if normalized == "social_proof":
+        return "Social proof"
+    return str(signal_type or "Growth").strip().replace("_", " ").title() or "Growth"
+
+
+def _growth_signal_default_priority_effect(signal_type: str) -> str:
+    normalized = str(signal_type or "").strip().casefold()
+    if normalized == "client_pipeline":
+        return "Raises urgency for proposal, follow-up, demo, and contract-facing backlog work."
+    if normalized == "social_proof":
+        return "Raises urgency for visible delivery outcomes, case-study packaging, and proof-of-execution work."
+    return "Raises urgency for concrete growth work in the current epoch."
+
+
+def _configured_growth_signals(reward_policy: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_signals = reward_policy.get("growth_signals")
+    if not isinstance(raw_signals, list):
+        return []
+
+    configured: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw_signals:
+        if isinstance(item, dict):
+            if item.get("active") is False:
+                continue
+            signal_type = str(item.get("type") or item.get("kind") or "").strip().casefold() or "growth"
+            summary = str(item.get("summary") or item.get("signal") or item.get("name") or "").strip()
+            priority_effect = str(item.get("priority_effect") or item.get("impact") or "").strip()
+            raw_keywords = item.get("keywords")
+            priority_boost = item.get("priority_boost")
+        else:
+            signal_type = "growth"
+            summary = str(item or "").strip()
+            priority_effect = ""
+            raw_keywords = []
+            priority_boost = None
+        if not summary:
+            continue
+        label = _growth_signal_label(signal_type)
+        normalized_key = f"{signal_type}:{summary.casefold()}"
+        if normalized_key in seen:
+            continue
+        seen.add(normalized_key)
+        keywords = [
+            str(keyword).strip().casefold()
+            for keyword in (raw_keywords if isinstance(raw_keywords, list) else [])
+            if str(keyword).strip()
+        ]
+        if not priority_effect:
+            priority_effect = _growth_signal_default_priority_effect(signal_type)
+        try:
+            boost_value = float(priority_boost) if priority_boost is not None else 0.15
+        except (TypeError, ValueError):
+            boost_value = 0.15
+        boost_value = max(0.0, min(boost_value, 1.0))
+        configured.append(
+            {
+                "type": signal_type,
+                "label": label,
+                "summary": summary,
+                "priority_effect": priority_effect,
+                "priority_boost": round(boost_value, 3),
+                "keywords": keywords,
+            }
+        )
+    return configured
+
+
+def _growth_signal_assessment(
+    *,
+    reward_policy: dict[str, Any],
+    lane: str,
+    title: str,
+    detail: str,
+    target_surface: str = "",
+    expected_effect: str = "",
+) -> dict[str, Any]:
+    if str(lane or "").strip().casefold() != "growth":
+        return {
+            "signals": [],
+            "summary": "",
+            "priority_boost": 0.0,
+            "description_lines": [],
+        }
+
+    configured = _configured_growth_signals(reward_policy)
+    if not configured:
+        return {
+            "signals": [],
+            "summary": "",
+            "priority_boost": 0.0,
+            "description_lines": [],
+        }
+
+    haystack = " ".join(
+        value
+        for value in (title, detail, target_surface, expected_effect)
+        if str(value or "").strip()
+    ).casefold()
+    signals: list[dict[str, Any]] = []
+    description_lines: list[str] = []
+    total_boost = 0.0
+    active_labels: list[str] = []
+    for signal in configured:
+        keywords = signal.get("keywords") or []
+        matched_keywords = [keyword for keyword in keywords if keyword and keyword in haystack]
+        boost = float(signal.get("priority_boost") or 0.0)
+        if keywords and not matched_keywords:
+            boost *= 0.5
+        boost = round(boost, 3)
+        total_boost += boost
+        active_labels.append(str(signal.get("label") or "Growth"))
+        description = (
+            f"- {signal.get('label')}: {signal.get('summary')} "
+            f"Prioritization effect: {signal.get('priority_effect')}"
+        ).strip()
+        if matched_keywords:
+            description += f" Matched on: {', '.join(matched_keywords[:3])}."
+        description_lines.append(description)
+        signals.append(
+            {
+                **signal,
+                "matched_keywords": matched_keywords[:3],
+                "applied_priority_boost": boost,
+            }
+        )
+
+    unique_labels = list(dict.fromkeys(active_labels))
+    summary = (
+        "Active growth signals increase urgency for this Growth lane work: "
+        + ", ".join(unique_labels)
+        + "."
+    )
+    return {
+        "signals": signals,
+        "summary": summary,
+        "priority_boost": round(total_boost, 3),
+        "description_lines": description_lines,
+    }
+
+
 def _benchmark_provenance_items(benchmark: dict[str, Any]) -> list[dict[str, Any]]:
     provenance = (benchmark.get("gate") or {}).get("provenance") or {}
     items = provenance.get("items")
@@ -2054,6 +2199,10 @@ def _benchmark_issue_specs(
             continue
         if gate_status == "degraded":
             lane = "Maintenance"
+        target_surface = str(defaults.get("target_surface") or "Hermes self-improvement control loop").strip()
+        expected_effect = str(
+            defaults.get("expected_effect") or "Improve self-improvement benchmark trajectory."
+        ).strip()
 
         critical_failures = ", ".join(str(value) for value in benchmark.get("critical_failures", []))
         why_now = (
@@ -2063,6 +2212,23 @@ def _benchmark_issue_specs(
         )
         if critical_failures:
             why_now += f" Critical failures: {critical_failures}."
+        growth_signal_assessment = _growth_signal_assessment(
+            reward_policy=reward_policy,
+            lane=lane,
+            title=str(defaults.get("title") or benchmark_id).strip(),
+            detail=" ".join(
+                value
+                for value in (
+                    str(item.get("detail") or "").strip(),
+                    why_now,
+                )
+                if value
+            ),
+            target_surface=target_surface,
+            expected_effect=expected_effect,
+        )
+        if growth_signal_assessment["summary"]:
+            why_now += f" {growth_signal_assessment['summary']}"
 
         description_lines = [
             f"Lane: {lane}",
@@ -2087,17 +2253,25 @@ def _benchmark_issue_specs(
                     *evidence_source_lines,
                 ]
             )
+        if growth_signal_assessment["description_lines"]:
+            description_lines.extend(
+                [
+                    "",
+                    "Growth signals affecting prioritization:",
+                    *growth_signal_assessment["description_lines"],
+                ]
+            )
         description_lines.extend(
             [
                 "",
                 "Target repo or surface:",
-                str(defaults.get("target_surface") or "Hermes self-improvement control loop").strip(),
+                target_surface,
                 "",
                 "Verification expectation:",
                 str(defaults.get("verification") or "Run the benchmark again and confirm this check improves.").strip(),
                 "",
                 "Expected effect:",
-                str(defaults.get("expected_effect") or "Improve self-improvement benchmark trajectory.").strip(),
+                expected_effect,
                 "",
             ]
         )
@@ -2117,6 +2291,9 @@ def _benchmark_issue_specs(
                 "score": score,
                 "weight": int(item.get("weight") or 0),
                 "detail": str(item.get("detail") or "").strip(),
+                "growth_signals": growth_signal_assessment["signals"],
+                "growth_signal_summary": growth_signal_assessment["summary"],
+                "growth_priority_boost": growth_signal_assessment["priority_boost"],
                 "description": "\n".join(description_lines).strip(),
             }
         )
@@ -2126,7 +2303,7 @@ def _benchmark_issue_specs(
         key=lambda item: (
             0 if item.get("critical") else 1,
             _benchmark_priority_rank(item.get("status") or ""),
-            -int(item.get("weight") or 0),
+            -(int(item.get("weight") or 0) + float(item.get("growth_priority_boost") or 0.0)),
             float(item.get("score") or 0.0),
             str(item.get("benchmark_id") or ""),
         ),
@@ -2246,6 +2423,24 @@ def _build_ontology_fallback_candidate(
         "Turn fresh ontology discoveries into contract-facing proposals and backlog that Hermes can execute "
         "against the current epoch objective."
     )
+    growth_signal_assessment = _growth_signal_assessment(
+        reward_policy=reward_policy,
+        lane="Growth",
+        title="Convert ontology discoveries into contract-ready proposals and backlog",
+        detail=" ".join(
+            value
+            for value in (
+                why_now_detail,
+                contract_title,
+                contract_change_surface,
+            )
+            if value
+        ),
+        target_surface=target_surface,
+        expected_effect=expected_effect,
+    )
+    if growth_signal_assessment["summary"]:
+        why_now_detail += f" {growth_signal_assessment['summary']}"
 
     description_lines = [
         "Lane: Growth",
@@ -2262,6 +2457,14 @@ def _build_ontology_fallback_candidate(
     evidence_source_lines = _format_issue_evidence_sources(benchmark, reward_policy)
     if evidence_source_lines:
         description_lines.extend(["", "Evidence sources:", *evidence_source_lines])
+    if growth_signal_assessment["description_lines"]:
+        description_lines.extend(
+            [
+                "",
+                "Growth signals affecting prioritization:",
+                *growth_signal_assessment["description_lines"],
+            ]
+        )
     description_lines.extend(
         [
             "",
@@ -2295,6 +2498,9 @@ def _build_ontology_fallback_candidate(
         "expected_effect": expected_effect,
         "objective_name": objective_name,
         "objective_review_question": objective_review_question,
+        "growth_signals": growth_signal_assessment["signals"],
+        "growth_signal_summary": growth_signal_assessment["summary"],
+        "growth_priority_boost": growth_signal_assessment["priority_boost"],
         "description": "\n".join(description_lines).strip(),
     }
 
@@ -2374,6 +2580,14 @@ def _format_pipeline_status_comment(
     benchmark: dict[str, Any],
     repairs: list[dict[str, Any]],
 ) -> str:
+    growth_signal_lines = [
+        (
+            f"- {str(item.get('label') or 'Growth')}: {str(item.get('summary') or '').strip()} "
+            f"Prioritization effect: {str(item.get('priority_effect') or '').strip()}"
+        ).strip()
+        for item in (candidate.get("growth_signals") or [])
+        if isinstance(item, dict) and str(item.get("summary") or "").strip()
+    ]
     if str(candidate.get("candidate_source") or "") == "ontology_fallback":
         lines = [
             "Status: ontology-backed self-improvement candidate selected.",
@@ -2398,6 +2612,8 @@ def _format_pipeline_status_comment(
                 f"Verification: {str(candidate.get('verification') or '').strip()}",
             ]
         )
+        if growth_signal_lines:
+            lines.extend(["", "Growth signals affecting prioritization:", *growth_signal_lines])
         return "\n".join(lines).strip()
 
     lines = [
@@ -2426,6 +2642,8 @@ def _format_pipeline_status_comment(
     provenance_summary = str(((benchmark.get("gate") or {}).get("provenance") or {}).get("summary_markdown") or "").strip()
     if provenance_summary:
         lines.extend(["", provenance_summary])
+    if growth_signal_lines:
+        lines.extend(["", "Growth signals affecting prioritization:", *growth_signal_lines])
     return "\n".join(lines).strip()
 
 
@@ -2888,6 +3106,7 @@ def evaluate_self_improvement_benchmark(
         "objective_name": str((reward_policy.get("epoch") or {}).get("name") or ""),
         "objective_review_question": str((reward_policy.get("epoch") or {}).get("review_question") or ""),
         "objective_path": reward_policy.get("_resolved_path"),
+        "growth_signals": _configured_growth_signals(reward_policy),
         "gate": gate,
         "ontology_prioritization": ontology_context.get("prioritization"),
         "score": overall_score,
