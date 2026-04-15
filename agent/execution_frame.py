@@ -136,6 +136,15 @@ class ExecutionFrame(BaseModel):
                 lines.append(f"- {target.target}{detail}")
         else:
             lines.append("- (none specified)")
+        lines.append("Assumptions:")
+        lines.extend(render_list(self.assumptions))
+        lines.append("Notes:")
+        if self.notes:
+            for line in str(self.notes).splitlines():
+                if line.strip():
+                    lines.append(f"- {line.strip()}")
+        else:
+            lines.append("- (none specified)")
         return "\n".join(lines)
 
 
@@ -147,6 +156,8 @@ _SECTION_MAP = {
     "evidence": {"evidence", "sources", "references"},
     "commitments": {"commitments", "promises", "agreements"},
     "verification_targets": {"verification", "validation", "tests", "checks"},
+    "assumptions": {"assumption", "assumptions"},
+    "notes": {"note", "notes"},
 }
 
 
@@ -240,6 +251,10 @@ def build_execution_frame(
             model.commitments = [Commitment(commitment=text) for text in parsed["commitments"]]
         if parsed.get("verification_targets") and not model.verification_targets:
             model.verification_targets = [VerificationTarget(target=text) for text in parsed["verification_targets"]]
+        if parsed.get("assumptions") and not model.assumptions:
+            model.assumptions = parsed["assumptions"]
+        if parsed.get("notes") and not model.notes:
+            model.notes = "\n".join(parsed["notes"])
 
     if include_default_actors and not model.actors:
         model.actors = [
@@ -249,3 +264,58 @@ def build_execution_frame(
 
     return model
 
+
+def build_plan_execution_frame(
+    *,
+    todos: Iterable[Dict[str, Any]],
+    frame: Any = None,
+    source: Optional[str] = None,
+) -> ExecutionFrame:
+    """Create a plan-oriented execution frame from todo items plus optional overrides."""
+    model = build_execution_frame(
+        frame=frame,
+        source=source,
+        include_default_actors=False,
+    )
+
+    normalized_todos: List[Dict[str, str]] = []
+    for item in todos:
+        if not isinstance(item, dict):
+            continue
+        content = str(item.get("content", "")).strip()
+        if not content:
+            continue
+        status = str(item.get("status", "")).strip().lower() or "pending"
+        normalized_todos.append({"content": content, "status": status})
+
+    if not model.goals:
+        active_goals = [
+            item["content"]
+            for item in normalized_todos
+            if item["status"] in {"pending", "in_progress"}
+        ]
+        if active_goals:
+            model.goals = active_goals
+        elif normalized_todos:
+            model.goals = [normalized_todos[0]["content"]]
+
+    if not model.commitments:
+        model.commitments = [
+            Commitment(
+                commitment=item["content"],
+                owner="Hermes",
+                status=item["status"],
+            )
+            for item in normalized_todos
+        ]
+
+    if not model.actors:
+        model.actors = [
+            Actor(
+                name="Hermes",
+                role="planner",
+                responsibility="plan execution and track follow-through",
+            ),
+        ]
+
+    return model

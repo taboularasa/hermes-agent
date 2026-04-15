@@ -1,4 +1,4 @@
-from agent.execution_frame import build_execution_frame
+from agent.execution_frame import build_execution_frame, build_plan_execution_frame
 
 
 def test_build_execution_frame_minimal():
@@ -41,3 +41,39 @@ def test_build_execution_frame_does_not_override_explicit_goals():
     )
     assert frame.goals == ["Use explicit goals"]
     assert frame.constraints == ["No drift"]
+
+
+def test_build_execution_frame_parses_assumptions_and_notes():
+    context = """
+Assumptions:
+- CI is available in the worktree
+Notes:
+- Keep the patch narrow
+- Preserve issue scope
+"""
+    frame = build_execution_frame(goal="Implement", context=context, source="test")
+    assert frame.assumptions == ["CI is available in the worktree"]
+    assert frame.notes == "Keep the patch narrow\nPreserve issue scope"
+    prompt = frame.to_prompt()
+    assert "Assumptions:" in prompt
+    assert "Notes:" in prompt
+
+
+def test_build_plan_execution_frame_maps_todos_to_commitments():
+    frame = build_plan_execution_frame(
+        todos=[
+            {"id": "1", "content": "Inspect delegate prompt", "status": "completed"},
+            {"id": "2", "content": "Add focused tests", "status": "in_progress"},
+            {"id": "3", "content": "Run pytest", "status": "pending"},
+        ],
+        source="todo",
+    )
+    assert frame.source == "todo"
+    assert frame.goals == ["Add focused tests", "Run pytest"]
+    assert [item.commitment for item in frame.commitments] == [
+        "Inspect delegate prompt",
+        "Add focused tests",
+        "Run pytest",
+    ]
+    assert frame.commitments[1].status == "in_progress"
+    assert frame.actors[0].role == "planner"

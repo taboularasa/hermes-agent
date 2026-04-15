@@ -17,6 +17,8 @@ Design:
 import json
 from typing import Dict, Any, List, Optional
 
+from agent.execution_frame import ExecutionFrame, build_plan_execution_frame
+
 
 # Valid status values for todo items
 VALID_STATUSES = {"pending", "in_progress", "completed", "cancelled"}
@@ -34,8 +36,14 @@ class TodoStore:
 
     def __init__(self):
         self._items: List[Dict[str, str]] = []
+        self._execution_frame: Optional[ExecutionFrame] = None
 
-    def write(self, todos: List[Dict[str, Any]], merge: bool = False) -> List[Dict[str, str]]:
+    def write(
+        self,
+        todos: List[Dict[str, Any]],
+        merge: bool = False,
+        execution_frame: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, str]]:
         """
         Write todos. Returns the full current list after writing.
 
@@ -43,6 +51,7 @@ class TodoStore:
             todos: list of {id, content, status} dicts
             merge: if False, replace the entire list. If True, update
                    existing items by id and append new ones.
+            execution_frame: optional typed execution frame for the current plan.
         """
         if not merge:
             # Replace mode: new list entirely
@@ -77,11 +86,26 @@ class TodoStore:
                     rebuilt.append(current)
                     seen.add(current["id"])
             self._items = rebuilt
+        if not self._items and execution_frame is None:
+            self._execution_frame = None
+        else:
+            frame_seed = execution_frame if execution_frame is not None else self.read_execution_frame()
+            self._execution_frame = build_plan_execution_frame(
+                todos=self._items,
+                frame=frame_seed,
+                source="todo",
+            )
         return self.read()
 
     def read(self) -> List[Dict[str, str]]:
         """Return a copy of the current list."""
         return [item.copy() for item in self._items]
+
+    def read_execution_frame(self) -> Optional[Dict[str, Any]]:
+        """Return a copy of the current execution frame, if any."""
+        if self._execution_frame is None:
+            return None
+        return self._execution_frame.model_dump()
 
     def has_items(self) -> bool:
         """Check if there are any items in the list."""
@@ -114,7 +138,16 @@ class TodoStore:
         if not active_items:
             return None
 
-        lines = ["[Your active task list was preserved across context compression]"]
+        lines = []
+        if self._execution_frame is not None:
+            active_frame = build_plan_execution_frame(
+                todos=active_items,
+                frame=self._execution_frame.model_dump(exclude={"commitments"}),
+                source=self._execution_frame.source or "todo",
+            )
+            lines.append("[Your execution frame was preserved across context compression]")
+            lines.append(active_frame.to_prompt())
+        lines.append("[Your active task list was preserved across context compression]")
         for item in active_items:
             marker = markers.get(item["status"], "[?]")
             lines.append(f"- {marker} {item['id']}. {item['content']} ({item['status']})")
@@ -147,6 +180,7 @@ class TodoStore:
 def todo_tool(
     todos: Optional[List[Dict[str, Any]]] = None,
     merge: bool = False,
+    execution_frame: Optional[Dict[str, Any]] = None,
     store: Optional[TodoStore] = None,
 ) -> str:
     """
@@ -155,6 +189,7 @@ def todo_tool(
     Args:
         todos: if provided, write these items. If None, read current list.
         merge: if True, update by id. If False (default), replace entire list.
+        execution_frame: optional typed execution frame for the current plan.
         store: the TodoStore instance from the AIAgent.
 
     Returns:
@@ -164,7 +199,7 @@ def todo_tool(
         return json.dumps({"error": "TodoStore not initialized"}, ensure_ascii=False)
 
     if todos is not None:
-        items = store.write(todos, merge)
+        items = store.write(todos, merge, execution_frame=execution_frame)
     else:
         items = store.read()
 
@@ -176,6 +211,7 @@ def todo_tool(
 
     return json.dumps({
         "todos": items,
+        "execution_frame": store.read_execution_frame(),
         "summary": {
             "total": len(items),
             "pending": pending,
@@ -207,6 +243,8 @@ TODO_SCHEMA = {
         "- Provide 'todos' array to create/update items\n"
         "- merge=false (default): replace the entire list with a fresh plan\n"
         "- merge=true: update existing items by id, add any new ones\n\n"
+        "- You may provide 'execution_frame' to capture the plan as goals, constraints, actors, artifacts, evidence, commitments, and verification targets.\n"
+        "- If 'execution_frame' is omitted, Hermes builds a minimal typed frame from the current plan so follow-on work can reuse it.\n\n"
         "Each item: {id: string, content: string, "
         "status: pending|in_progress|completed|cancelled}\n"
         "List order is priority. Only ONE item in_progress at a time.\n"
@@ -247,6 +285,14 @@ TODO_SCHEMA = {
                     "false (default): replace the entire list."
                 ),
                 "default": False
+            },
+            "execution_frame": {
+                "type": "object",
+                "description": (
+                    "Optional typed execution frame for this plan. "
+                    "Use it to make goals, constraints, actors, artifacts, evidence, commitments, "
+                    "and verification targets explicit."
+                ),
             }
         },
         "required": []
@@ -262,7 +308,11 @@ registry.register(
     toolset="todo",
     schema=TODO_SCHEMA,
     handler=lambda args, **kw: todo_tool(
-        todos=args.get("todos"), merge=args.get("merge", False), store=kw.get("store")),
+        todos=args.get("todos"),
+        merge=args.get("merge", False),
+        execution_frame=args.get("execution_frame"),
+        store=kw.get("store"),
+    ),
     check_fn=check_todo_requirements,
     emoji="📋",
 )

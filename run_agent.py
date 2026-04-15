@@ -2374,6 +2374,7 @@ class AIAgent:
         """
         # Walk history backwards to find the most recent todo tool response
         last_todo_response = None
+        last_execution_frame = None
         for msg in reversed(history):
             if msg.get("role") != "tool":
                 continue
@@ -2385,13 +2386,19 @@ class AIAgent:
                 data = json.loads(content)
                 if "todos" in data and isinstance(data["todos"], list):
                     last_todo_response = data["todos"]
+                    if isinstance(data.get("execution_frame"), dict):
+                        last_execution_frame = data["execution_frame"]
                     break
             except (json.JSONDecodeError, TypeError):
                 continue
         
         if last_todo_response:
             # Replay the items into the store (replace mode)
-            self._todo_store.write(last_todo_response, merge=False)
+            self._todo_store.write(
+                last_todo_response,
+                merge=False,
+                execution_frame=last_execution_frame,
+            )
             if not self.quiet_mode:
                 self._vprint(f"{self.log_prefix}📋 Restored {len(last_todo_response)} todo item(s) from history")
         _set_interrupt(False)
@@ -5683,6 +5690,7 @@ class AIAgent:
             return _todo_tool(
                 todos=function_args.get("todos"),
                 merge=function_args.get("merge", False),
+                execution_frame=function_args.get("execution_frame"),
                 store=self._todo_store,
             )
         elif function_name == "session_search":
@@ -6007,6 +6015,7 @@ class AIAgent:
                 function_result = _todo_tool(
                     todos=function_args.get("todos"),
                     merge=function_args.get("merge", False),
+                    execution_frame=function_args.get("execution_frame"),
                     store=self._todo_store,
                 )
                 tool_duration = time.time() - tool_start_time
