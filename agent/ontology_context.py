@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
-import subprocess
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -102,7 +100,6 @@ SEARCH_PROVIDER_ENV_KEYS = {
 SEARCH_PROVIDER_ENV_KEY_NAMES = tuple(
     dict.fromkeys(key for keys in SEARCH_PROVIDER_ENV_KEYS.values() for key in keys)
 )
-SEARCH_PROVIDER_SHELL_PROBE_TIMEOUT_SECONDS = 2.0
 
 BACKLOG_ISSUE_DIRS = (
     "docs/operations/ontology-backlog",
@@ -267,54 +264,27 @@ def _glob_latest_any(root: Path, patterns: Iterable[str]) -> Optional[Path]:
 @lru_cache(maxsize=1)
 def _load_hermes_search_provider_env_keys() -> frozenset[str]:
     try:
-        from hermes_cli.config import load_env
+        from hermes_cli.env_loader import load_hermes_dotenv
     except Exception:
         return frozenset()
 
     try:
-        env_vars = load_env() or {}
+        load_hermes_dotenv(
+            project_env=Path(__file__).resolve().parents[1] / ".env",
+            strict=False,
+        )
     except Exception:
         return frozenset()
 
     return frozenset(
         key
         for key in SEARCH_PROVIDER_ENV_KEY_NAMES
-        if str(env_vars.get(key) or "").strip()
-    )
-
-
-@lru_cache(maxsize=1)
-def _probe_shell_search_provider_env_keys() -> frozenset[str]:
-    bash_path = shutil.which("bash")
-    if not bash_path:
-        return frozenset()
-
-    script = "\n".join(
-        [
-            f'if [ -n "${{{key}:-}}" ]; then printf "%s\\n" "{key}"; fi'
-            for key in SEARCH_PROVIDER_ENV_KEY_NAMES
-        ]
-    )
-    try:
-        result = subprocess.run(
-            [bash_path, "-lc", script],
-            capture_output=True,
-            text=True,
-            timeout=SEARCH_PROVIDER_SHELL_PROBE_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except Exception:
-        return frozenset()
-
-    return frozenset(
-        line.strip()
-        for line in str(result.stdout or "").splitlines()
-        if line.strip() in SEARCH_PROVIDER_ENV_KEY_NAMES
+        if os.getenv(key, "").strip()
     )
 
 
 def _fallback_search_provider_env_keys() -> frozenset[str]:
-    return _load_hermes_search_provider_env_keys() | _probe_shell_search_provider_env_keys()
+    return _load_hermes_search_provider_env_keys()
 
 
 def _present_search_provider_env_keys(env_keys: Iterable[str]) -> list[str]:

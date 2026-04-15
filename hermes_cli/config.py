@@ -1582,22 +1582,20 @@ def save_config(config: Dict[str, Any]):
 
 
 def load_env() -> Dict[str, str]:
-    """Load environment variables from ~/.hermes/.env."""
-    env_path = get_env_path()
-    env_vars = {}
-    
-    if env_path.exists():
-        # On Windows, open() defaults to the system locale (cp1252) which can
-        # fail on UTF-8 .env files. Use explicit UTF-8 only on Windows.
-        open_kw = {"encoding": "utf-8", "errors": "replace"} if _IS_WINDOWS else {}
-        with open(env_path, **open_kw) as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#') and '=' in line:
-                    key, _, value = line.partition('=')
-                    env_vars[key.strip()] = value.strip().strip('"\'')
-    
-    return env_vars
+    """Return the current Hermes runtime environment.
+
+    Runtime secrets are loaded from Doppler by ``hermes_cli.env_loader`` and
+    mirrored into ``os.environ``. This helper intentionally does not read
+    ``~/.hermes/.env``.
+    """
+    try:
+        from hermes_cli.env_loader import load_hermes_dotenv
+
+        load_hermes_dotenv(project_env=get_project_root() / ".env")
+    except Exception:
+        if os.getenv("HERMES_REQUIRE_DOPPLER", "1").strip().lower() not in {"", "0", "false", "no", "off"}:
+            raise
+    return dict(os.environ)
 
 
 def _sanitize_env_lines(lines: list) -> list:
@@ -1698,6 +1696,10 @@ def sanitize_env_file() -> int:
 
 def save_env_value(key: str, value: str):
     """Save or update a value in ~/.hermes/.env."""
+    if os.getenv("HERMES_REQUIRE_DOPPLER", "1").strip().lower() not in {"", "0", "false", "no", "off"}:
+        raise RuntimeError(
+            f"Hermes is configured for Doppler-only secrets. Update {key} in Doppler instead of ~/.hermes/.env."
+        )
     if is_managed():
         managed_error(f"set {key}")
         return
@@ -1790,14 +1792,10 @@ def save_env_value_secure(key: str, value: str) -> Dict[str, Any]:
 
 
 def get_env_value(key: str) -> Optional[str]:
-    """Get a value from ~/.hermes/.env or environment."""
-    # Check environment first
+    """Get a value from the current Hermes runtime environment."""
     if key in os.environ:
         return os.environ[key]
-    
-    # Then check .env file
-    env_vars = load_env()
-    return env_vars.get(key)
+    return load_env().get(key)
 
 
 # =============================================================================

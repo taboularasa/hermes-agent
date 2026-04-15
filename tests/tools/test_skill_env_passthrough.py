@@ -63,8 +63,8 @@ class TestSkillViewRegistersPassthrough:
         assert result["success"] is True
         assert is_env_passthrough("TENOR_API_KEY")
 
-    def test_remote_backend_persisted_env_vars_registered(self, tmp_path, monkeypatch):
-        """Remote-backed skills still register locally available env vars."""
+    def test_remote_backend_persisted_env_vars_require_runtime_env(self, tmp_path, monkeypatch):
+        """Remote-backed skills do not treat persisted host secrets as available."""
         monkeypatch.setenv("TERMINAL_ENV", "docker")
         _create_skill(
             tmp_path,
@@ -88,9 +88,9 @@ class TestSkillViewRegistersPassthrough:
             result = json.loads(skill_view(name="test-skill"))
 
         assert result["success"] is True
-        assert result["setup_needed"] is False
-        assert result["missing_required_environment_variables"] == []
-        assert is_env_passthrough("TENOR_API_KEY")
+        assert result["setup_needed"] is True
+        assert result["missing_required_environment_variables"] == ["TENOR_API_KEY"]
+        assert not is_env_passthrough("TENOR_API_KEY")
 
     def test_missing_env_vars_not_registered(self, tmp_path, monkeypatch):
         """When a skill declares required_environment_variables but the var is NOT set,

@@ -813,7 +813,7 @@ class TestSkillViewPrerequisites:
         assert result["setup_needed"] is False
         assert result["missing_required_environment_variables"] == []
 
-    def test_remote_backend_treats_persisted_env_as_available(
+    def test_remote_backend_requires_runtime_env_even_when_secret_was_persisted(
         self, tmp_path, monkeypatch
     ):
         monkeypatch.setenv("TERMINAL_ENV", "docker")
@@ -832,9 +832,9 @@ class TestSkillViewPrerequisites:
 
         result = json.loads(raw)
         assert result["success"] is True
-        assert result["setup_needed"] is False
-        assert result["missing_required_environment_variables"] == []
-        assert result["readiness_status"] == "available"
+        assert result["setup_needed"] is True
+        assert result["missing_required_environment_variables"] == ["PERSISTED_REMOTE_KEY"]
+        assert result["readiness_status"] == "setup_needed"
 
     def test_no_setup_metadata_when_no_required_envs(self, tmp_path):
         with patch("tools.skills_tool.SKILLS_DIR", tmp_path):

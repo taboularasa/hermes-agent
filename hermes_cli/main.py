@@ -136,11 +136,10 @@ def _apply_profile_override() -> None:
 
 _apply_profile_override()
 
-# Load .env from ~/.hermes/.env first, then project root as dev fallback.
-# User-managed env files should override stale shell exports on restart.
+# Load runtime secrets from Doppler before the CLI boots.
 from hermes_cli.config import get_hermes_home
 from hermes_cli.env_loader import load_hermes_dotenv
-load_hermes_dotenv(project_env=PROJECT_ROOT / '.env')
+load_hermes_dotenv(project_env=PROJECT_ROOT / '.env', strict=False)
 
 
 import logging
@@ -173,10 +172,10 @@ def _relative_time(ts) -> str:
 
 def _has_any_provider_configured() -> bool:
     """Check if at least one inference provider is usable."""
-    from hermes_cli.config import get_env_path, get_hermes_home
+    from hermes_cli.config import get_hermes_home
     from hermes_cli.auth import get_auth_status
 
-    # Check env vars (may be set by .env or shell).
+    # Check env vars (populated by Doppler or the current process).
     # OPENAI_BASE_URL alone counts — local models (vLLM, llama.cpp, etc.)
     # often don't require an API key.
     from hermes_cli.auth import PROVIDER_REGISTRY
@@ -188,21 +187,6 @@ def _has_any_provider_configured() -> bool:
             provider_env_vars.update(pconfig.api_key_env_vars)
     if any(os.getenv(v) for v in provider_env_vars):
         return True
-
-    # Check .env file for keys
-    env_file = get_env_path()
-    if env_file.exists():
-        try:
-            for line in env_file.read_text().splitlines():
-                line = line.strip()
-                if line.startswith("#") or "=" not in line:
-                    continue
-                key, _, val = line.partition("=")
-                val = val.strip().strip("'\"")
-                if key.strip() in provider_env_vars and val:
-                    return True
-        except Exception:
-            pass
 
     # Check provider-specific auth fallbacks (for example, Copilot via gh auth).
     try:

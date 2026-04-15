@@ -15,6 +15,17 @@ The tools are imported into model_tools.py which provides a unified interface
 for the AI agent to access all capabilities.
 """
 
+from pathlib import Path
+
+from hermes_constants import get_hermes_home
+from hermes_cli.env_loader import load_hermes_dotenv
+
+load_hermes_dotenv(
+    hermes_home=get_hermes_home(),
+    project_env=Path(__file__).resolve().parent.parent / ".env",
+    strict=False,
+)
+
 # Export all tools for easy importing
 from .web_tools import (
     web_search_tool,
