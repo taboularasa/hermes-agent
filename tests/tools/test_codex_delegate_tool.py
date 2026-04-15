@@ -437,6 +437,170 @@ def test_codex_delegate_list_separates_probe_runs(monkeypatch, tmp_path):
     assert {"codex_real", "codex_probe"} <= run_ids
 
 
+def test_resume_interrupted_codex_runs_relaunches_recent_process_missing_failure(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_git_repo(repo)
+
+    fake_registry = _FakeProcessRegistry()
+    monkeypatch.setattr(codex_delegate_tool, "process_registry", fake_registry)
+    monkeypatch.setattr(codex_delegate_tool.shutil, "which", lambda _name: "/usr/bin/codex")
+    monkeypatch.setattr(codex_delegate_tool, "_resolve_repo_root", lambda _workdir: str(repo))
+    monkeypatch.setattr(codex_delegate_tool, "_pid_is_running", lambda _pid: False)
+
+    record = {
+        "run_id": "codex_interrupted",
+        "status": "failed",
+        "phase": "implement",
+        "run_kind": "delegated",
+        "external_key": "linear:HAD-400",
+        "prompt": "Implement the feature.",
+        "model": "",
+        "workdir": str(repo),
+        "task_id": "sess-1",
+        "process_session_id": "proc_missing",
+        "pid": 8181,
+        "codex_session_id": "thread-abc",
+        "started_at": 900.0,
+        "completed_at": 990.0,
+        "stale_reason": "process_missing",
+        "record_path": str(repo / ".git" / "hermes-codex" / "codex_interrupted.json"),
+        "latest_path": str(repo / ".git" / "hermes-codex" / "latest.json"),
+        "last_message_path": str(repo / ".git" / "hermes-codex" / "codex_interrupted.last-message.txt"),
+    }
+    codex_delegate_tool._persist_record(record)
+
+    calls = []
+
+    def fake_start_run(**kwargs):
+        calls.append(kwargs)
+        return {
+            "run_id": "codex_resumed",
+            "status": "running",
+            "phase": kwargs["phase"],
+            "run_kind": "delegated",
+            "external_key": kwargs["external_key"],
+            "workdir": kwargs["workdir"],
+            "task_id": kwargs["task_id"],
+            "process_session_id": "proc_resumed",
+            "pid": 9191,
+            "record_path": str(repo / ".git" / "hermes-codex" / "codex_resumed.json"),
+            "latest_path": str(repo / ".git" / "hermes-codex" / "latest.json"),
+            "last_message_path": str(repo / ".git" / "hermes-codex" / "codex_resumed.last-message.txt"),
+        }
+
+    monkeypatch.setattr(codex_delegate_tool, "_start_run", fake_start_run)
+
+    summary = codex_delegate_tool.resume_interrupted_codex_runs(now=1000.0)
+
+    assert summary["resumed"] == [{
+        "from_run_id": "codex_interrupted",
+        "run_id": "codex_resumed",
+        "external_key": "linear:HAD-400",
+        "used_codex_resume": True,
+    }]
+    assert calls[0]["parent_run_id"] == "codex_interrupted"
+    assert calls[0]["codex_session_id"] == "thread-abc"
+    assert "[Hermes gateway restart recovery]" in calls[0]["prompt"]
+
+    interrupted = codex_delegate_tool._load_record("codex_interrupted")
+    resumed = codex_delegate_tool._load_record("codex_resumed")
+    assert interrupted["stale_reason"] == "gateway_restart_interrupted"
+    assert interrupted["resumed_by_run_id"] == "codex_resumed"
+    assert interrupted["exit_code"] == -15
+    assert resumed["restart_recovery"] is True
+    assert resumed["recovered_from_run_id"] == "codex_interrupted"
+
+
+def test_resume_interrupted_codex_runs_only_resumes_latest_record_per_external_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_git_repo(repo)
+
+    old_worktree = repo / "old"
+    new_worktree = repo / "new"
+    old_worktree.mkdir()
+    new_worktree.mkdir()
+
+    fake_registry = _FakeProcessRegistry()
+    monkeypatch.setattr(codex_delegate_tool, "process_registry", fake_registry)
+    monkeypatch.setattr(codex_delegate_tool.shutil, "which", lambda _name: "/usr/bin/codex")
+    monkeypatch.setattr(codex_delegate_tool, "_resolve_repo_root", lambda _workdir: str(repo))
+    monkeypatch.setattr(codex_delegate_tool, "_pid_is_running", lambda _pid: False)
+
+    old_record = {
+        "run_id": "codex_old",
+        "status": "failed",
+        "phase": "repair",
+        "run_kind": "delegated",
+        "external_key": "linear:HAD-271",
+        "prompt": "Fix the broken journal path.",
+        "workdir": str(old_worktree),
+        "task_id": "sess-1",
+        "process_session_id": "proc_old",
+        "pid": 1001,
+        "started_at": 900.0,
+        "completed_at": 995.0,
+        "stale_reason": "process_missing",
+        "record_path": str(repo / ".git" / "hermes-codex" / "codex_old.json"),
+        "latest_path": str(repo / ".git" / "hermes-codex" / "latest.json"),
+        "last_message_path": str(repo / ".git" / "hermes-codex" / "codex_old.last-message.txt"),
+    }
+    new_record = {
+        "run_id": "codex_new",
+        "status": "failed",
+        "phase": "repair",
+        "run_kind": "delegated",
+        "external_key": "linear:HAD-271",
+        "prompt": "Fix the broken journal path.",
+        "workdir": str(new_worktree),
+        "task_id": "sess-1",
+        "process_session_id": "proc_new",
+        "pid": 1002,
+        "started_at": 940.0,
+        "completed_at": 999.0,
+        "stale_reason": "process_missing",
+        "record_path": str(repo / ".git" / "hermes-codex" / "codex_new.json"),
+        "latest_path": str(repo / ".git" / "hermes-codex" / "latest.json"),
+        "last_message_path": str(repo / ".git" / "hermes-codex" / "codex_new.last-message.txt"),
+    }
+    codex_delegate_tool._persist_record(old_record)
+    codex_delegate_tool._persist_record(new_record)
+
+    calls = []
+
+    def fake_start_run(**kwargs):
+        calls.append(kwargs)
+        return {
+            "run_id": "codex_latest_resume",
+            "status": "running",
+            "phase": kwargs["phase"],
+            "run_kind": "delegated",
+            "external_key": kwargs["external_key"],
+            "workdir": kwargs["workdir"],
+            "task_id": kwargs["task_id"],
+            "process_session_id": "proc_latest_resume",
+            "pid": 9192,
+            "record_path": str(repo / ".git" / "hermes-codex" / "codex_latest_resume.json"),
+            "latest_path": str(repo / ".git" / "hermes-codex" / "latest.json"),
+            "last_message_path": str(repo / ".git" / "hermes-codex" / "codex_latest_resume.last-message.txt"),
+        }
+
+    monkeypatch.setattr(codex_delegate_tool, "_start_run", fake_start_run)
+
+    summary = codex_delegate_tool.resume_interrupted_codex_runs(now=1000.0)
+
+    assert len(summary["resumed"]) == 1
+    assert summary["resumed"][0]["from_run_id"] == "codex_new"
+    assert calls[0]["workdir"] == str(new_worktree)
+    old_saved = codex_delegate_tool._load_record("codex_old")
+    new_saved = codex_delegate_tool._load_record("codex_new")
+    assert old_saved.get("resumed_by_run_id") is None
+    assert new_saved["resumed_by_run_id"] == "codex_latest_resume"
+
+
 def test_codex_delegate_start_binds_ctx_worktree_for_repo_target(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     repo = tmp_path / "repo"
