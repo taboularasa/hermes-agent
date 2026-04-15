@@ -863,6 +863,103 @@ def test_evaluate_self_improvement_evidence_restores_retired_ctx_binding_for_act
     )
 
 
+def test_evaluate_self_improvement_evidence_restores_retired_ctx_binding_for_checkpoint_backed_handoff(
+    monkeypatch, tmp_path
+):
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(codex_delegate_tool, "_pid_is_running", lambda pid: int(pid or 0) == 5151)
+
+    class _CheckpointRegistry:
+        def __init__(self):
+            self.recover_calls = []
+
+        def get(self, _session_id):
+            return None
+
+        def recover_session_from_checkpoint(self, session_id):
+            self.recover_calls.append(session_id)
+            return type(
+                "RecoveredSession",
+                (),
+                {
+                    "id": session_id,
+                    "pid": 5151,
+                    "output_buffer": "",
+                    "exited": False,
+                    "exit_code": None,
+                    "started_at": 100.0,
+                },
+            )()
+
+    checkpoint_registry = _CheckpointRegistry()
+    monkeypatch.setattr(codex_delegate_tool, "process_registry", checkpoint_registry)
+
+    _write_json(journal_path, {"entries": [{"occurredAt": recent}]})
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_handoff": {
+                    "run_id": "codex_handoff",
+                    "status": "running",
+                    "started_at": recent,
+                    "process_session_id": "proc_checkpoint",
+                    "ctx_task_id": "task-1",
+                    "ctx_worktree_id": "wt-1",
+                    "ctx_worktree_path": str(worktree),
+                }
+            }
+        },
+    )
+    _write_json(
+        ctx_path,
+        {
+            "sessions": {
+                "cron_session": {
+                    "session_id": "cron_session",
+                    "task_id": "task-1",
+                    "active": False,
+                    "reason": "ctx binding retired: cron job finished",
+                    "updated_at": recent,
+                    "worktree_id": "wt-1",
+                    "worktree_path": str(worktree),
+                    "platform": "cron",
+                }
+            }
+        },
+    )
+
+    gate = self_improvement_tool.evaluate_self_improvement_evidence(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        now=now,
+    )
+    persisted_ctx = json.loads(ctx_path.read_text(encoding="utf-8"))
+    persisted_codex = json.loads(codex_path.read_text(encoding="utf-8"))
+
+    assert checkpoint_registry.recover_calls == ["proc_checkpoint", "proc_checkpoint"]
+    assert gate["planning_contradictions"] == []
+    assert persisted_ctx["sessions"]["cron_session"]["active"] is True
+    assert (
+        persisted_ctx["sessions"]["cron_session"]["reason"]
+        == "ctx task handed off to delegated Codex run"
+    )
+    assert persisted_codex["runs"]["codex_handoff"]["status"] == "running"
+    assert persisted_codex["runs"]["codex_handoff"]["pid"] == 5151
+
+
 def test_evaluate_self_improvement_evidence_tolerates_live_detached_ctx_worktree(
     monkeypatch, tmp_path
 ):

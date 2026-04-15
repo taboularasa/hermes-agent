@@ -536,6 +536,13 @@ def _refresh_record(
     record.setdefault("run_kind", "probe" if _is_probe_phase(record.get("phase")) else "delegated")
     session_id = str(record.get("process_session_id") or "")
     session = process_registry.get(session_id) if session_id else None
+    if session is None and session_id:
+        recover_session = getattr(process_registry, "recover_session_from_checkpoint", None)
+        if callable(recover_session):
+            try:
+                session = recover_session(session_id)
+            except Exception:
+                logger.debug("Failed to recover detached process session %s from checkpoint", session_id, exc_info=True)
     output_buffer = session.output_buffer if session and session.output_buffer else ""
     parsed = _parse_codex_events(output_buffer)
     current_time = _coerce_now_epoch(now)

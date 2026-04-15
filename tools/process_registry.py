@@ -422,6 +422,77 @@ class ProcessRegistry:
         with self._lock:
             return self._running.get(session_id) or self._finished.get(session_id)
 
+    def recover_session_from_checkpoint(self, session_id: str) -> Optional[ProcessSession]:
+        """Recover one detached running session from the checkpoint file on demand."""
+        session_id = str(session_id or "").strip()
+        if not session_id:
+            return None
+
+        with self._lock:
+            existing = self._running.get(session_id) or self._finished.get(session_id)
+        if existing is not None:
+            return existing
+
+        if not CHECKPOINT_PATH.exists():
+            return None
+
+        try:
+            entries = json.loads(CHECKPOINT_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(entries, list):
+            return None
+
+        entry = next(
+            (
+                item for item in entries
+                if isinstance(item, dict) and str(item.get("session_id") or "").strip() == session_id
+            ),
+            None,
+        )
+        if not isinstance(entry, dict):
+            return None
+
+        pid = entry.get("pid")
+        try:
+            normalized_pid = int(pid)
+        except (TypeError, ValueError):
+            return None
+        if normalized_pid <= 0:
+            return None
+
+        alive = False
+        try:
+            os.kill(normalized_pid, 0)
+            alive = True
+        except ProcessLookupError:
+            alive = False
+        except PermissionError:
+            alive = True
+        if not alive:
+            return None
+
+        session = ProcessSession(
+            id=session_id,
+            command=entry.get("command", "unknown"),
+            task_id=entry.get("task_id", ""),
+            session_key=entry.get("session_key", ""),
+            pid=normalized_pid,
+            cwd=entry.get("cwd"),
+            started_at=entry.get("started_at", time.time()),
+            detached=True,
+            watcher_platform=entry.get("watcher_platform", ""),
+            watcher_chat_id=entry.get("watcher_chat_id", ""),
+            watcher_thread_id=entry.get("watcher_thread_id", ""),
+            watcher_interval=entry.get("watcher_interval", 0),
+        )
+        with self._lock:
+            existing = self._running.get(session_id) or self._finished.get(session_id)
+            if existing is not None:
+                return existing
+            self._running[session.id] = session
+        return session
+
     def poll(self, session_id: str) -> dict:
         """Check status and get new output for a background process."""
         from tools.ansi_strip import strip_ansi
