@@ -23,6 +23,7 @@ from hermes_cli.env_loader import load_hermes_dotenv
 load_hermes_dotenv(
     hermes_home=get_hermes_home(),
     project_env=Path(__file__).resolve().parent.parent / ".env",
+    strict=False,
 )
 
 # Export all tools for easy importing

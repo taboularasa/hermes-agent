@@ -79,10 +79,21 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from hermes_constants import get_hermes_home
 from utils import atomic_yaml_write
 _hermes_home = get_hermes_home()
+_project_env = Path(__file__).resolve().parents[1] / ".env"
+_env_path = _hermes_home / ".env"
 
 # Load runtime secrets from Doppler before adapters boot.
 from hermes_cli.env_loader import load_hermes_dotenv
-load_hermes_dotenv(hermes_home=_hermes_home, project_env=Path(__file__).resolve().parents[1] / '.env')
+
+
+def load_dotenv(*args, **kwargs):
+    """Compatibility shim for tests and legacy gateway refresh hooks."""
+    del args, kwargs
+    load_hermes_dotenv(hermes_home=_hermes_home, project_env=_project_env, strict=False)
+    return False
+
+
+load_hermes_dotenv(hermes_home=_hermes_home, project_env=_project_env, strict=False)
 
 # Bridge config.yaml values into the environment so os.getenv() picks them up.
 # config.yaml is authoritative for terminal settings — overrides runtime env.

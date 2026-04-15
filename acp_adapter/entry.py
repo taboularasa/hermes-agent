@@ -46,7 +46,7 @@ def _load_env() -> None:
     from hermes_cli.env_loader import load_hermes_dotenv
 
     hermes_home = get_hermes_home()
-    loaded = load_hermes_dotenv(hermes_home=hermes_home)
+    loaded = load_hermes_dotenv(hermes_home=hermes_home, strict=False)
     if loaded:
         for env_source in loaded:
             logging.getLogger(__name__).info("Loaded runtime secrets from %s", env_source)

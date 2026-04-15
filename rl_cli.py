@@ -35,7 +35,11 @@ _project_env = Path(__file__).parent / '.env'
 
 from hermes_cli.env_loader import load_hermes_dotenv
 
-_loaded_env_paths = load_hermes_dotenv(hermes_home=_hermes_home, project_env=_project_env)
+_loaded_env_paths = load_hermes_dotenv(
+    hermes_home=_hermes_home,
+    project_env=_project_env,
+    strict=False,
+)
 for _env_source in _loaded_env_paths:
     print(f"✅ Loaded runtime secrets from {_env_source}")
 

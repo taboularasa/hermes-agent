@@ -53,7 +53,11 @@ from hermes_cli.ctx_runtime import CtxBinding, maybe_bind_ctx_session
 
 _hermes_home = get_hermes_home()
 _project_env = Path(__file__).parent / '.env'
-_loaded_env_paths = load_hermes_dotenv(hermes_home=_hermes_home, project_env=_project_env)
+_loaded_env_paths = load_hermes_dotenv(
+    hermes_home=_hermes_home,
+    project_env=_project_env,
+    strict=False,
+)
 if _loaded_env_paths:
     for _env_source in _loaded_env_paths:
         logger.info("Loaded runtime secrets from %s", _env_source)
