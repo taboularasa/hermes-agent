@@ -18,9 +18,11 @@ class _FakeSession:
 class _FakeProcessRegistry:
     def __init__(self):
         self.sessions = {}
+        self.checkpoint_sessions = {}
         self.spawn_calls = []
         self.wait_calls = []
         self.kill_calls = []
+        self.recover_calls = []
 
     def spawn_local(self, command, cwd=None, task_id="", session_key="", env_vars=None, use_pty=False):
         self.spawn_calls.append({
@@ -37,6 +39,13 @@ class _FakeProcessRegistry:
 
     def get(self, session_id):
         return self.sessions.get(session_id)
+
+    def recover_session_from_checkpoint(self, session_id):
+        self.recover_calls.append(session_id)
+        session = self.checkpoint_sessions.get(session_id)
+        if session is not None:
+            self.sessions[session.id] = session
+        return session
 
     def wait(self, session_id, timeout=None):
         self.wait_calls.append((session_id, timeout))
@@ -327,6 +336,41 @@ def test_codex_delegate_status_normalizes_unknown_run_with_missing_process(monke
     assert saved["status"] == "failed"
     assert saved["stale_reason"] == "process_missing"
     assert saved["completed_at"] > 0
+
+
+def test_codex_delegate_status_recovers_checkpoint_backed_running_session(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git_dir = repo / ".git"
+    git_dir.mkdir()
+
+    fake_registry = _FakeProcessRegistry()
+    fake_registry.checkpoint_sessions["proc_checkpoint"] = _FakeSession("proc_checkpoint", 5151, exited=False)
+    monkeypatch.setattr(codex_delegate_tool, "process_registry", fake_registry)
+    monkeypatch.setattr(codex_delegate_tool.shutil, "which", lambda _name: "/usr/bin/codex")
+    monkeypatch.setattr(codex_delegate_tool, "_pid_is_running", lambda pid: int(pid or 0) == 5151)
+
+    record = {
+        "run_id": "codex_checkpoint",
+        "status": "running",
+        "phase": "implement",
+        "workdir": str(repo),
+        "task_id": "sess-1",
+        "process_session_id": "proc_checkpoint",
+        "last_message_path": str(git_dir / "hermes-codex" / "codex_checkpoint.last-message.txt"),
+        "record_path": str(git_dir / "hermes-codex" / "codex_checkpoint.json"),
+        "latest_path": str(git_dir / "hermes-codex" / "latest.json"),
+    }
+    codex_delegate_tool._persist_record(record)
+
+    result = json.loads(codex_delegate_tool.codex_delegate(action="status", run_id="codex_checkpoint"))
+    saved = codex_delegate_tool._load_record("codex_checkpoint")
+
+    assert fake_registry.recover_calls == ["proc_checkpoint"]
+    assert result["status"] == "running"
+    assert saved["status"] == "running"
+    assert saved["pid"] == 5151
 
 
 def test_codex_delegate_list_separates_probe_runs(monkeypatch, tmp_path):
