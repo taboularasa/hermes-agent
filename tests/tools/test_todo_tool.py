@@ -57,6 +57,7 @@ class TestFormatForInjection:
         assert "[>]" in text
         assert "Next" in text
         assert "Working" in text
+        assert "EXECUTION FRAME" in text
         assert "context compression" in text.lower()
 
 
@@ -93,6 +94,7 @@ class TestTodoToolFunction:
         result = json.loads(todo_tool(store=store))
         assert result["summary"]["total"] == 1
         assert result["summary"]["pending"] == 1
+        assert result["execution_frame"]["goals"] == ["Task"]
 
     def test_write_mode(self):
         store = TodoStore()
@@ -101,6 +103,32 @@ class TestTodoToolFunction:
             store=store,
         ))
         assert result["summary"]["in_progress"] == 1
+        assert result["execution_frame"]["commitments"][0]["commitment"] == "New"
+
+    def test_write_mode_respects_explicit_execution_frame(self):
+        store = TodoStore()
+        result = json.loads(todo_tool(
+            todos=[{"id": "1", "content": "New", "status": "pending"}],
+            execution_frame={
+                "goals": ["Ship HAD-140"],
+                "constraints": ["Keep scope tight"],
+                "verification_targets": [{"target": "pytest tests/tools/test_todo_tool.py"}],
+            },
+            store=store,
+        ))
+        assert result["execution_frame"]["goals"] == ["Ship HAD-140"]
+        assert result["execution_frame"]["constraints"] == ["Keep scope tight"]
+        assert result["execution_frame"]["verification_targets"][0]["target"] == "pytest tests/tools/test_todo_tool.py"
+
+    def test_replace_with_empty_list_clears_execution_frame(self):
+        store = TodoStore()
+        todo_tool(
+            todos=[{"id": "1", "content": "New", "status": "pending"}],
+            store=store,
+        )
+        result = json.loads(todo_tool(todos=[], store=store))
+        assert result["todos"] == []
+        assert result["execution_frame"] is None
 
     def test_no_store_returns_error(self):
         result = json.loads(todo_tool())

@@ -18,6 +18,7 @@ import pytest
 
 import run_agent
 from honcho_integration.client import HonchoClientConfig
+from tools.todo_tool import todo_tool
 from run_agent import (
     AIAgent,
     _inject_honcho_turn_context,
@@ -536,6 +537,31 @@ class TestHydrateTodoStore:
         with patch("run_agent._set_interrupt"):
             agent._hydrate_todo_store(history)
         assert agent._todo_store.has_items()
+        restored = json.loads(todo_tool(store=agent._todo_store))
+        assert restored["execution_frame"]["goals"] == ["do thing"]
+
+    def test_recovers_execution_frame_from_history(self, agent):
+        todos = [{"id": "1", "content": "do thing", "status": "pending"}]
+        history = [
+            {
+                "role": "tool",
+                "content": json.dumps(
+                    {
+                        "todos": todos,
+                        "execution_frame": {
+                            "goals": ["Ship HAD-140"],
+                            "constraints": ["Keep scope tight"],
+                        },
+                    }
+                ),
+                "tool_call_id": "c1",
+            },
+        ]
+        with patch("run_agent._set_interrupt"):
+            agent._hydrate_todo_store(history)
+        restored = json.loads(todo_tool(store=agent._todo_store))
+        assert restored["execution_frame"]["goals"] == ["Ship HAD-140"]
+        assert restored["execution_frame"]["constraints"] == ["Keep scope tight"]
 
     def test_skips_non_todo_tools(self, agent):
         history = [
