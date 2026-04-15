@@ -1,3 +1,4 @@
+# HADTO-PATCH: env
 """
 Configuration management for Hermes Agent.
 
@@ -1589,9 +1590,9 @@ def load_env() -> Dict[str, str]:
     ``~/.hermes/.env``.
     """
     try:
-        from hermes_cli.env_loader import load_hermes_dotenv
+        from hadto_patches.env import load_runtime_env
 
-        load_hermes_dotenv(project_env=get_project_root() / ".env")
+        return load_runtime_env(project_env=get_project_root() / ".env")
     except Exception:
         if os.getenv("HERMES_REQUIRE_DOPPLER", "1").strip().lower() not in {"", "0", "false", "no", "off"}:
             raise
@@ -1696,10 +1697,9 @@ def sanitize_env_file() -> int:
 
 def save_env_value(key: str, value: str):
     """Save or update a value in ~/.hermes/.env."""
-    if os.getenv("HERMES_REQUIRE_DOPPLER", "1").strip().lower() not in {"", "0", "false", "no", "off"}:
-        raise RuntimeError(
-            f"Hermes is configured for Doppler-only secrets. Update {key} in Doppler instead of ~/.hermes/.env."
-        )
+    from hadto_patches.env import ensure_env_write_allowed
+
+    ensure_env_write_allowed(key)
     if is_managed():
         managed_error(f"set {key}")
         return
@@ -1793,9 +1793,9 @@ def save_env_value_secure(key: str, value: str) -> Dict[str, Any]:
 
 def get_env_value(key: str) -> Optional[str]:
     """Get a value from the current Hermes runtime environment."""
-    if key in os.environ:
-        return os.environ[key]
-    return load_env().get(key)
+    from hadto_patches.env import get_runtime_env_value
+
+    return get_runtime_env_value(key)
 
 
 # =============================================================================
