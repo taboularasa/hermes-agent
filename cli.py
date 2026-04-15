@@ -68,8 +68,7 @@ from hermes_cli.banner import _format_context_length
 _COMMAND_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
 
-# Load .env from ~/.hermes/.env first, then project root as dev fallback.
-# User-managed env files should override stale shell exports on restart.
+# Load runtime secrets from Doppler before the CLI boots.
 from hermes_constants import get_hermes_home, display_hermes_home, OPENROUTER_BASE_URL
 from hermes_cli.env_loader import load_hermes_dotenv
 

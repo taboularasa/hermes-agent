@@ -15,6 +15,10 @@ PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# Production requires Doppler. The test suite imports many modules at collection
+# time, so disable hard-fail before those imports happen.
+os.environ.setdefault("HERMES_REQUIRE_DOPPLER", "0")
+
 
 @pytest.fixture(autouse=True)
 def _isolate_hermes_home(tmp_path, monkeypatch):
@@ -26,6 +30,9 @@ def _isolate_hermes_home(tmp_path, monkeypatch):
     (fake_home / "memories").mkdir()
     (fake_home / "skills").mkdir()
     monkeypatch.setenv("HERMES_HOME", str(fake_home))
+    # Production requires Doppler. Tests run without a real Doppler config and
+    # inject env explicitly where needed.
+    monkeypatch.setenv("HERMES_REQUIRE_DOPPLER", "0")
     # Reset plugin singleton so tests don't leak plugins from ~/.hermes/plugins/
     try:
         import hermes_cli.plugins as _plugins_mod

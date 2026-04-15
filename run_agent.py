@@ -47,8 +47,7 @@ from pathlib import Path
 
 from hermes_constants import get_hermes_home
 
-# Load .env from ~/.hermes/.env first, then project root as dev fallback.
-# User-managed env files should override stale shell exports on restart.
+# Load runtime secrets from Doppler before the agent boots.
 from hermes_cli.env_loader import load_hermes_dotenv
 from hermes_cli.ctx_runtime import CtxBinding, maybe_bind_ctx_session
 
@@ -56,10 +55,10 @@ _hermes_home = get_hermes_home()
 _project_env = Path(__file__).parent / '.env'
 _loaded_env_paths = load_hermes_dotenv(hermes_home=_hermes_home, project_env=_project_env)
 if _loaded_env_paths:
-    for _env_path in _loaded_env_paths:
-        logger.info("Loaded environment variables from %s", _env_path)
+    for _env_source in _loaded_env_paths:
+        logger.info("Loaded runtime secrets from %s", _env_source)
 else:
-    logger.info("No .env file found. Using system environment variables.")
+    logger.info("Doppler secret loading skipped.")
 
 
 # Import our tool system

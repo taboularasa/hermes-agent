@@ -1100,7 +1100,7 @@ def _load_mcp_config() -> Dict[str, dict]:
     ``timeout``, ``connect_timeout``, and ``auth`` overrides.
 
     ``${ENV_VAR}`` placeholders in string values are resolved from
-    ``os.environ`` (which includes ``~/.hermes/.env`` loaded at startup).
+    ``os.environ`` (which includes Doppler-loaded runtime secrets).
     """
     try:
         from hermes_cli.config import load_config
@@ -1108,10 +1108,10 @@ def _load_mcp_config() -> Dict[str, dict]:
         servers = config.get("mcp_servers")
         if not servers or not isinstance(servers, dict):
             return {}
-        # Ensure .env vars are available for interpolation
+        # Ensure runtime secrets are available for interpolation.
         try:
             from hermes_cli.env_loader import load_hermes_dotenv
-            load_hermes_dotenv()
+            load_hermes_dotenv(strict=False)
         except Exception:
             pass
         return {name: _interpolate_env_vars(cfg) for name, cfg in servers.items()}

@@ -27,16 +27,17 @@ from pathlib import Path
 import fire
 import yaml
 
-# Load .env from ~/.hermes/.env first, then project root as dev fallback.
-# User-managed env files should override stale shell exports on restart.
+from hermes_constants import get_hermes_home, OPENROUTER_BASE_URL
+
+# Load runtime secrets from Doppler before the RL CLI boots.
 _hermes_home = get_hermes_home()
 _project_env = Path(__file__).parent / '.env'
 
 from hermes_cli.env_loader import load_hermes_dotenv
 
 _loaded_env_paths = load_hermes_dotenv(hermes_home=_hermes_home, project_env=_project_env)
-for _env_path in _loaded_env_paths:
-    print(f"✅ Loaded environment variables from {_env_path}")
+for _env_source in _loaded_env_paths:
+    print(f"✅ Loaded runtime secrets from {_env_source}")
 
 # Set terminal working directory to tinker-atropos submodule
 # This ensures terminal commands run in the right context for RL work
@@ -59,8 +60,6 @@ from tools.rl_training_tool import get_missing_keys
 # ============================================================================
 # Config Loading
 # ============================================================================
-
-from hermes_constants import get_hermes_home, OPENROUTER_BASE_URL
 
 DEFAULT_MODEL = "anthropic/claude-opus-4.5"
 DEFAULT_BASE_URL = OPENROUTER_BASE_URL

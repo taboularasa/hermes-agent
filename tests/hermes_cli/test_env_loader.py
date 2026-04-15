@@ -1,70 +1,107 @@
 import importlib
 import os
+import subprocess
 import sys
-from pathlib import Path
 
-from hermes_cli.env_loader import load_hermes_dotenv
+import pytest
 
-
-def test_user_env_overrides_stale_shell_values(tmp_path, monkeypatch):
-    home = tmp_path / "hermes"
-    home.mkdir()
-    env_file = home / ".env"
-    env_file.write_text("OPENAI_BASE_URL=https://new.example/v1\n", encoding="utf-8")
-
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://old.example/v1")
-
-    loaded = load_hermes_dotenv(hermes_home=home)
-
-    assert loaded == [env_file]
-    assert os.getenv("OPENAI_BASE_URL") == "https://new.example/v1"
+import hermes_cli.env_loader as env_loader
 
 
-def test_project_env_overrides_stale_shell_values_when_user_env_missing(tmp_path, monkeypatch):
-    home = tmp_path / "hermes"
-    project_env = tmp_path / ".env"
-    project_env.write_text("OPENAI_BASE_URL=https://project.example/v1\n", encoding="utf-8")
-
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://old.example/v1")
-
-    loaded = load_hermes_dotenv(hermes_home=home, project_env=project_env)
-
-    assert loaded == [project_env]
-    assert os.getenv("OPENAI_BASE_URL") == "https://project.example/v1"
-
-
-def test_user_env_takes_precedence_over_project_env(tmp_path, monkeypatch):
-    home = tmp_path / "hermes"
-    home.mkdir()
-    user_env = home / ".env"
-    project_env = tmp_path / ".env"
-    user_env.write_text("OPENAI_BASE_URL=https://user.example/v1\n", encoding="utf-8")
-    project_env.write_text("OPENAI_BASE_URL=https://project.example/v1\nOPENAI_API_KEY=project-key\n", encoding="utf-8")
-
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://old.example/v1")
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-
-    loaded = load_hermes_dotenv(hermes_home=home, project_env=project_env)
-
-    assert loaded == [user_env, project_env]
-    assert os.getenv("OPENAI_BASE_URL") == "https://user.example/v1"
-    assert os.getenv("OPENAI_API_KEY") == "project-key"
-
-
-def test_main_import_applies_user_env_over_shell_values(tmp_path, monkeypatch):
-    home = tmp_path / "hermes"
-    home.mkdir()
-    (home / ".env").write_text(
-        "OPENAI_BASE_URL=https://new.example/v1\nHERMES_INFERENCE_PROVIDER=custom\n",
-        encoding="utf-8",
+def _doppler_result(payload: str, *, returncode: int = 0, stderr: str = "") -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(
+        args=["doppler", "secrets", "download"],
+        returncode=returncode,
+        stdout=payload,
+        stderr=stderr,
     )
 
-    monkeypatch.setenv("HERMES_HOME", str(home))
+
+def test_loads_doppler_env_into_process(tmp_path, monkeypatch):
+    project_root = tmp_path / "repo"
+    project_root.mkdir()
+
+    monkeypatch.delenv("HERMES_ENV_SOURCE", raising=False)
+    monkeypatch.delenv("HERMES_DOPPLER_PROJECT_ROOT", raising=False)
+    monkeypatch.setattr(env_loader.shutil, "which", lambda _: "/usr/bin/doppler")
+    monkeypatch.setattr(
+        env_loader.subprocess,
+        "run",
+        lambda *args, **kwargs: _doppler_result(
+            '{"OPENAI_BASE_URL":"https://doppler.example/v1","OPENAI_API_KEY":"doppler-key"}'
+        ),
+    )
+
+    loaded = env_loader.load_hermes_dotenv(project_env=project_root / ".env", strict=True)
+
+    assert loaded == [f"doppler:{project_root}"]
+    assert os.getenv("OPENAI_BASE_URL") == "https://doppler.example/v1"
+    assert os.getenv("OPENAI_API_KEY") == "doppler-key"
+    assert os.getenv("HERMES_ENV_SOURCE") == "doppler"
+    assert os.getenv("HERMES_DOPPLER_PROJECT_ROOT") == str(project_root)
+
+
+def test_hard_fails_when_doppler_is_not_configured(tmp_path, monkeypatch):
+    project_root = tmp_path / "repo"
+    project_root.mkdir()
+
+    monkeypatch.setattr(env_loader.shutil, "which", lambda _: "/usr/bin/doppler")
+    monkeypatch.setattr(
+        env_loader.subprocess,
+        "run",
+        lambda *args, **kwargs: _doppler_result(
+            "",
+            returncode=1,
+            stderr="You must specify a project",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="Doppler"):
+        env_loader.load_hermes_dotenv(project_env=project_root / ".env", strict=True)
+
+
+def test_non_strict_mode_skips_missing_doppler(tmp_path, monkeypatch):
+    project_root = tmp_path / "repo"
+    project_root.mkdir()
+
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.setattr(env_loader.shutil, "which", lambda _: "/usr/bin/doppler")
+    monkeypatch.setattr(
+        env_loader.subprocess,
+        "run",
+        lambda *args, **kwargs: _doppler_result(
+            "",
+            returncode=1,
+            stderr="You must specify a project",
+        ),
+    )
+
+    loaded = env_loader.load_hermes_dotenv(project_env=project_root / ".env", strict=False)
+
+    assert loaded == []
+    assert os.getenv("OPENAI_BASE_URL") is None
+
+
+def test_main_import_applies_doppler_env_over_existing_values(tmp_path, monkeypatch):
+    project_root = tmp_path / "repo"
+    project_root.mkdir()
+
     monkeypatch.setenv("OPENAI_BASE_URL", "https://old.example/v1")
     monkeypatch.setenv("HERMES_INFERENCE_PROVIDER", "openrouter")
+    monkeypatch.delenv("HERMES_ENV_SOURCE", raising=False)
+    monkeypatch.delenv("HERMES_DOPPLER_PROJECT_ROOT", raising=False)
+    monkeypatch.setattr(env_loader.shutil, "which", lambda _: "/usr/bin/doppler")
+    monkeypatch.setattr(
+        env_loader.subprocess,
+        "run",
+        lambda *args, **kwargs: _doppler_result(
+            '{"OPENAI_BASE_URL":"https://doppler.example/v1","HERMES_INFERENCE_PROVIDER":"custom"}'
+        ),
+    )
+    monkeypatch.setattr(env_loader, "_resolve_project_root", lambda _project_env: project_root)
 
     sys.modules.pop("hermes_cli.main", None)
     importlib.import_module("hermes_cli.main")
 
-    assert os.getenv("OPENAI_BASE_URL") == "https://new.example/v1"
+    assert os.getenv("OPENAI_BASE_URL") == "https://doppler.example/v1"
     assert os.getenv("HERMES_INFERENCE_PROVIDER") == "custom"

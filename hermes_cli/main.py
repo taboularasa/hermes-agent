@@ -136,8 +136,7 @@ def _apply_profile_override() -> None:
 
 _apply_profile_override()
 
-# Load .env from ~/.hermes/.env first, then project root as dev fallback.
-# User-managed env files should override stale shell exports on restart.
+# Load runtime secrets from Doppler before the CLI boots.
 from hermes_cli.config import get_hermes_home
 from hermes_cli.env_loader import load_hermes_dotenv
 load_hermes_dotenv(project_env=PROJECT_ROOT / '.env')
@@ -176,7 +175,7 @@ def _has_any_provider_configured() -> bool:
     from hermes_cli.config import get_env_path, get_hermes_home
     from hermes_cli.auth import get_auth_status
 
-    # Check env vars (may be set by .env or shell).
+    # Check env vars (populated by Doppler or the current process).
     # OPENAI_BASE_URL alone counts — local models (vLLM, llama.cpp, etc.)
     # often don't require an API key.
     from hermes_cli.auth import PROVIDER_REGISTRY

@@ -80,15 +80,12 @@ from hermes_constants import get_hermes_home
 from utils import atomic_yaml_write
 _hermes_home = get_hermes_home()
 
-# Load environment variables from ~/.hermes/.env first.
-# User-managed env files should override stale shell exports on restart.
-from dotenv import load_dotenv  # backward-compat for tests that monkeypatch this symbol
+# Load runtime secrets from Doppler before adapters boot.
 from hermes_cli.env_loader import load_hermes_dotenv
-_env_path = _hermes_home / '.env'
 load_hermes_dotenv(hermes_home=_hermes_home, project_env=Path(__file__).resolve().parents[1] / '.env')
 
 # Bridge config.yaml values into the environment so os.getenv() picks them up.
-# config.yaml is authoritative for terminal settings — overrides .env.
+# config.yaml is authoritative for terminal settings — overrides runtime env.
 _config_path = _hermes_home / 'config.yaml'
 if _config_path.exists():
     try:
@@ -98,12 +95,12 @@ if _config_path.exists():
         # Expand ${ENV_VAR} references before bridging to env vars.
         from hermes_cli.config import _expand_env_vars
         _cfg = _expand_env_vars(_cfg)
-        # Top-level simple values (fallback only — don't override .env)
+        # Top-level simple values (fallback only — don't override runtime env)
         for _key, _val in _cfg.items():
             if isinstance(_val, (str, int, float, bool)) and _key not in os.environ:
                 os.environ[_key] = str(_val)
         # Terminal config is nested — bridge to TERMINAL_* env vars.
-        # config.yaml overrides .env for these since it's the documented config path.
+        # config.yaml overrides runtime env for these since it's the documented config path.
         _terminal_cfg = _cfg.get("terminal", {})
         if _terminal_cfg and isinstance(_terminal_cfg, dict):
             _terminal_env_map = {
