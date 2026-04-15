@@ -7,7 +7,14 @@ git diff --stat upstream/main...HEAD
 git diff --name-only upstream/main...HEAD
 ```
 
-Baseline before this sealing pass: `98 files changed, 6680 insertions, 498 deletions`.
+Baseline before the first sealing pass: `98 files changed, 6680 insertions, 498 deletions`.
+
+Current state after the second sealing pass:
+- fork-facing `HADTO-PATCH` markers remain at `46`
+- cron, toolset/registry, and most gateway transport modules now sit behind
+  compatibility wrappers backed by `hadto_patches/*`
+- raw diff file count is `105` because the sealed package and documentation are
+  tracked files, even though the public patch surface is narrower
 
 ## Inventory
 
@@ -28,24 +35,24 @@ Baseline before this sealing pass: `98 files changed, 6680 insertions, 498 delet
 | `agent/redact.py` | upstream candidate | no | Generic secret redaction hardening. |
 | `agent/trajectory.py` | upstream candidate | no | Redacts trajectories before persistence. |
 | `cli.py` | adapter | yes | CLI Doppler bootstrap and local startup policy. |
-| `cron/jobs.py` | inline patch | no | Role/scope metadata and job-topology persistence. |
-| `cron/scheduler.py` | inline patch | no | Runtime `HERMES_HOME`, fallback model, ctx retirement. |
+| `cron/jobs.py` | adapter | yes | Wrapper onto sealed cron job storage and topology logic. |
+| `cron/scheduler.py` | adapter | yes | Wrapper onto sealed cron scheduler logic. |
 | `gateway/builtin_hooks/boot_md.py` | inline patch | no | BOOT.md integrity verification. |
-| `gateway/channel_directory.py` | inline patch | no | Secure file permissions on channel cache. |
-| `gateway/config.py` | inline patch | no | Quick-command allowlist policy. |
-| `gateway/host_apps.py` | plugin | yes | Host-specific dashboards/apps inventory. |
-| `gateway/platforms/api_server.py` | inline patch | no | API auth hardening and cron metadata surface. |
-| `gateway/platforms/slack.py` | inline patch | no | Token-file perms and local command behavior. |
-| `gateway/platforms/sms.py` | inline patch | no | Twilio signature verification and rate limit. |
-| `gateway/platforms/webhook.py` | inline patch | no | Unsafe testing-mode warnings and validation. |
-| `gateway/run.py` | inline patch | no | Local composition root, quick commands, restart recovery. |
+| `gateway/channel_directory.py` | adapter | yes | Wrapper onto sealed channel-directory behavior. |
+| `gateway/config.py` | adapter | yes | Wrapper onto sealed gateway config policy. |
+| `gateway/host_apps.py` | adapter | yes | Wrapper onto sealed host-app discovery. |
+| `gateway/platforms/api_server.py` | adapter | yes | Wrapper onto sealed API-server adapter behavior. |
+| `gateway/platforms/slack.py` | adapter | yes | Wrapper onto sealed Slack adapter behavior. |
+| `gateway/platforms/sms.py` | adapter | yes | Wrapper onto sealed SMS adapter behavior. |
+| `gateway/platforms/webhook.py` | adapter | yes | Wrapper onto sealed webhook adapter behavior. |
+| `gateway/run.py` | adapter | yes | Wrapper onto sealed gateway composition root. |
 | `gateway/session.py` | inline patch | no | Secure permissions for session artifacts. |
-| `hermes_cli/commands.py` | inline patch | no | Plugin/gateway command registry behavior. |
+| `hermes_cli/commands.py` | adapter | yes | Wrapper onto sealed command-registry behavior. |
 | `hermes_cli/config.py` | adapter | yes | Calls sealed env resolver plus local config defaults. |
-| `hermes_cli/cron.py` | inline patch | no | CLI support for job topology and doctor flows. |
+| `hermes_cli/cron.py` | adapter | yes | Wrapper onto sealed cron CLI behavior. |
 | `hermes_cli/ctx_runtime.py` | adapter | yes | Wrapper for sealed ctx.rs domain. |
 | `hermes_cli/env_loader.py` | adapter | yes | Wrapper for sealed Doppler domain. |
-| `hermes_cli/gateway.py` | inline patch | no | Gateway service policy and UX. |
+| `hermes_cli/gateway.py` | adapter | yes | Wrapper onto sealed gateway CLI behavior. |
 | `hermes_cli/main.py` | policy/config | yes | Env-aware provider setup flows and local CLI UX. |
 | `hermes_cli/status.py` | inline patch | no | ctx/runtime-specific status reporting. |
 | `hermes_state.py` | upstream candidate | no | Secret redaction before DB persistence. |
@@ -90,7 +97,7 @@ Baseline before this sealing pass: `98 files changed, 6680 insertions, 498 delet
 | `tests/tools/test_yolo_mode.py` | policy/config | yes | Security regression coverage. |
 | `tools/__init__.py` | adapter | yes | Import-time env bootstrap seam. |
 | `tools/approval.py` | adapter | yes | Wrapper for sealed command-approval domain. |
-| `tools/cronjob_tools.py` | inline patch | no | Cron topology inspection and recursion guard. |
+| `tools/cronjob_tools.py` | adapter | yes | Wrapper onto sealed cron tool behavior. |
 | `tools/delegate_tool.py` | inline patch | no | Dynamic toolset listing and concurrency behavior. |
 | `tools/environments/docker.py` | adapter | yes | Security/approval config passthrough. |
 | `tools/environments/local.py` | inline patch | no | Writable temp root and shell hygiene. |
@@ -99,14 +106,14 @@ Baseline before this sealing pass: `98 files changed, 6680 insertions, 498 delet
 | `tools/file_tools.py` | inline patch | no | Sensitive read deny-list. |
 | `tools/mcp_tool.py` | adapter | yes | Env bootstrap before MCP discovery. |
 | `tools/process_registry.py` | adapter | yes | Crash-recovery/process checkpoint behavior. |
-| `tools/registry.py` | inline patch | no | Plugin toolset/alias registry behavior. |
-| `tools/send_message_tool.py` | inline patch | no | Reply-to-origin and direct target semantics. |
+| `tools/registry.py` | adapter | yes | Wrapper onto sealed tool-registry behavior. |
+| `tools/send_message_tool.py` | adapter | yes | Wrapper onto sealed messaging transport behavior. |
 | `tools/terminal_tool.py` | adapter | yes | Bridge from core terminal tool into ctx/security seams. |
 | `tools/tirith_security.py` | upstream candidate | no | Generic fail-closed scanner behavior. |
 | `tools/todo_tool.py` | upstream candidate | no | Todo behavior divergence is generic, not Hadto-specific. |
 | `tools/url_safety.py` | upstream candidate | no | Generic URL scheme restriction. |
 | `tools/web_tools.py` | inline patch | no | Provider routing and availability inspection. |
-| `toolsets.py` | inline patch | no | Plugin toolset synthesis and registry fallback. |
+| `toolsets.py` | adapter | yes | Wrapper onto sealed toolset synthesis and resolution. |
 | `trajectory_compressor.py` | upstream candidate | no | Generic async client injection. |
 | `website/docs/developer-guide/cron-internals.md` | policy/config | yes | Docs only. |
 | `website/docs/user-guide/configuration.md` | policy/config | yes | Docs only. |
