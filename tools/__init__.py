@@ -29,7 +29,6 @@ load_hermes_dotenv(
 # Export all tools for easy importing
 from .web_tools import (
     web_search_tool,
-    web_search_matrix_tool,
     web_extract_tool,
     web_crawl_tool,
     check_firecrawl_api_key
@@ -167,32 +166,6 @@ from .delegate_tool import (
     check_delegate_requirements,
     DELEGATE_TASK_SCHEMA,
 )
-from .codex_delegate_tool import (
-    codex_delegate,
-    check_codex_delegate_requirements,
-    CODEX_DELEGATE_SCHEMA,
-)
-from .linear_issue_tool import (
-    linear_issue,
-    check_linear_issue_requirements,
-    LINEAR_ISSUE_SCHEMA,
-)
-from .ontology_context_tool import (
-    ontology_context,
-    check_ontology_context_requirements,
-    ONTOLOGY_CONTEXT_SCHEMA,
-)
-from .self_improvement_tool import (
-    self_improvement_evidence_gate,
-    evaluate_self_improvement_evidence,
-    self_improvement_benchmark,
-    evaluate_self_improvement_benchmark,
-    self_improvement_pipeline,
-    evaluate_self_improvement_pipeline,
-    SELF_IMPROVEMENT_EVIDENCE_SCHEMA,
-    SELF_IMPROVEMENT_BENCHMARK_SCHEMA,
-    SELF_IMPROVEMENT_PIPELINE_SCHEMA,
-)
 
 # File tools have no external requirements - they use the terminal backend
 def check_file_requirements():
@@ -203,7 +176,6 @@ def check_file_requirements():
 __all__ = [
     # Web tools
     'web_search_tool',
-    'web_search_matrix_tool',
     'web_extract_tool',
     'web_crawl_tool',
     'check_firecrawl_api_key',
@@ -297,25 +269,6 @@ __all__ = [
     'execute_code',
     'check_sandbox_requirements',
     'EXECUTE_CODE_SCHEMA',
-    # Local Codex supervisor
-    'codex_delegate',
-    'check_codex_delegate_requirements',
-    'CODEX_DELEGATE_SCHEMA',
-    'linear_issue',
-    'check_linear_issue_requirements',
-    'LINEAR_ISSUE_SCHEMA',
-    'ontology_context',
-    'check_ontology_context_requirements',
-    'ONTOLOGY_CONTEXT_SCHEMA',
-    'self_improvement_evidence_gate',
-    'evaluate_self_improvement_evidence',
-    'self_improvement_benchmark',
-    'evaluate_self_improvement_benchmark',
-    'self_improvement_pipeline',
-    'evaluate_self_improvement_pipeline',
-    'SELF_IMPROVEMENT_PIPELINE_SCHEMA',
-    'SELF_IMPROVEMENT_EVIDENCE_SCHEMA',
-    'SELF_IMPROVEMENT_BENCHMARK_SCHEMA',
     # Subagent delegation
     'delegate_task',
     'check_delegate_requirements',

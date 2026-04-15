@@ -170,45 +170,6 @@ SKILLS_GUIDANCE = (
     "Skills that aren't maintained become liabilities."
 )
 
-ONTOLOGY_TOOL_GUIDANCE = (
-    "When working on Hadto ontology engineering, textbook-driven ontology self-improvement, "
-    "or ontology-related business-domain research, call ontology_context first instead of "
-    "reconstructing the context by grepping repo files or shelling out to Python. "
-    "If web_search_matrix is available and the task needs external domain or market evidence, "
-    "use web_search_matrix before web_extract and do not substitute plain web_search unless "
-    "the user explicitly wants a single-provider search or the matrix tool is unavailable."
-)
-
-WORK_STATUS_GUIDANCE = (
-    "When the user asks what Hermes is currently working on, what is active, what is next, "
-    "or whether there is any work left, distinguish between three states: "
-    "(1) live execution right now (active Codex/ctx/process work), "
-    "(2) the currently selected backlog item from workspace coordination, and "
-    "(3) recurring scheduled jobs. "
-    "The session-local todo tool is only a scratchpad for the current chat turn; it is never "
-    "authoritative for Hermes' global work status. If workspace_backlog_orchestrator is "
-    "available, you MUST inspect its current state or rerun it before claiming there is no work. "
-    "Never say there is no active work when there is an actionable selected_work item or recent "
-    "coordinator activity; instead say there may be no live process at this instant, but the "
-    "selected backlog item is still the active focus."
-)
-
-TERMINAL_HYGIENE_GUIDANCE = (
-    "When the terminal tool is available, prefer one command per terminal call for routine "
-    "inspection work. For repo state, run `git status`, `git diff --stat`, `git log`, and "
-    "similar checks as separate tool calls instead of chaining them with `&&`, `;`, pipes, "
-    "or command substitution unless the shell composition is essential to the task. Use "
-    "`workdir` instead of `cd && ...` so retries stay attributable to one command."
-)
-
-LINEAR_COMMENT_HYGIENE_GUIDANCE = (
-    "When linear_issue(action='comment') is available for recurring status writes, keep one "
-    "canonical dedupe key per issue/workflow and update it in place. For workspace backlog "
-    "comments, use only `workspace-orchestrator:<IDENTIFIER>` or "
-    "`workspace-orchestrator:git-hygiene:<IDENTIFIER>`. Do not invent suffix variants like "
-    "`:inspection` or `:blocker`; put that detail in the comment body."
-)
-
 TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "# Tool-use enforcement\n"
     "You MUST use your tools to take action — do not describe what you would do "

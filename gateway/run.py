@@ -95,6 +95,29 @@ def load_dotenv(*args, **kwargs):
 
 load_hermes_dotenv(hermes_home=_hermes_home, project_env=_project_env, strict=False)
 
+
+def _load_resume_interrupted_codex_runs():
+    """Load Codex restart recovery from the Hadto plugin or legacy core path."""
+    try:
+        from hadto_hermes_plugin.tools.codex_delegate import resume_interrupted_codex_runs
+
+        return resume_interrupted_codex_runs
+    except ImportError:
+        plugin_root = get_hermes_home() / "plugins" / "hadto"
+        plugin_root_str = str(plugin_root)
+        if plugin_root.exists() and plugin_root_str not in sys.path:
+            sys.path.insert(0, plugin_root_str)
+            try:
+                from hadto_hermes_plugin.tools.codex_delegate import resume_interrupted_codex_runs
+
+                return resume_interrupted_codex_runs
+            except ImportError:
+                pass
+
+    from tools.codex_delegate_tool import resume_interrupted_codex_runs
+
+    return resume_interrupted_codex_runs
+
 # Bridge config.yaml values into the environment so os.getenv() picks them up.
 # config.yaml is authoritative for terminal settings — overrides runtime env.
 _config_path = _hermes_home / 'config.yaml'
@@ -1176,8 +1199,8 @@ class GatewayRunner:
         except Exception as e:
             logger.warning("Process checkpoint recovery: %s", e)
         try:
-            from tools.codex_delegate_tool import resume_interrupted_codex_runs
-            codex_recovery = resume_interrupted_codex_runs()
+            # HADTO-PATCH: codex restart recovery
+            codex_recovery = _load_resume_interrupted_codex_runs()()
             resumed_runs = codex_recovery.get("resumed", []) if isinstance(codex_recovery, dict) else []
             recovery_errors = codex_recovery.get("errors", []) if isinstance(codex_recovery, dict) else []
             if resumed_runs:

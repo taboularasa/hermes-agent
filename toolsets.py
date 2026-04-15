@@ -30,7 +30,7 @@ from typing import List, Dict, Any, Set, Optional
 # Edit this once to update all platforms simultaneously.
 _HERMES_CORE_TOOLS = [
     # Web
-    "web_search", "web_search_matrix", "web_extract",
+    "web_search", "web_extract",
     # Terminal + process management
     "terminal", "process",
     # File manipulation
@@ -49,13 +49,13 @@ _HERMES_CORE_TOOLS = [
     # Text-to-speech
     "text_to_speech",
     # Planning & memory
-    "todo", "memory", "ontology_context",
+    "todo", "memory",
     # Session history search
     "session_search",
     # Clarifying questions
     "clarify",
     # Code execution + delegation
-    "execute_code", "delegate_task", "codex_delegate", "linear_issue", "ontology_context", "self_improvement_evidence_gate", "self_improvement_benchmark", "self_improvement_pipeline",
+    "execute_code", "delegate_task",
     # Cronjob management
     "cronjob",
     # Cross-platform messaging (gated on gateway running via check_fn)
@@ -73,7 +73,7 @@ TOOLSETS = {
     # Basic toolsets - individual tool categories
     "web": {
         "description": "Web research and content extraction tools",
-        "tools": ["web_search", "web_search_matrix", "web_extract"],
+        "tools": ["web_search", "web_extract"],
         "includes": []  # No other toolsets included
     },
     
@@ -172,12 +172,6 @@ TOOLSETS = {
         "includes": []
     },
 
-    "ontology": {
-        "description": "Ontology context packs from the SMB ontology platform (snapshot, readiness, provenance)",
-        "tools": ["ontology_context"],
-        "includes": []
-    },
-    
     "session_search": {
         "description": "Search and recall past conversations with summarization",
         "tools": ["session_search"],
@@ -199,30 +193,6 @@ TOOLSETS = {
     "delegation": {
         "description": "Spawn subagents with isolated context for complex subtasks",
         "tools": ["delegate_task"],
-        "includes": []
-    },
-
-    "codex": {
-        "description": "Supervise local Codex CLI implementation runs on the Lenovo host",
-        "tools": ["codex_delegate"],
-        "includes": []
-    },
-
-    "linear": {
-        "description": "Inspect and update Linear issues directly from Hermes",
-        "tools": ["linear_issue", "workspace_backlog_orchestrator"],
-        "includes": []
-    },
-
-    "ontology": {
-        "description": "Read Hadto ontology platform artifacts into compact reasoning context",
-        "tools": ["ontology_context"],
-        "includes": []
-    },
-
-    "self_improvement": {
-        "description": "Evaluate self-improvement evidence freshness and benchmark trajectory",
-        "tools": ["self_improvement_evidence_gate", "self_improvement_benchmark", "self_improvement_pipeline", "ontology_context"],
         "includes": []
     },
 
@@ -263,7 +233,7 @@ TOOLSETS = {
     "hermes-acp": {
         "description": "Editor integration (VS Code, Zed, JetBrains) — coding-focused tools without messaging, audio, or clarify UI",
         "tools": [
-            "web_search", "web_search_matrix", "web_extract",
+            "web_search", "web_extract",
             "terminal", "process",
             "read_file", "write_file", "patch", "search_files",
             "vision_analyze",
@@ -274,7 +244,7 @@ TOOLSETS = {
             "browser_vision", "browser_console",
             "todo", "memory",
             "session_search",
-            "execute_code", "delegate_task", "ontology_context",
+            "execute_code", "delegate_task",
         ],
         "includes": []
     },
@@ -283,7 +253,7 @@ TOOLSETS = {
         "description": "OpenAI-compatible API server — full agent tools accessible via HTTP (no interactive UI tools like clarify or send_message)",
         "tools": [
             # Web
-            "web_search", "web_search_matrix", "web_extract",
+            "web_search", "web_extract",
             # Terminal + process management
             "terminal", "process",
             # File manipulation
@@ -304,7 +274,7 @@ TOOLSETS = {
             # Session history search
             "session_search",
             # Code execution + delegation
-            "execute_code", "delegate_task", "ontology_context",
+            "execute_code", "delegate_task",
             # Cronjob management
             "cronjob",
             # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)

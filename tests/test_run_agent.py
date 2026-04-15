@@ -22,7 +22,6 @@ from tools.todo_tool import todo_tool
 from run_agent import (
     AIAgent,
     _inject_honcho_turn_context,
-    _looks_like_work_status_query,
 )
 from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
 
@@ -609,96 +608,6 @@ class TestBuildSystemPrompt:
         prompt = agent._build_system_prompt()
         assert MEMORY_GUIDANCE not in prompt
 
-    def test_ontology_guidance_when_ontology_tools_loaded(self):
-        from agent.prompt_builder import ONTOLOGY_TOOL_GUIDANCE
-
-        with (
-            patch(
-                "run_agent.get_tool_definitions",
-                return_value=_make_tool_defs("ontology_context", "web_search_matrix"),
-            ),
-            patch("run_agent.check_toolset_requirements", return_value={}),
-            patch("run_agent.OpenAI"),
-        ):
-            agent = AIAgent(
-                api_key="test-k...7890",
-                quiet_mode=True,
-                skip_context_files=True,
-                skip_memory=True,
-            )
-            agent.client = MagicMock()
-
-        prompt = agent._build_system_prompt()
-        assert ONTOLOGY_TOOL_GUIDANCE in prompt
-
-    def test_work_status_guidance_when_workspace_backlog_tool_loaded(self):
-        from agent.prompt_builder import WORK_STATUS_GUIDANCE
-
-        with (
-            patch(
-                "run_agent.get_tool_definitions",
-                return_value=_make_tool_defs("workspace_backlog_orchestrator"),
-            ),
-            patch("run_agent.check_toolset_requirements", return_value={}),
-            patch("run_agent.OpenAI"),
-        ):
-            agent = AIAgent(
-                api_key="test-k...7890",
-                quiet_mode=True,
-                skip_context_files=True,
-                skip_memory=True,
-            )
-            agent.client = MagicMock()
-
-        prompt = agent._build_system_prompt()
-        assert WORK_STATUS_GUIDANCE in prompt
-        assert "MUST inspect its current state or rerun it" in prompt
-        assert "todo tool is only a scratchpad" in prompt
-
-    def test_terminal_hygiene_guidance_when_terminal_tool_loaded(self):
-        from agent.prompt_builder import TERMINAL_HYGIENE_GUIDANCE
-
-        with (
-            patch(
-                "run_agent.get_tool_definitions",
-                return_value=_make_tool_defs("terminal"),
-            ),
-            patch("run_agent.check_toolset_requirements", return_value={}),
-            patch("run_agent.OpenAI"),
-        ):
-            agent = AIAgent(
-                api_key="test-k...7890",
-                quiet_mode=True,
-                skip_context_files=True,
-                skip_memory=True,
-            )
-            agent.client = MagicMock()
-
-        prompt = agent._build_system_prompt()
-        assert TERMINAL_HYGIENE_GUIDANCE in prompt
-
-    def test_linear_comment_hygiene_guidance_when_linear_issue_tool_loaded(self):
-        from agent.prompt_builder import LINEAR_COMMENT_HYGIENE_GUIDANCE
-
-        with (
-            patch(
-                "run_agent.get_tool_definitions",
-                return_value=_make_tool_defs("linear_issue"),
-            ),
-            patch("run_agent.check_toolset_requirements", return_value={}),
-            patch("run_agent.OpenAI"),
-        ):
-            agent = AIAgent(
-                api_key="test-k...7890",
-                quiet_mode=True,
-                skip_context_files=True,
-                skip_memory=True,
-            )
-            agent.client = MagicMock()
-
-        prompt = agent._build_system_prompt()
-        assert LINEAR_COMMENT_HYGIENE_GUIDANCE in prompt
-
     def test_includes_datetime(self, agent):
         prompt = agent._build_system_prompt()
         # Should contain current date info like "Conversation started:"
@@ -735,51 +644,6 @@ class TestBuildSystemPrompt:
         assert "SKILLS_PROMPT" in prompt
         assert mock_skills.call_args.kwargs["available_tools"] == set(toolset_map)
         assert mock_skills.call_args.kwargs["available_toolsets"] == {"web", "skills"}
-
-
-class TestOntologyPreflight:
-    def test_build_ontology_turn_context_uses_native_tool_and_matrix_guidance(self):
-        with (
-            patch(
-                "run_agent.get_tool_definitions",
-                return_value=_make_tool_defs("ontology_context", "web_search_matrix"),
-            ),
-            patch("run_agent.check_toolset_requirements", return_value={}),
-            patch("run_agent.OpenAI"),
-        ):
-            agent = AIAgent(
-                api_key="test-k...7890",
-                quiet_mode=True,
-                skip_context_files=True,
-                skip_memory=True,
-            )
-            agent.client = MagicMock()
-
-        with patch(
-            "run_agent.handle_function_call",
-            return_value=json.dumps(
-                {
-                    "success": True,
-                    "action": "ontology_engineering",
-                    "context": {"mode": "ontology_engineering", "priorities": ["ONT-010"]},
-                }
-            ),
-        ) as mock_handle:
-            context = agent._build_ontology_turn_context(
-                "Improve Hermes ontology engineering for smb-ontology-platform",
-                task_id="task-123",
-            )
-
-        mock_handle.assert_called_once_with(
-            "ontology_context",
-            {"action": "ontology_engineering", "limit": 5},
-            task_id="task-123",
-            user_task="Improve Hermes ontology engineering for smb-ontology-platform",
-        )
-        assert 'Hermes preloaded ontology_context(action="ontology_engineering")' in context
-        assert "web_search_matrix" in context
-        assert '"mode":"ontology_engineering"' in context
-
 
 class TestToolUseEnforcementConfig:
     """Tests for the agent.tool_use_enforcement config option."""
@@ -1485,12 +1349,12 @@ class TestRunConversation:
         assert result["final_response"] == "Final answer"
         assert result["completed"] is True
 
-    def test_run_conversation_injects_ontology_preflight_into_system_message(self):
+    def test_run_conversation_injects_plugin_pre_llm_context_into_system_message(self):
         captured = {}
         with (
             patch(
                 "run_agent.get_tool_definitions",
-                return_value=_make_tool_defs("ontology_context", "web_search_matrix"),
+                return_value=_make_tool_defs("terminal"),
             ),
             patch("run_agent.check_toolset_requirements", return_value={}),
             patch("run_agent.OpenAI"),
@@ -1511,15 +1375,13 @@ class TestRunConversation:
 
         with (
             patch(
-                "run_agent.handle_function_call",
-                return_value=json.dumps(
-                    {
-                        "success": True,
-                        "action": "ontology_engineering",
-                        "context": {"mode": "ontology_engineering", "priorities": ["ONT-011"]},
-                    }
+                "hermes_cli.plugins.invoke_hook",
+                side_effect=lambda hook_name, **_kwargs: (
+                    [{"context": "## Plugin Context\n\nOntology preflight from plugin"}]
+                    if hook_name == "pre_llm_call"
+                    else []
                 ),
-            ) as mock_handle,
+            ) as mock_invoke,
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
             patch.object(agent, "_cleanup_task_resources"),
@@ -1530,115 +1392,43 @@ class TestRunConversation:
             )
 
         assert result["completed"] is True
-        mock_handle.assert_called_once()
+        assert any(call.args and call.args[0] == "pre_llm_call" for call in mock_invoke.call_args_list)
         api_messages = captured["messages"]
         assert api_messages[0]["role"] == "system"
-        assert "Ontology Workflow Preflight" in api_messages[0]["content"]
-        assert "web_search_matrix" in api_messages[0]["content"]
-        assert '"mode":"ontology_engineering"' in api_messages[0]["content"]
+        assert "## Plugin Context" in api_messages[0]["content"]
+        assert "Ontology preflight from plugin" in api_messages[0]["content"]
 
-    def test_run_conversation_injects_workspace_status_preflight_into_user_message(self):
+    def test_run_conversation_merges_multiple_plugin_pre_llm_contexts(self, agent):
         captured = {}
-        snapshot = {
-            "counts": {"open": 12, "started": 4, "hermes_owned": 5, "unowned": 3},
-            "selected_work": {
-                "kind": "linear_issue",
-                "identifier": "HAD-271",
-                "title": "Repair self-improvement reliability floor",
-                "selection_bucket": "continue_active_wip",
-                "execution_mode": "delegate_codex",
-                "selection_reason": "Continue active WIP: HAD-271 is already In Progress.",
-                "repo_root": "/home/david/stacks/hermes-agent",
-            },
-            "summary_markdown": (
-                "Workspace backlog: 12 open; 4 started; 5 Hermes-owned; 3 unowned\n"
-                "- selected: HAD-271 [continue_active_wip] -> delegate_codex"
-            ),
-        }
+
+        self._setup_agent(agent)
+
+        def _fake_api_call(api_kwargs):
+            captured.update(api_kwargs)
+            return _mock_response(content="done", finish_reason="stop")
 
         with (
             patch(
-                "run_agent.get_tool_definitions",
-                return_value=_make_tool_defs("workspace_backlog_orchestrator"),
-            ),
-            patch("run_agent.check_toolset_requirements", return_value={}),
-            patch("run_agent.OpenAI"),
-        ):
-            agent = AIAgent(
-                api_key="test-key-1234567890",
-                quiet_mode=True,
-                skip_context_files=True,
-                skip_memory=True,
-            )
-            agent.client = MagicMock()
-
-        self._setup_agent(agent)
-
-        def _fake_api_call(api_kwargs):
-            captured.update(api_kwargs)
-            return _mock_response(content="done", finish_reason="stop")
-
-        with (
-            patch("run_agent._fetch_workspace_backlog_snapshot", return_value=snapshot) as mock_fetch,
+                "hermes_cli.plugins.invoke_hook",
+                side_effect=lambda hook_name, **_kwargs: (
+                    [{"context": "## Ontology Context\n\nA"}, {"context": "## Work Status Context\n\nB"}]
+                    if hook_name == "pre_llm_call"
+                    else []
+                ),
+            ) as mock_invoke,
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
             patch.object(agent, "_cleanup_task_resources"),
             patch.object(agent, "_interruptible_api_call", side_effect=_fake_api_call),
         ):
-            result = agent.run_conversation("what are you working on currently")
+            result = agent.run_conversation("hello")
 
         assert result["completed"] is True
-        mock_fetch.assert_called_once()
+        assert any(call.args and call.args[0] == "pre_llm_call" for call in mock_invoke.call_args_list)
         api_messages = captured["messages"]
-        assert api_messages[-1]["role"] == "user"
-        assert "Workspace Work Status Snapshot" in api_messages[-1]["content"]
-        assert "todo list is only a scratchpad" in api_messages[-1]["content"]
-        assert "HAD-271" in api_messages[-1]["content"]
-        assert "delegate_codex" in api_messages[-1]["content"]
-
-    def test_run_conversation_injects_workspace_status_preflight_with_restricted_toolset(self, agent):
-        captured = {}
-        snapshot = {
-            "counts": {"open": 47, "started": 8, "hermes_owned": 17, "unowned": 24},
-            "selected_work": {
-                "kind": "git_hygiene",
-                "identifier": "HAD-139",
-                "title": "Reconcile repo hygiene for ctx residue",
-                "selection_bucket": "verify_completed_linked_wip",
-                "execution_mode": "investigate_merge_or_delete",
-                "selection_reason": "Dirty ctx worktree is still linked to a completed issue.",
-                "repo_root": "/home/david/stacks/hermes-agent",
-                "worktree_path": "/home/david/.ctx-data/worktrees/example",
-                "linked_issue_identifier": "HAD-139",
-            },
-            "summary_markdown": (
-                "Workspace backlog: 47 open; 8 started; 17 Hermes-owned; 24 unowned\n"
-                "- selected: HAD-139 [verify_completed_linked_wip] -> investigate_merge_or_delete"
-            ),
-        }
-
-        self._setup_agent(agent)
-
-        def _fake_api_call(api_kwargs):
-            captured.update(api_kwargs)
-            return _mock_response(content="done", finish_reason="stop")
-
-        with (
-            patch("run_agent._fetch_workspace_backlog_snapshot", return_value=snapshot) as mock_fetch,
-            patch.object(agent, "_persist_session"),
-            patch.object(agent, "_save_trajectory"),
-            patch.object(agent, "_cleanup_task_resources"),
-            patch.object(agent, "_interruptible_api_call", side_effect=_fake_api_call),
-        ):
-            result = agent.run_conversation("what are you working on currently")
-
-        assert result["completed"] is True
-        mock_fetch.assert_called_once()
-        api_messages = captured["messages"]
-        assert api_messages[-1]["role"] == "user"
-        assert "Workspace Work Status Snapshot" in api_messages[-1]["content"]
-        assert "HAD-139" in api_messages[-1]["content"]
-        assert "investigate_merge_or_delete" in api_messages[-1]["content"]
+        assert api_messages[0]["role"] == "system"
+        assert "## Ontology Context" in api_messages[0]["content"]
+        assert "## Work Status Context" in api_messages[0]["content"]
 
     def test_tool_calls_then_stop(self, agent):
         self._setup_agent(agent)
@@ -1997,22 +1787,6 @@ class TestFlushSentinelNotLeaked:
             assert "_flush_sentinel" not in msg, (
                 f"_flush_sentinel leaked to API in message: {msg}"
             )
-
-
-class TestWorkStatusQueryDetection:
-    def test_matches_global_work_status_question(self):
-        assert _looks_like_work_status_query("what are you working on currently")
-        assert _looks_like_work_status_query("tell me what you're working on right now")
-        assert _looks_like_work_status_query("what are you doing right now")
-        assert _looks_like_work_status_query("what are your current activities across all processes")
-        assert _looks_like_work_status_query("current activities across all processes")
-        assert _looks_like_work_status_query("is there any work left")
-        assert _looks_like_work_status_query("what is active right now")
-        assert _looks_like_work_status_query("are you idle")
-
-    def test_ignores_non_status_requests(self):
-        assert not _looks_like_work_status_query("keep working on HAD-271")
-        assert not _looks_like_work_status_query("please implement the reliability fix")
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# HADTO-PATCH: ctx.rs integration
 """
 AI Agent Runner with Tool Calling
 
@@ -82,7 +83,7 @@ from hermes_constants import OPENROUTER_BASE_URL
 # Agent internals extracted to agent/ package for modularity
 from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY, PLATFORM_HINTS,
-    MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE, SKILLS_GUIDANCE, ONTOLOGY_TOOL_GUIDANCE,
+    MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE, SKILLS_GUIDANCE,
 )
 from agent.model_metadata import (
     fetch_model_metadata,
@@ -92,7 +93,7 @@ from agent.model_metadata import (
 )
 from agent.context_compressor import ContextCompressor
 from agent.prompt_caching import apply_anthropic_cache_control
-from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, WORK_STATUS_GUIDANCE, TERMINAL_HYGIENE_GUIDANCE, LINEAR_COMMENT_HYGIENE_GUIDANCE
+from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.display import (
     KawaiiSpinner, build_tool_preview as _build_tool_preview,
@@ -112,35 +113,6 @@ HONCHO_TOOL_NAMES = {
     "honcho_search",
     "honcho_conclude",
 }
-
-ONTOLOGY_PREFLIGHT_KEYWORDS = (
-    "ontology",
-    "competency question",
-    "competency-question",
-    "orsd",
-    "source manifest",
-    "source-material",
-    "smb-ontology-platform",
-    "textbook",
-    "ont-",
-    "vertical readiness",
-)
-
-WORK_STATUS_QUERY_PATTERNS = (
-    re.compile(r"\bwhat\s+are\s+(?:you|hermes)\s+(?:currently\s+)?working\s+on\b"),
-    re.compile(r"\bwhat\s+is\s+hermes\s+(?:currently\s+)?working\s+on\b"),
-    re.compile(r"\b(?:tell\s+me\s+)?what\s+(?:you(?:'re| are)|hermes(?:\s+is)?)\s+working\s+on(?:\s+right\s+now|\s+currently)?\b"),
-    re.compile(r"\bwhat\s+are\s+(?:you|hermes)\s+doing\s+(?:right\s+now|currently)\b"),
-    re.compile(r"\bwhat\s+are\s+your\s+current\s+activities(?:\s+across\s+all\s+processes)?\b"),
-    re.compile(r"\bcurrent\s+activities\s+across\s+all\s+processes\b"),
-    re.compile(r"\bacross\s+all\s+processes\b"),
-    re.compile(r"\bwhat(?:'s| is)\s+(?:currently\s+)?active\b"),
-    re.compile(r"\bwhat(?:'s| is)\s+(?:the\s+)?current(?:ly)?\s+active\s+work\b"),
-    re.compile(r"\bwhat\s+work\s+is\s+left\b"),
-    re.compile(r"\bis\s+there\s+(?:any\s+)?work\s+left\b"),
-    re.compile(r"\bwhat(?:'s| is)\s+in\s+progress\b"),
-    re.compile(r"\bare\s+(?:you|hermes)\s+idle\b"),
-)
 
 
 class _SafeWriter:
@@ -392,43 +364,6 @@ def _inject_honcho_turn_context(content, turn_context: str):
     if not text.strip():
         return note
     return f"{text}\n\n{note}"
-
-
-def _inject_work_status_turn_context(content, turn_context: str):
-    """Append workspace backlog status context to the current-turn user message."""
-    if not turn_context:
-        return content
-
-    note = (
-        "[System note: The following workspace backlog snapshot was retrieved for this "
-        "turn because the user asked about Hermes' current work. It is authoritative "
-        "for workspace-global active work and takes precedence over the session-local "
-        "todo list.]\n\n"
-        f"{turn_context}"
-    )
-
-    if isinstance(content, list):
-        return list(content) + [{"type": "text", "text": note}]
-
-    text = "" if content is None else str(content)
-    if not text.strip():
-        return note
-    return f"{text}\n\n{note}"
-
-
-def _looks_like_work_status_query(user_message: str) -> bool:
-    """Return True when the user is asking about Hermes' current/global work status."""
-    text = re.sub(r"\s+", " ", str(user_message or "").strip().lower())
-    if not text:
-        return False
-    return any(pattern.search(text) for pattern in WORK_STATUS_QUERY_PATTERNS)
-
-
-def _fetch_workspace_backlog_snapshot() -> dict[str, Any]:
-    """Read the current workspace backlog snapshot without mutating Linear."""
-    from tools.workspace_backlog_tool import evaluate_workspace_backlog
-
-    return evaluate_workspace_backlog(persist=False)
 
 
 # Budget warning text patterns injected by _get_budget_warning().
@@ -2684,14 +2619,6 @@ class AIAgent:
             tool_guidance.append(SESSION_SEARCH_GUIDANCE)
         if "skill_manage" in self.valid_tool_names:
             tool_guidance.append(SKILLS_GUIDANCE)
-        if "ontology_context" in self.valid_tool_names or "web_search_matrix" in self.valid_tool_names:
-            tool_guidance.append(ONTOLOGY_TOOL_GUIDANCE)
-        if "workspace_backlog_orchestrator" in self.valid_tool_names:
-            tool_guidance.append(WORK_STATUS_GUIDANCE)
-        if "terminal" in self.valid_tool_names:
-            tool_guidance.append(TERMINAL_HYGIENE_GUIDANCE)
-        if "linear_issue" in self.valid_tool_names:
-            tool_guidance.append(LINEAR_COMMENT_HYGIENE_GUIDANCE)
         if tool_guidance:
             prompt_parts.append(" ".join(tool_guidance))
 
@@ -3004,148 +2931,6 @@ class AIAgent:
         self._cached_system_prompt = None
         if self._memory_store:
             self._memory_store.load_from_disk()
-
-    def _should_preload_ontology_context(self, user_message: str) -> bool:
-        """Return True when the current turn should start with ontology context."""
-        if "ontology_context" not in self.valid_tool_names:
-            return False
-        text = (user_message or "").strip().lower()
-        if not text:
-            return False
-        return any(keyword in text for keyword in ONTOLOGY_PREFLIGHT_KEYWORDS)
-
-    def _should_preload_work_status_context(self, user_message: str) -> bool:
-        """Return True when the current turn needs a fresh workspace status snapshot."""
-        return _looks_like_work_status_query(user_message)
-
-    def _build_work_status_turn_context(self, user_message: str) -> str:
-        """Preload global work status so Hermes does not answer from session todo alone."""
-        if not self._should_preload_work_status_context(user_message):
-            return ""
-
-        try:
-            snapshot = _fetch_workspace_backlog_snapshot()
-        except Exception as exc:
-            logger.warning("Workspace backlog preflight failed (non-fatal): %s", exc)
-            return (
-                "## Workspace Work Status Snapshot\n\n"
-                "Hermes attempted to refresh the HAD workspace backlog snapshot for this turn, "
-                "but the preflight failed. Do not answer from the session-local todo list alone. "
-                "If you can still use tools this turn, call workspace_backlog_orchestrator before "
-                "claiming there is no active work. If the snapshot cannot be refreshed, say that "
-                "global backlog status is temporarily unavailable instead of saying nothing is active."
-            )
-
-        selected_work = snapshot.get("selected_work")
-        if not isinstance(selected_work, dict):
-            selected_work = {}
-
-        counts = snapshot.get("counts") if isinstance(snapshot.get("counts"), dict) else {}
-        selected_compact = {
-            key: selected_work.get(key)
-            for key in (
-                "kind",
-                "identifier",
-                "title",
-                "selection_bucket",
-                "execution_mode",
-                "selection_reason",
-                "state_name",
-                "ownership",
-                "repo_root",
-                "worktree_path",
-                "linked_issue_identifier",
-            )
-            if selected_work.get(key) not in (None, "", [], {})
-        }
-
-        latest_codex = selected_work.get("latest_codex")
-        if isinstance(latest_codex, dict):
-            latest_codex_compact = {
-                key: latest_codex.get(key)
-                for key in ("status", "run_id", "process_session_id", "started_at", "completed_at")
-                if latest_codex.get(key) not in (None, "", [], {})
-            }
-            if latest_codex_compact:
-                selected_compact["latest_codex"] = latest_codex_compact
-
-        serialized_counts = json.dumps(counts, ensure_ascii=False, separators=(",", ":"))
-        serialized_selected = json.dumps(
-            selected_compact,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        summary_markdown = str(snapshot.get("summary_markdown") or "").strip()
-        if len(summary_markdown) > 2500:
-            summary_markdown = summary_markdown[:2500].rstrip() + "... [truncated]"
-
-        guidance_parts = [
-            "## Workspace Work Status Snapshot",
-            "Hermes preloaded the HAD workspace backlog snapshot for this turn because the user asked about current or active work.",
-            "The session-local todo list is only a scratchpad for the current chat turn. It is never authoritative for workspace-global status.",
-            "Do not answer that nothing is active unless this snapshot also shows no selected work, no active WIP, and no scheduled or recurring work worth mentioning.",
-            "## Workspace Counts",
-            serialized_counts,
-        ]
-        if summary_markdown:
-            guidance_parts.extend(["## Snapshot Summary", summary_markdown])
-        if selected_compact:
-            guidance_parts.extend(["## Selected Work", serialized_selected])
-        else:
-            guidance_parts.extend(
-                [
-                    "## Selected Work",
-                    "{}",
-                ]
-            )
-        return "\n\n".join(guidance_parts)
-
-    def _build_ontology_turn_context(self, user_message: str, task_id: str) -> str:
-        """Preload ontology context into the turn so the model starts grounded."""
-        if not self._should_preload_ontology_context(user_message):
-            return ""
-
-        raw = handle_function_call(
-            "ontology_context",
-            {"action": "ontology_engineering", "limit": 5},
-            task_id=task_id,
-            user_task=user_message,
-        )
-        try:
-            payload = json.loads(raw)
-        except Exception as exc:
-            logger.warning("Ontology preflight returned non-JSON payload: %s", exc)
-            return ""
-
-        if not isinstance(payload, dict) or not payload.get("success"):
-            logger.warning("Ontology preflight failed: %s", payload)
-            return ""
-
-        serialized_context = json.dumps(
-            payload.get("context") or {},
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        if len(serialized_context) > 6000:
-            serialized_context = serialized_context[:6000].rstrip() + "... [truncated]"
-
-        guidance_parts = [
-            "## Ontology Workflow Preflight",
-            'Hermes preloaded ontology_context(action="ontology_engineering") for this turn because the request matches ontology engineering work.',
-            "Do not spend tool calls re-reading ontology tracker files, repo notes, or shelling into Python to reconstruct the same context.",
-        ]
-        if "web_search_matrix" in self.valid_tool_names:
-            guidance_parts.append(
-                "If this turn needs external domain or market research, the first web-search action must be web_search_matrix. Use plain web_search only if web_search_matrix fails or is unavailable."
-            )
-        guidance_parts.extend(
-            [
-                "Refresh with ontology_context again only if the task scope changes materially mid-turn.",
-                "## Preloaded Ontology Context",
-                serialized_context,
-            ]
-        )
-        return "\n\n".join(guidance_parts)
 
     def _responses_tools(self, tools: Optional[List[Dict[str, Any]]] = None) -> Optional[List[Dict[str, Any]]]:
         """Convert chat-completions tool schemas to Responses function-tool schemas."""
@@ -6707,29 +6492,6 @@ class AIAgent:
         except Exception as exc:
             logger.warning("pre_llm_call hook failed: %s", exc)
 
-        _ontology_turn_context = ""
-        try:
-            _ontology_turn_context = self._build_ontology_turn_context(
-                original_user_message,
-                effective_task_id,
-            )
-            if _ontology_turn_context:
-                logger.info("Preloaded ontology context for session %s", self.session_id)
-                if not self.quiet_mode:
-                    self._safe_print("🧠 Preloaded ontology_context for this turn")
-        except Exception as exc:
-            logger.warning("Ontology preflight failed (non-fatal): %s", exc)
-
-        _work_status_turn_context = ""
-        try:
-            _work_status_turn_context = self._build_work_status_turn_context(original_user_message)
-            if _work_status_turn_context:
-                logger.info("Preloaded workspace backlog status for session %s", self.session_id)
-                if not self.quiet_mode:
-                    self._safe_print("🗂️ Preloaded workspace backlog status for this turn")
-        except Exception as exc:
-            logger.warning("Workspace status preflight failed (non-fatal): %s", exc)
-
         # Main conversation loop
         api_call_count = 0
         final_response = None
@@ -6796,10 +6558,6 @@ class AIAgent:
                         user_content = _inject_honcho_turn_context(
                             user_content, self._honcho_turn_context
                         )
-                    if _work_status_turn_context:
-                        user_content = _inject_work_status_turn_context(
-                            user_content, _work_status_turn_context
-                        )
                     api_msg["content"] = user_content
 
                 # For ALL assistant messages, pass reasoning back to the API
@@ -6834,8 +6592,6 @@ class AIAgent:
             effective_system = active_system_prompt or ""
             if self.ephemeral_system_prompt:
                 effective_system = (effective_system + "\n\n" + self.ephemeral_system_prompt).strip()
-            if _ontology_turn_context:
-                effective_system = (effective_system + "\n\n" + _ontology_turn_context).strip()
             # Plugin context from pre_llm_call hooks — ephemeral, not cached.
             if _plugin_turn_context:
                 effective_system = (effective_system + "\n\n" + _plugin_turn_context).strip()

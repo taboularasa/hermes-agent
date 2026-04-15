@@ -1,3 +1,4 @@
+# HADTO-PATCH: execution frame helpers retained in core
 """Typed execution frame for Hermes planning and delegation workflows."""
 
 from __future__ import annotations

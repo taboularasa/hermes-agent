@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# HADTO-PATCH: ctx.rs integration + security
 """
 Terminal Tool Module
 

@@ -1,3 +1,4 @@
+# HADTO-PATCH: misc
 """
 Session management for the gateway.
 

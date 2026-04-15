@@ -1,3 +1,4 @@
+# HADTO-PATCH: security
 """
 Cron job management tools for Hermes Agent.
 

@@ -1,3 +1,4 @@
+# HADTO-PATCH: security
 """Local execution environment with interrupt support and non-blocking I/O."""
 
 import glob
