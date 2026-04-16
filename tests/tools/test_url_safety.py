@@ -72,6 +72,12 @@ class TestIsSafeUrl:
     def test_no_hostname_blocked(self):
         assert is_safe_url("http://") is False
 
+    def test_file_scheme_blocked(self):
+        assert is_safe_url("file:///etc/passwd") is False
+
+    def test_ftp_scheme_blocked(self):
+        assert is_safe_url("ftp://example.com/archive.tar.gz") is False
+
     def test_public_ip_allowed(self):
         with patch("socket.getaddrinfo", return_value=[
             (2, 1, 6, "", ("93.184.216.34", 0)),

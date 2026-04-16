@@ -45,6 +45,14 @@ def _json_stdout(findings=None, summary=""):
     return json.dumps({"findings": findings or [], "summary": summary})
 
 
+class TestConfigDefaults:
+    def test_fail_open_defaults_to_false(self, monkeypatch):
+        monkeypatch.delenv("TIRITH_FAIL_OPEN", raising=False)
+        with patch("hermes_cli.config.load_config", return_value={}):
+            config = _tirith_mod._load_security_config()
+        assert config["tirith_fail_open"] is False
+
+
 # ---------------------------------------------------------------------------
 # Exit code → action mapping
 # ---------------------------------------------------------------------------

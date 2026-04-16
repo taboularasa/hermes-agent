@@ -98,6 +98,25 @@ _SENSITIVE_PATH_PREFIXES = (
 )
 _SENSITIVE_EXACT_PATHS = {"/var/run/docker.sock", "/run/docker.sock"}
 
+_READ_DENIED_PATHS = [
+    os.path.expanduser("~/.ssh"),
+    os.path.expanduser("~/.aws"),
+    os.path.expanduser("~/.gnupg"),
+    os.path.expanduser("~/.kube"),
+    os.path.expanduser("~/.netrc"),
+    os.path.expanduser("~/.pgpass"),
+    os.path.expanduser("~/.npmrc"),
+    os.path.expanduser("~/.pypirc"),
+    os.path.expanduser("~/.docker/config.json"),
+]
+
+_READ_DENIED_FILENAMES = [
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".env.development",
+]
+
 
 def _check_sensitive_path(filepath: str) -> str | None:
     """Return an error message if the path targets a sensitive system location."""
@@ -115,6 +134,37 @@ def _check_sensitive_path(filepath: str) -> str | None:
             return _err
     if resolved in _SENSITIVE_EXACT_PATHS or normalized in _SENSITIVE_EXACT_PATHS:
         return _err
+    return None
+
+
+def _check_sensitive_read(filepath: str) -> str | None:
+    """Return an error message if the read targets a sensitive credential file."""
+    if os.getenv("HERMES_ALLOW_SENSITIVE_READS", "").lower() in ("1", "true", "yes"):
+        return None
+
+    try:
+        resolved = os.path.realpath(os.path.expanduser(filepath))
+    except (OSError, ValueError):
+        resolved = filepath
+
+    for denied in _READ_DENIED_PATHS:
+        try:
+            denied_resolved = os.path.realpath(denied)
+        except (OSError, ValueError):
+            denied_resolved = denied
+        if resolved == denied_resolved or resolved.startswith(denied_resolved + os.sep):
+            return (
+                f"Access denied: reading sensitive files ({filepath}) is blocked by default. "
+                "Set HERMES_ALLOW_SENSITIVE_READS=true to override."
+            )
+
+    basename = os.path.basename(resolved).lower()
+    for denied_name in _READ_DENIED_FILENAMES:
+        if basename == denied_name.lower():
+            return (
+                f"Access denied: reading sensitive files ({filepath}) is blocked by default. "
+                "Set HERMES_ALLOW_SENSITIVE_READS=true to override."
+            )
     return None
 
 
@@ -282,6 +332,10 @@ def clear_file_ops_cache(task_id: str = None):
 def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = "default") -> str:
     """Read a file with pagination and line numbers."""
     try:
+        sensitive_read_err = _check_sensitive_read(path)
+        if sensitive_read_err:
+            return json.dumps({"error": sensitive_read_err}, ensure_ascii=False)
+
         # ── Device path guard ─────────────────────────────────────────
         # Block paths that would hang the process (infinite output,
         # blocking on input).  Pure path check — no I/O.

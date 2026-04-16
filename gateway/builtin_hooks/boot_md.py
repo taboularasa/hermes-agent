@@ -17,7 +17,10 @@ startup. If nothing needs attention, it replies with [SILENT] to
 suppress delivery.
 """
 
+import hashlib
+import hmac
 import logging
+import os
 import threading
 
 logger = logging.getLogger("hooks.boot-md")
@@ -64,6 +67,26 @@ def _run_boot_agent(content: str) -> None:
         logger.error("boot-md agent failed: %s", e)
 
 
+def _verify_boot_integrity(content: str) -> bool:
+    """Verify BOOT.md integrity when BOOT_MD_SHA256 is configured."""
+    expected_hash = os.environ.get("BOOT_MD_SHA256", "").strip()
+    if not expected_hash:
+        logger.debug("BOOT.md integrity verification disabled")
+        return True
+
+    actual_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    if hmac.compare_digest(actual_hash, expected_hash.lower()):
+        logger.info("BOOT.md integrity verified")
+        return True
+
+    logger.critical(
+        "BOOT.md integrity check failed; expected SHA-256 %s, got %s. Skipping execution.",
+        expected_hash,
+        actual_hash,
+    )
+    return False
+
+
 async def handle(event_type: str, context: dict) -> None:
     """Gateway startup handler — run BOOT.md if it exists."""
     if not BOOT_FILE.exists():
@@ -71,6 +94,9 @@ async def handle(event_type: str, context: dict) -> None:
 
     content = BOOT_FILE.read_text(encoding="utf-8").strip()
     if not content:
+        return
+
+    if not _verify_boot_integrity(content):
         return
 
     logger.info("Running BOOT.md (%d chars)", len(content))

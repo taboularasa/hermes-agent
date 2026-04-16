@@ -34,6 +34,7 @@ _BLOCKED_HOSTNAMES = frozenset({
 # Must be blocked explicitly. Used by carrier-grade NAT, Tailscale/WireGuard
 # VPNs, and some cloud internal networks.
 _CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+_ALLOWED_SCHEMES = frozenset({"http", "https"})
 
 
 def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -56,6 +57,12 @@ def is_safe_url(url: str) -> bool:
     """
     try:
         parsed = urlparse(url)
+        if parsed.scheme.lower() not in _ALLOWED_SCHEMES:
+            logger.warning(
+                "Blocked request -- URL scheme '%s' not allowed (only http/https)",
+                parsed.scheme,
+            )
+            return False
         hostname = (parsed.hostname or "").strip().lower()
         if not hostname:
             return False

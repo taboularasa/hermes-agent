@@ -87,6 +87,32 @@ class TestDevicePathBlocking(unittest.TestCase):
         self.assertIn("device file", result["error"])
 
 
+class TestSensitiveReadBlocking(unittest.TestCase):
+    def setUp(self):
+        _read_tracker.clear()
+
+    def tearDown(self):
+        _read_tracker.clear()
+
+    def test_sensitive_directory_read_blocked(self):
+        result = json.loads(read_file_tool("~/.ssh/id_rsa", task_id="sensitive"))
+        self.assertIn("error", result)
+        self.assertIn("blocked by default", result["error"])
+
+    def test_dotenv_read_blocked(self):
+        result = json.loads(read_file_tool("/tmp/project/.env", task_id="dotenv"))
+        self.assertIn("error", result)
+        self.assertIn("blocked by default", result["error"])
+
+    @patch.dict(os.environ, {"HERMES_ALLOW_SENSITIVE_READS": "true"})
+    @patch("tools.file_tools._get_file_ops")
+    def test_sensitive_read_can_be_overridden(self, mock_ops):
+        mock_ops.return_value = _make_fake_ops(content="ok\n", file_size=3)
+        result = json.loads(read_file_tool("~/.ssh/config", task_id="override"))
+        self.assertNotIn("error", result)
+        self.assertIn("content", result)
+
+
 # ---------------------------------------------------------------------------
 # Character-count limits
 # ---------------------------------------------------------------------------
