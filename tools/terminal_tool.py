@@ -58,6 +58,12 @@ from tools.interrupt import is_interrupted, _interrupt_event  # noqa: F401 — r
 
 # Singularity helpers (scratch dir, SIF cache) now live in tools/environments/singularity.py
 from tools.environments.singularity import _get_scratch_dir
+from hadto_patches.ctx import (
+    clear_task_env_overrides as _clear_task_env_overrides_impl,
+    get_task_cwd as _get_task_cwd_impl,
+    get_task_env_overrides as _get_task_env_overrides_impl,
+    register_task_env_overrides as _register_task_env_overrides_impl,
+)
 
 
 # Disk usage warning threshold (in GB)
@@ -399,17 +405,6 @@ _creation_locks_lock = threading.Lock()  # Protects _creation_locks dict itself
 _cleanup_thread = None
 _cleanup_running = False
 
-# Per-task environment overrides registry.
-# Allows environments (e.g., TerminalBench2Env) to specify a custom Docker/Modal
-# image for a specific task_id BEFORE the agent loop starts. When the terminal or
-# file tools create a new sandbox for that task_id, they check this registry first
-# and fall back to the TERMINAL_MODAL_IMAGE (etc.) env var if no override is set.
-#
-# This is never exposed to the model -- only infrastructure code calls it.
-# Thread-safe because each task_id is unique per rollout.
-_task_env_overrides: Dict[str, Dict[str, Any]] = {}
-
-
 def register_task_env_overrides(task_id: str, overrides: Dict[str, Any]):
     """
     Register environment overrides for a specific task/rollout.
@@ -426,7 +421,7 @@ def register_task_env_overrides(task_id: str, overrides: Dict[str, Any]):
         task_id: The rollout's unique task identifier
         overrides: Dict of config keys to override
     """
-    _task_env_overrides[task_id] = overrides
+    _register_task_env_overrides_impl(task_id, overrides)
 
 
 def clear_task_env_overrides(task_id: str):
@@ -435,14 +430,12 @@ def clear_task_env_overrides(task_id: str):
 
     Called during cleanup to avoid stale entries accumulating.
     """
-    _task_env_overrides.pop(task_id, None)
+    _clear_task_env_overrides_impl(task_id)
 
 
 def get_task_env_overrides(task_id: Optional[str]) -> Dict[str, Any]:
     """Return a shallow copy of the task-specific environment overrides."""
-    if not task_id:
-        return {}
-    return dict(_task_env_overrides.get(task_id, {}))
+    return _get_task_env_overrides_impl(task_id)
 
 
 def get_task_cwd(task_id: Optional[str], default: Optional[str] = None) -> Optional[str]:
@@ -453,13 +446,7 @@ def get_task_cwd(task_id: Optional[str], default: Optional[str] = None) -> Optio
     2. TERMINAL_CWD environment variable
     3. Explicit default
     """
-    overrides = get_task_env_overrides(task_id)
-    if overrides.get("cwd"):
-        return overrides["cwd"]
-    env_cwd = os.getenv("TERMINAL_CWD")
-    if env_cwd:
-        return env_cwd
-    return default
+    return _get_task_cwd_impl(task_id, default=default)
 
 # Configuration from environment variables
 
@@ -918,7 +905,7 @@ def terminal_tool(
 
         # Check per-task overrides (set by environments like TerminalBench2Env)
         # before falling back to global env var config
-        overrides = _task_env_overrides.get(effective_task_id, {})
+        overrides = get_task_env_overrides(effective_task_id)
         
         # Select image based on env type, with per-task override support
         if env_type == "docker":

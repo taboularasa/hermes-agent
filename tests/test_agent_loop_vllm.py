@@ -39,6 +39,11 @@ try:
 except ImportError:
     pytest.skip("atroposlib not installed", allow_module_level=True)
 
+try:
+    from atroposlib.envs.server_handling.tool_call_translator import VLLM_AVAILABLE
+except ImportError:
+    VLLM_AVAILABLE = False
+
 
 # =========================================================================
 # Configuration
@@ -61,12 +66,16 @@ def _vllm_is_running() -> bool:
 
 # Skip all tests in this module if vLLM is not running
 pytestmark = pytest.mark.skipif(
-    not _vllm_is_running(),
+    (not _vllm_is_running()) or (not VLLM_AVAILABLE),
     reason=(
-        f"vLLM server not reachable at {VLLM_BASE_URL}. "
-        "Start it with: python -m example_trainer.vllm_api_server "
-        f"--model {VLLM_MODEL} --port {VLLM_PORT} "
-        "--gpu-memory-utilization 0.8 --max-model-len=32000"
+        (
+            f"vLLM server not reachable at {VLLM_BASE_URL}. "
+            "Start it with: python -m example_trainer.vllm_api_server "
+            f"--model {VLLM_MODEL} --port {VLLM_PORT} "
+            "--gpu-memory-utilization 0.8 --max-model-len=32000"
+        )
+        if not _vllm_is_running()
+        else "vLLM tool parser dependency not installed locally; skipping parser-dependent integration tests."
     ),
 )
 

@@ -181,6 +181,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
                 )
                 logger.error("[%s] %s", self.name, message)
                 self._set_fatal_error("whatsapp_session_lock", message, retryable=False)
+                self._session_lock_identity = None
                 return False
         except Exception as e:
             logger.warning("[%s] Could not acquire session lock (non-fatal): %s", self.name, e)
@@ -199,10 +200,12 @@ class WhatsAppAdapter(BasePlatformAdapter):
                 )
                 if install_result.returncode != 0:
                     print(f"[{self.name}] npm install failed: {install_result.stderr}")
+                    self._release_session_lock()
                     return False
                 print(f"[{self.name}] Dependencies installed")
             except Exception as e:
                 print(f"[{self.name}] Failed to install dependencies: {e}")
+                self._release_session_lock()
                 return False
         
         try:
@@ -278,6 +281,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
                     print(f"[{self.name}] Bridge process died (exit code {self._bridge_process.returncode})")
                     print(f"[{self.name}] Check log: {self._bridge_log}")
                     self._close_bridge_log()
+                    self._release_session_lock()
                     return False
                 try:
                     async with aiohttp.ClientSession() as session:
@@ -298,6 +302,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
                 print(f"[{self.name}] Bridge HTTP server did not start in 15s")
                 print(f"[{self.name}] Check log: {self._bridge_log}")
                 self._close_bridge_log()
+                self._release_session_lock()
                 return False
             
             # Phase 2: HTTP is up but WhatsApp may still be connecting.
@@ -310,6 +315,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
                         print(f"[{self.name}] Bridge process died during connection")
                         print(f"[{self.name}] Check log: {self._bridge_log}")
                         self._close_bridge_log()
+                        self._release_session_lock()
                         return False
                     try:
                         async with aiohttp.ClientSession() as session:
@@ -342,12 +348,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
             return True
             
         except Exception as e:
-            if self._session_lock_identity:
-                try:
-                    from gateway.status import release_scoped_lock
-                    release_scoped_lock("whatsapp-session", self._session_lock_identity)
-                except Exception:
-                    pass
+            self._release_session_lock()
             logger.error("[%s] Failed to start bridge: %s", self.name, e, exc_info=True)
             self._close_bridge_log()
             return False
@@ -360,6 +361,19 @@ class WhatsAppAdapter(BasePlatformAdapter):
             except Exception:
                 pass
             self._bridge_log_fh = None
+
+    def _release_session_lock(self) -> None:
+        """Release the scoped WhatsApp session lock if we currently own it."""
+        if not self._session_lock_identity:
+            return
+        try:
+            from gateway.status import release_scoped_lock
+
+            release_scoped_lock("whatsapp-session", self._session_lock_identity)
+        except Exception as e:
+            logger.warning("[%s] Error releasing WhatsApp session lock: %s", self.name, e, exc_info=True)
+        finally:
+            self._session_lock_identity = None
 
     async def _check_managed_bridge_exit(self) -> Optional[str]:
         """Return a fatal error message if the managed bridge child exited."""
@@ -420,17 +434,10 @@ class WhatsAppAdapter(BasePlatformAdapter):
             await self._http_session.close()
         self._http_session = None
 
-        if self._session_lock_identity:
-            try:
-                from gateway.status import release_scoped_lock
-                release_scoped_lock("whatsapp-session", self._session_lock_identity)
-            except Exception as e:
-                logger.warning("[%s] Error releasing WhatsApp session lock: %s", self.name, e, exc_info=True)
-
+        self._release_session_lock()
         self._mark_disconnected()
         self._bridge_process = None
         self._close_bridge_log()
-        self._session_lock_identity = None
         print(f"[{self.name}] Disconnected")
     
     async def send(

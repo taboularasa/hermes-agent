@@ -1,3 +1,4 @@
+# HADTO-PATCH: security
 """Tirith pre-exec security scanning wrapper.
 
 Runs the tirith binary as a subprocess to scan commands for content-level

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# HADTO-PATCH: env
 """
 Hermes Agent CLI - Interactive Terminal Interface
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# HADTO-PATCH: security
 """
 SQLite State Store for Hermes Agent.
 

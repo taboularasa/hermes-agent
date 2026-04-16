@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# HADTO-PATCH: env
 """
 MCP (Model Context Protocol) Client Support
 
