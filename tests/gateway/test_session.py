@@ -421,6 +421,33 @@ class TestSessionStoreRewriteTranscript:
         assert reloaded == []
 
 
+class TestSessionArtifactPermissions:
+    @pytest.fixture()
+    def store(self, tmp_path):
+        config = GatewayConfig()
+        store = SessionStore(sessions_dir=tmp_path, config=config)
+        store._db = None
+        return store
+
+    def test_sessions_index_written_owner_only(self, store):
+        source = SessionSource(platform=Platform.LOCAL, chat_id="cli")
+        store.get_or_create_session(source)
+
+        sessions_path = store.sessions_dir / "sessions.json"
+        assert sessions_path.exists()
+        assert (sessions_path.stat().st_mode & 0o777) == 0o600
+
+    def test_transcript_written_owner_only(self, store):
+        session_id = "secure_session"
+        store.append_to_transcript(session_id, {"role": "user", "content": "hello"})
+        transcript_path = store.get_transcript_path(session_id)
+        assert transcript_path.exists()
+        assert (transcript_path.stat().st_mode & 0o777) == 0o600
+
+        store.rewrite_transcript(session_id, [{"role": "assistant", "content": "updated"}])
+        assert (transcript_path.stat().st_mode & 0o777) == 0o600
+
+
 class TestLoadTranscriptCorruptLines:
     """Regression: corrupt JSONL lines (e.g. from mid-write crash) must be
     skipped instead of crashing the entire transcript load.  GH-1193."""

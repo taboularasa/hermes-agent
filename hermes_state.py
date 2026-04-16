@@ -22,6 +22,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
+from agent.redact import redact_sensitive_text
 from hermes_constants import get_hermes_home
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 
@@ -808,6 +809,9 @@ class SessionDB:
         Also increments the session's message_count (and tool_call_count
         if role is 'tool' or tool_calls is present).
         """
+        if content is not None:
+            content = redact_sensitive_text(content)
+
         # Serialize structured fields to JSON before entering the write txn
         reasoning_details_json = (
             json.dumps(reasoning_details)

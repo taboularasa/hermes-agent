@@ -160,6 +160,18 @@ class TestMessageStorage:
         messages = db.get_messages("s1")
         assert messages[0]["tool_calls"] == tool_calls
 
+    def test_message_content_redacted_before_storage(self, db):
+        db.create_session(session_id="s1", source="cli")
+        db.append_message(
+            "s1",
+            role="tool",
+            content="Authorization: Bearer sk-proj-abc123def456ghi789jkl012",
+        )
+
+        messages = db.get_messages("s1")
+        assert "abc123def456" not in messages[0]["content"]
+        assert "Authorization: Bearer" in messages[0]["content"]
+
     def test_get_messages_as_conversation(self, db):
         db.create_session(session_id="s1", source="cli")
         db.append_message("s1", role="user", content="Hello")

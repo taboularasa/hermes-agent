@@ -33,7 +33,6 @@ _PREFIX_PATTERNS = [
     r"fc-[A-Za-z0-9]{10,}",             # Firecrawl
     r"bb_live_[A-Za-z0-9_-]{10,}",      # BrowserBase
     r"gAAAA[A-Za-z0-9_=-]{20,}",        # Codex encrypted tokens
-    r"AKIA[A-Z0-9]{16}",                # AWS Access Key ID
     r"sk_live_[A-Za-z0-9]{10,}",        # Stripe secret key (live)
     r"sk_test_[A-Za-z0-9]{10,}",        # Stripe secret key (test)
     r"rk_live_[A-Za-z0-9]{10,}",        # Stripe restricted key
@@ -48,7 +47,7 @@ _PREFIX_PATTERNS = [
     r"sk_[A-Za-z0-9_]{10,}",            # ElevenLabs TTS key (sk_ underscore, not sk- dash)
     r"tvly-[A-Za-z0-9]{10,}",           # Tavily search API key
     r"exa_[A-Za-z0-9]{10,}",            # Exa search API key
-    r"gsk_[A-Za-z0-9]{10,}",            # Groq Cloud API key
+    r"gsk_[A-Za-z0-9]{20,}",            # Groq Cloud API key
     r"syt_[A-Za-z0-9]{10,}",            # Matrix access token
     r"retaindb_[A-Za-z0-9]{10,}",       # RetainDB API key
     r"hsk-[A-Za-z0-9]{10,}",            # Hindsight API key
@@ -93,6 +92,15 @@ _DB_CONNSTR_RE = re.compile(
     re.IGNORECASE,
 )
 
+# AWS Access Key IDs are treated as critical secrets and always redacted.
+_AWS_KEY_RE = re.compile(r"(?<![A-Za-z0-9_-])AKIA[A-Z0-9]{16}(?![A-Za-z0-9_-])")
+
+# Generic long hex secrets in assignment context.
+_GENERIC_HEX_SECRET_RE = re.compile(
+    r'(?:token|secret|key|password|credential)[\s]*[=:]\s*["\']?([a-fA-F0-9]{40,})["\']?',
+    re.IGNORECASE,
+)
+
 # JWT tokens: header.payload[.signature] — always start with "eyJ" (base64 for "{")
 # Matches 1-part (header only), 2-part (header.payload), and full 3-part JWTs.
 _JWT_RE = re.compile(
@@ -113,6 +121,8 @@ _PREFIX_RE = re.compile(
     r"(?<![A-Za-z0-9_-])(" + "|".join(_PREFIX_PATTERNS) + r")(?![A-Za-z0-9_-])"
 )
 
+_STANDARD_REDACTION_DISABLED_WARNED = False
+
 
 def _mask_token(token: str) -> str:
     """Mask a token, preserving prefix for long tokens."""
@@ -121,19 +131,37 @@ def _mask_token(token: str) -> str:
     return f"{token[:6]}...{token[-4:]}"
 
 
+def _apply_critical_redaction(text: str) -> str:
+    """Apply critical redaction patterns that are always active."""
+    text = _PRIVATE_KEY_RE.sub("[REDACTED PRIVATE KEY]", text)
+    text = _DB_CONNSTR_RE.sub(lambda m: f"{m.group(1)}***{m.group(3)}", text)
+    text = _AWS_KEY_RE.sub(lambda m: _mask_token(m.group(0)), text)
+    return text
+
+
 def redact_sensitive_text(text: str) -> str:
     """Apply all redaction patterns to a block of text.
 
     Safe to call on any string -- non-matching text passes through unchanged.
-    Disabled when security.redact_secrets is false in config.yaml.
+    When standard redaction is disabled, critical secret patterns remain active.
     """
+    global _STANDARD_REDACTION_DISABLED_WARNED
+
     if text is None:
         return None
     if not isinstance(text, str):
         text = str(text)
     if not text:
         return text
+
+    text = _apply_critical_redaction(text)
+
     if not _REDACT_ENABLED:
+        if not _STANDARD_REDACTION_DISABLED_WARNED:
+            logger.warning(
+                "Secret redaction partially disabled -- critical patterns remain protected"
+            )
+            _STANDARD_REDACTION_DISABLED_WARNED = True
         return text
 
     # Known prefixes (sk-, ghp_, etc.)
@@ -157,18 +185,18 @@ def redact_sensitive_text(text: str) -> str:
         text,
     )
 
+    def _redact_hex_secret(m):
+        full = m.group(0)
+        secret = m.group(1)
+        return full.replace(secret, _mask_token(secret))
+    text = _GENERIC_HEX_SECRET_RE.sub(_redact_hex_secret, text)
+
     # Telegram bot tokens
     def _redact_telegram(m):
         prefix = m.group(1) or ""
         digits = m.group(2)
         return f"{prefix}{digits}:***"
     text = _TELEGRAM_RE.sub(_redact_telegram, text)
-
-    # Private key blocks
-    text = _PRIVATE_KEY_RE.sub("[REDACTED PRIVATE KEY]", text)
-
-    # Database connection string passwords
-    text = _DB_CONNSTR_RE.sub(lambda m: f"{m.group(1)}***{m.group(3)}", text)
 
     # JWT tokens (eyJ... — base64-encoded JSON headers)
     text = _JWT_RE.sub(lambda m: _mask_token(m.group(0)), text)

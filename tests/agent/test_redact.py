@@ -376,3 +376,18 @@ class TestDiscordMentions:
         result = redact_sensitive_text(text)
         assert result.startswith("User ")
         assert result.endswith(" said hello")
+
+
+class TestCriticalRedaction:
+    def test_aws_key_redacted_even_when_standard_disabled(self, monkeypatch):
+        monkeypatch.setattr("agent.redact._REDACT_ENABLED", False)
+        text = "AWS key AKIA1234567890ABCDEF should not persist"
+        result = redact_sensitive_text(text)
+        assert "AKIA1234567890ABCDEF" not in result
+        assert "AWS key" in result
+
+    def test_long_hex_secret_assignment_redacted(self):
+        text = 'credential="0123456789abcdef0123456789abcdef01234567"'
+        result = redact_sensitive_text(text)
+        assert "0123456789abcdef0123456789abcdef01234567" not in result
+        assert "credential" in result
