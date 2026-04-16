@@ -70,6 +70,23 @@ def _resolve_hermes_home() -> Path:
         return Path(env_home)
     return _hermes_home
 
+
+def _build_role_prompt_prefix(job: dict) -> str:
+    """Return optional role-specific execution guidance for a cron job."""
+    role = str(job.get("role") or "").strip().lower()
+    if role != "study":
+        return ""
+
+    return (
+        "[SYSTEM: This cron job is classified as role=study. Treat it as an execution loop, not a passive summary. "
+        "When a run confirms a durable gap, convert that gap into explicit follow-through before you report: update the "
+        "owning backlog/control surface in the target repo, and if the gap is really Hermes's own capability "
+        "(planning, verification, delegation, evidence handling, candidate selection, or similar), also create or "
+        "update Hermes self-improvement work via self_improvement_pipeline or an equivalent backlog issue when those "
+        "tools are available. If you decide no action is warranted yet, say why in the report instead of silently "
+        "continuing.]"
+    )
+
 def _resolve_origin(job: dict) -> Optional[dict]:
     """Extract origin info from a job, preserving any extra routing metadata."""
     origin = job.get("origin")
@@ -262,7 +279,8 @@ def _build_job_prompt(job: dict) -> str:
         "Never combine [SILENT] with content — either report your "
         "findings normally, or say [SILENT] and nothing more.]\n\n"
     )
-    prompt = silent_hint + prompt
+    role_prefix = _build_role_prompt_prefix(job)
+    prompt = silent_hint + (role_prefix + "\n\n" if role_prefix else "") + prompt
     if skills is None:
         legacy = job.get("skill")
         skills = [legacy] if legacy else []
