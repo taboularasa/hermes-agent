@@ -1,0 +1,5 @@
+{
+  "patch_count": 46,
+  "updated": "2026-04-15",
+  "note": "Baseline locked after sealed-domain merge (PR #56). Update this file when adding or removing HADTO-PATCH annotations."
+}
