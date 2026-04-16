@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BASELINE="${HADTO_PATCH_BASELINE:-46}"
+ROOT="$(git rev-parse --show-toplevel)"
+FILE_BASELINE=""
+if [[ -f "$ROOT/PATCH_BASELINE.json" ]]; then
+  FILE_BASELINE="$(python3 -c "import json; print(json.load(open('$ROOT/PATCH_BASELINE.json'))['patch_count'])")"
+fi
+BASELINE="${HADTO_PATCH_BASELINE:-${FILE_BASELINE:-46}}"
 WINDOW="${HADTO_PATCH_WINDOW:-5}"
 COMPARE_REF=""
 
@@ -26,7 +31,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
 tmp_annotations="$(mktemp)"
