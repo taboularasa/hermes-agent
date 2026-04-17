@@ -163,6 +163,16 @@ class PersistentShellMixin:
             exit_code = 1
         return output, exit_code, cwd.strip()
 
+    @staticmethod
+    def _merge_output(stdout: str, stderr: str) -> str:
+        """Combine stdout and stderr into a single output string."""
+        parts = []
+        if stdout.strip():
+            parts.append(stdout.rstrip("\n"))
+        if stderr.strip():
+            parts.append(stderr.rstrip("\n"))
+        return "\n".join(parts)
+
     def _execute_persistent(self, command: str, cwd: str, *,
                             timeout: int | None = None,
                             stdin_data: str | None = None) -> dict:

@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 _TELEGRAM_TOPIC_TARGET_RE = re.compile(r"^\s*(-?\d+)(?::(\d+))?\s*$")
 _FEISHU_TARGET_RE = re.compile(r"^\s*((?:oc|ou|on|chat|open)_[-A-Za-z0-9]+)(?::([-A-Za-z0-9_]+))?\s*$")
 _WEIXIN_TARGET_RE = re.compile(r"^\s*((?:wxid|gh|v\d+|wm|wb)_[A-Za-z0-9_-]+|[A-Za-z0-9._-]+@chatroom|filehelper)\s*$")
+_SLACK_TARGET_RE = re.compile(r"^\s*([CDG][A-Z0-9]{8,})\s*$")
 # Discord snowflake IDs are numeric, same regex pattern as Telegram topic targets.
 _NUMERIC_TOPIC_RE = _TELEGRAM_TOPIC_TARGET_RE
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
@@ -145,21 +146,31 @@ def _handle_list():
 
 def _handle_send(args):
     """Send a message to a platform target."""
-    target = args.get("target", "")
+    target = str(args.get("target", "")).strip()
     message = args.get("message", "")
     if not target or not message:
         return tool_error("Both 'target' and 'message' are required when action='send'")
 
-    parts = target.split(":", 1)
-    platform_name = parts[0].strip().lower()
-    target_ref = parts[1].strip() if len(parts) > 1 else None
-    chat_id = None
-    thread_id = None
+    try:
+        origin_target = _resolve_origin_target(target)
+    except ValueError as exc:
+        return json.dumps(_error(str(exc)))
 
-    if target_ref:
-        chat_id, thread_id, is_explicit = _parse_target_ref(platform_name, target_ref)
+    if origin_target:
+        platform_name, chat_id, thread_id = origin_target
+        target_ref = None
+        is_explicit = True
     else:
-        is_explicit = False
+        parts = target.split(":", 1)
+        platform_name = parts[0].strip().lower()
+        target_ref = parts[1].strip() if len(parts) > 1 else None
+        chat_id = None
+        thread_id = None
+
+        if target_ref:
+            chat_id, thread_id, is_explicit = _parse_target_ref(platform_name, target_ref)
+        else:
+            is_explicit = False
 
     # Resolve human-friendly channel names to numeric IDs
     if target_ref and not is_explicit:
@@ -258,8 +269,7 @@ def _handle_send(args):
         if isinstance(result, dict) and result.get("success") and mirror_text:
             try:
                 from gateway.mirror import mirror_to_session
-                from gateway.session_context import get_session_env
-                source_label = get_session_env("HERMES_SESSION_PLATFORM", "cli")
+                source_label = os.getenv("HERMES_SESSION_PLATFORM", "cli")
                 if mirror_to_session(platform_name, chat_id, mirror_text, source_label=source_label, thread_id=thread_id):
                     result["mirrored"] = True
             except Exception:
@@ -272,6 +282,24 @@ def _handle_send(args):
         return json.dumps(_error(f"Send failed: {e}"))
 
 
+def _resolve_origin_target(target: str):
+    """Resolve the special origin target back to the current gateway session."""
+    if target.strip().lower() != "origin":
+        return None
+
+    platform_name = os.getenv("HERMES_SESSION_PLATFORM", "").strip().lower()
+    chat_id = os.getenv("HERMES_SESSION_CHAT_ID", "").strip()
+    thread_id = os.getenv("HERMES_SESSION_THREAD_ID", "").strip() or None
+
+    if not platform_name or platform_name == "local" or not chat_id:
+        raise ValueError(
+            "target='origin' requires a live gateway session with "
+            "HERMES_SESSION_PLATFORM and HERMES_SESSION_CHAT_ID set"
+        )
+
+    return platform_name, chat_id, thread_id
+
+
 def _parse_target_ref(platform_name: str, target_ref: str):
     """Parse a tool target into chat_id/thread_id and whether it is explicit."""
     if platform_name == "telegram":
@@ -282,6 +310,10 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         match = _FEISHU_TARGET_RE.fullmatch(target_ref)
         if match:
             return match.group(1), match.group(2), True
+    if platform_name == "slack":
+        match = _SLACK_TARGET_RE.fullmatch(target_ref)
+        if match:
+            return match.group(1), None, True
     if platform_name == "discord":
         match = _NUMERIC_TOPIC_RE.fullmatch(target_ref)
         if match:

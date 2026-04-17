@@ -9933,29 +9933,7 @@ def main(
         asyncio.run(start_gateway())
         return
 
-    # Skip worktree for list commands (they exit immediately)
-    if not list_tools and not list_toolsets:
-        # ── Git worktree isolation (#652) ──
-        # Create an isolated worktree so this agent instance doesn't collide
-        # with other agents working on the same repo.
-        use_worktree = worktree or w or CLI_CONFIG.get("worktree", False)
-        wt_info = None
-        if use_worktree:
-            # Prune stale worktrees from crashed/killed sessions
-            _repo = _git_repo_root()
-            if _repo:
-                _prune_stale_worktrees(_repo)
-            wt_info = _setup_worktree()
-            if wt_info:
-                _active_worktree = wt_info
-                os.environ["TERMINAL_CWD"] = wt_info["path"]
-                atexit.register(_cleanup_worktree, wt_info)
-            else:
-                # Worktree was explicitly requested but setup failed —
-                # don't silently run without isolation.
-                return
-    else:
-        wt_info = None
+    wt_info = None
     
     # Handle query shorthand
     query = query or q
@@ -10009,6 +9987,42 @@ def main(
                 part for part in (cli.system_prompt, skills_prompt) if part
             ).strip()
             cli.preloaded_skills = loaded_skills
+
+    # Skip worktree for list commands (they exit immediately)
+    if not list_tools and not list_toolsets:
+        from hermes_cli.ctx_runtime import maybe_bind_ctx_session
+
+        # ── Git worktree isolation (#652) ──
+        # Create an isolated worktree so this agent instance doesn't collide
+        # with other agents working on the same repo.
+        use_worktree = worktree or w or CLI_CONFIG.get("worktree", False)
+        ctx_preview = maybe_bind_ctx_session(
+            session_id=cli.session_id,
+            enabled_toolsets=toolsets_list,
+            platform="cli",
+            repo_root=os.getcwd(),
+            dry_run=True,
+        )
+        if use_worktree and ctx_preview.active:
+            print(
+                "\033[36mℹ ctx worktree mode is available for this coding session; "
+                "ignoring --worktree and using the ctx-managed worktree once the agent starts.\033[0m"
+            )
+            use_worktree = False
+        if use_worktree:
+            # Prune stale worktrees from crashed/killed sessions
+            _repo = _git_repo_root()
+            if _repo:
+                _prune_stale_worktrees(_repo)
+            wt_info = _setup_worktree()
+            if wt_info:
+                _active_worktree = wt_info
+                os.environ["TERMINAL_CWD"] = wt_info["path"]
+                atexit.register(_cleanup_worktree, wt_info)
+            else:
+                # Worktree was explicitly requested but setup failed —
+                # don't silently run without isolation.
+                return
 
     # Inject worktree context into agent's system prompt
     if wt_info:

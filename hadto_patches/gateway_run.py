@@ -442,7 +442,9 @@ def _resolve_gateway_model(config: dict | None = None, provider: str | None = No
     back to the hardcoded default which fails when the active provider is
     openai-codex.
     """
-    model = os.getenv("HERMES_MODEL") or os.getenv("LLM_MODEL") or ""
+    model = ""
+    if config is None:
+        model = os.getenv("HERMES_MODEL") or os.getenv("LLM_MODEL") or ""
     cfg = config if config is not None else _load_gateway_config()
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, str):

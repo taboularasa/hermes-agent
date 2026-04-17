@@ -3006,12 +3006,13 @@ class TestStreamingApiCall:
         call_kwargs = agent.client.chat.completions.create.call_args
         assert call_kwargs[1].get("stream") is True or call_kwargs.kwargs.get("stream") is True
 
-    def test_api_exception_falls_back_to_non_streaming(self, agent):
-        """When streaming fails before any deltas, fallback to non-streaming is attempted."""
+    def test_api_exception_propagates_no_non_streaming_fallback(self, agent):
+        """When streaming fails before any deltas, error propagates to the main retry loop."""
         agent.client.chat.completions.create.side_effect = ConnectionError("fail")
-        # The fallback also uses the same client, so it'll fail too
-        with pytest.raises(ConnectionError, match="fail"):
-            agent._interruptible_streaming_api_call({"messages": []})
+        # Prevent stream retry logic from replacing the mock client
+        with patch.object(agent, "_replace_primary_openai_client", return_value=False):
+            with pytest.raises(ConnectionError, match="fail"):
+                agent._interruptible_streaming_api_call({"messages": []})
 
     def test_response_has_uuid_id(self, agent):
         chunks = [_make_chunk(content="x"), _make_chunk(finish_reason="stop")]

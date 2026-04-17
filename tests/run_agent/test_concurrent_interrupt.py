@@ -59,6 +59,9 @@ def _make_agent(monkeypatch):
         def _has_stream_consumers(self):
             return False
 
+        def _get_budget_warning(self, api_call_count):
+            return None
+
     stub = _Stub()
     # Bind the real methods
     stub._execute_tool_calls_concurrent = _ra.AIAgent._execute_tool_calls_concurrent.__get__(stub)

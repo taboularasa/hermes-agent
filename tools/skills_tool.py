@@ -382,10 +382,21 @@ def _is_env_var_persisted(
     return bool(os.getenv(var_name))
 
 
+def _is_env_var_available_for_backend(
+    var_name: str,
+    backend: str,
+    env_snapshot: Dict[str, str] | None = None,
+) -> bool:
+    if backend in _REMOTE_ENV_BACKENDS:
+        return bool(os.getenv(var_name))
+    return _is_env_var_persisted(var_name, env_snapshot)
+
+
 def _remaining_required_environment_names(
     required_env_vars: List[Dict[str, Any]],
     capture_result: Dict[str, Any],
     *,
+    backend: str,
     env_snapshot: Dict[str, str] | None = None,
 ) -> List[str]:
     missing_names = set(capture_result["missing_names"])
@@ -397,7 +408,9 @@ def _remaining_required_environment_names(
         name = entry["name"]
         if entry.get("optional"):
             continue
-        if name in missing_names or not _is_env_var_persisted(name, env_snapshot):
+        if name in missing_names or not _is_env_var_available_for_backend(
+            name, backend, env_snapshot
+        ):
             remaining.append(name)
     return remaining
 
@@ -1199,7 +1212,9 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
             e
             for e in required_env_vars
             if not e.get("optional")
-            and not _is_env_var_persisted(e["name"], env_snapshot)
+            and not _is_env_var_available_for_backend(
+                e["name"], backend, env_snapshot
+            )
         ]
         capture_result = _capture_required_environment_variables(
             skill_name,
@@ -1210,6 +1225,7 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
         remaining_missing_required_envs = _remaining_required_environment_names(
             required_env_vars,
             capture_result,
+            backend=backend,
             env_snapshot=env_snapshot,
         )
         setup_needed = bool(remaining_missing_required_envs)
