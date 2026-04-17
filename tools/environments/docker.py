@@ -61,6 +61,31 @@ def _normalize_forward_env_names(forward_env: list[str] | None) -> list[str]:
     return normalized
 
 
+def _normalize_env_dict(env: dict | None) -> dict[str, str]:
+    """Validate and normalize a docker env dict to {str: str}."""
+    if not env:
+        return {}
+    if not isinstance(env, dict):
+        logger.warning("docker_env is not a dict: %r", env)
+        return {}
+
+    normalized: dict[str, str] = {}
+    for key, value in env.items():
+        if not isinstance(key, str) or not _ENV_VAR_NAME_RE.match(key.strip()):
+            logger.warning("Ignoring invalid docker_env key: %r", key)
+            continue
+        key = key.strip()
+        if not isinstance(value, str):
+            if isinstance(value, (int, float, bool)):
+                value = str(value)
+            else:
+                logger.warning("Ignoring non-string docker_env value for %r: %r", key, value)
+                continue
+        normalized[key] = value
+
+    return normalized
+
+
 def _load_hermes_env_vars() -> dict[str, str]:
     """Load ~/.hermes/.env values without failing Docker command execution."""
     try:
@@ -74,19 +99,33 @@ def _load_hermes_env_vars() -> dict[str, str]:
 def find_docker() -> Optional[str]:
     """Locate the docker CLI binary.
 
-    Checks ``shutil.which`` first (respects PATH), then probes well-known
-    install locations on macOS where Docker Desktop may not be in PATH
-    (e.g. when running as a gateway service via launchd).
+    Resolution order:
+    1. ``HERMES_DOCKER_BINARY`` env var — explicit override
+    2. ``docker`` on PATH via ``shutil.which``
+    3. ``podman`` on PATH via ``shutil.which``
+    4. Well-known macOS Docker Desktop install locations
 
     Returns the absolute path, or ``None`` if docker cannot be found.
     """
     global _docker_executable
-    if _docker_executable is not None:
+    override = os.getenv("HERMES_DOCKER_BINARY")
+    if override and os.path.isfile(override) and os.access(override, os.X_OK):
+        _docker_executable = override
+        logger.info("Using HERMES_DOCKER_BINARY override: %s", override)
+        return override
+
+    if _docker_executable is not None and not override:
         return _docker_executable
 
     found = shutil.which("docker")
     if found:
         _docker_executable = found
+        return found
+
+    found = shutil.which("podman")
+    if found:
+        _docker_executable = found
+        logger.info("Using podman as container runtime: %s", found)
         return found
 
     for path in _DOCKER_SEARCH_PATHS:
@@ -95,6 +134,7 @@ def find_docker() -> Optional[str]:
             logger.info("Found docker at non-PATH location: %s", path)
             return path
 
+    _docker_executable = None
     return None
 
 
@@ -199,6 +239,32 @@ class DockerEnvironment(BaseEnvironment):
     across container restarts.
     """
 
+    def _build_init_env_args(self) -> list[str]:
+        """Build docker ``-e`` args from explicit env plus forwarded host env."""
+        exec_env: dict[str, str] = dict(getattr(self, "_env", {}))
+
+        forward_keys = set(getattr(self, "_forward_env", []))
+        try:
+            from tools.env_passthrough import get_all_passthrough
+
+            forward_keys |= set(get_all_passthrough())
+        except Exception:
+            pass
+
+        hermes_env = _load_hermes_env_vars() if forward_keys else {}
+        for key in sorted(forward_keys):
+            value = os.getenv(key)
+            if value is None:
+                value = hermes_env.get(key)
+            if value is not None:
+                exec_env[key] = value
+
+        args: list[str] = []
+        for key in sorted(exec_env):
+            args.extend(["-e", f"{key}={exec_env[key]}"])
+        self._init_env_args = list(args)
+        return args
+
     def __init__(
         self,
         image: str,
@@ -211,6 +277,7 @@ class DockerEnvironment(BaseEnvironment):
         task_id: str = "default",
         volumes: list = None,
         forward_env: list[str] | None = None,
+        env: dict | None = None,
         network: bool = True,
         host_cwd: str = None,
         auto_mount_cwd: bool = False,
@@ -222,6 +289,7 @@ class DockerEnvironment(BaseEnvironment):
         self._persistent = persistent_filesystem
         self._task_id = task_id
         self._forward_env = _normalize_forward_env_names(forward_env)
+        self._env = _normalize_env_dict(env)
         self._container_id: Optional[str] = None
         logger.info(f"DockerEnvironment volumes: {volumes}")
         # Ensure volumes is a list (config.yaml could be malformed)
@@ -344,9 +412,10 @@ class DockerEnvironment(BaseEnvironment):
                 )
         except Exception as e:
             logger.debug("Docker: could not load credential file mounts: %s", e)
+        env_args = self._build_init_env_args()
 
         logger.info(f"Docker volume_args: {volume_args}")
-        all_run_args = list(_SECURITY_ARGS) + writable_args + resource_args + volume_args
+        all_run_args = list(_SECURITY_ARGS) + writable_args + resource_args + volume_args + env_args
         logger.info(f"Docker run_args: {all_run_args}")
 
         # Resolve the docker executable once so it works even when
@@ -439,22 +508,7 @@ class DockerEnvironment(BaseEnvironment):
         if effective_stdin is not None:
             cmd.append("-i")
         cmd.extend(["-w", work_dir])
-        # Combine explicit docker_forward_env with skill-declared env_passthrough
-        # vars so skills that declare required_environment_variables (e.g. Notion)
-        # have their keys forwarded into the container automatically.
-        forward_keys = set(self._forward_env)
-        try:
-            from tools.env_passthrough import get_all_passthrough
-            forward_keys |= get_all_passthrough()
-        except Exception:
-            pass
-        hermes_env = _load_hermes_env_vars() if forward_keys else {}
-        for key in sorted(forward_keys):
-            value = os.getenv(key)
-            if value is None:
-                value = hermes_env.get(key)
-            if value is not None:
-                cmd.extend(["-e", f"{key}={value}"])
+        cmd.extend(self._build_init_env_args())
         cmd.extend([self._container_id, "bash", "-lc", exec_command])
 
         try:

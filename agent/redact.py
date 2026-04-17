@@ -4,12 +4,6 @@
 Applies pattern matching to mask API keys, tokens, and credentials
 before they reach log files, verbose output, or gateway logs.
 
-Redaction is split into two tiers:
-  - **Critical**: private keys, database connection strings, AWS credentials.
-    Always applied regardless of the HERMES_REDACT_SECRETS toggle.
-  - **Standard**: API key prefixes, auth headers, etc.  Disabled when
-    HERMES_REDACT_SECRETS=false.
-
 Short tokens (< 18 chars) are fully masked. Longer tokens preserve
 the first 6 and last 4 characters for debuggability.
 """
@@ -20,11 +14,19 @@ import re
 
 logger = logging.getLogger(__name__)
 
+# Snapshot at import time so runtime env mutations (e.g. LLM-generated
+# `export HERMES_REDACT_SECRETS=false`) cannot disable redaction mid-session.
+_REDACT_ENABLED = os.getenv("HERMES_REDACT_SECRETS", "").lower() not in ("0", "false", "no", "off")
+
 # Known API key prefixes -- match the prefix + contiguous token chars
 _PREFIX_PATTERNS = [
     r"sk-[A-Za-z0-9_-]{10,}",           # OpenAI / OpenRouter / Anthropic (sk-ant-*)
     r"ghp_[A-Za-z0-9]{10,}",            # GitHub PAT (classic)
     r"github_pat_[A-Za-z0-9_]{10,}",    # GitHub PAT (fine-grained)
+    r"gho_[A-Za-z0-9]{10,}",            # GitHub OAuth access token
+    r"ghu_[A-Za-z0-9]{10,}",            # GitHub user-to-server token
+    r"ghs_[A-Za-z0-9]{10,}",            # GitHub server-to-server token
+    r"ghr_[A-Za-z0-9]{10,}",            # GitHub refresh token
     r"xox[baprs]-[A-Za-z0-9-]{10,}",    # Slack tokens
     r"AIza[A-Za-z0-9_-]{30,}",          # Google API keys
     r"pplx-[A-Za-z0-9]{10,}",           # Perplexity
@@ -32,6 +34,7 @@ _PREFIX_PATTERNS = [
     r"fc-[A-Za-z0-9]{10,}",             # Firecrawl
     r"bb_live_[A-Za-z0-9_-]{10,}",      # BrowserBase
     r"gAAAA[A-Za-z0-9_=-]{20,}",        # Codex encrypted tokens
+    r"AKIA[A-Z0-9]{16}",                # AWS Access Key ID
     r"sk_live_[A-Za-z0-9]{10,}",        # Stripe secret key (live)
     r"sk_test_[A-Za-z0-9]{10,}",        # Stripe secret key (test)
     r"rk_live_[A-Za-z0-9]{10,}",        # Stripe restricted key
@@ -46,25 +49,18 @@ _PREFIX_PATTERNS = [
     r"sk_[A-Za-z0-9_]{10,}",            # ElevenLabs TTS key (sk_ underscore, not sk- dash)
     r"tvly-[A-Za-z0-9]{10,}",           # Tavily search API key
     r"exa_[A-Za-z0-9]{10,}",            # Exa search API key
-    r"gsk_[A-Za-z0-9]{20,}",            # Groq API key
+    r"gsk_[A-Za-z0-9]{10,}",            # Groq Cloud API key
+    r"syt_[A-Za-z0-9]{10,}",            # Matrix access token
+    r"retaindb_[A-Za-z0-9]{10,}",       # RetainDB API key
+    r"hsk-[A-Za-z0-9]{10,}",            # Hindsight API key
+    r"mem0_[A-Za-z0-9]{10,}",           # Mem0 Platform API key
+    r"brv_[A-Za-z0-9]{10,}",            # ByteRover API key
 ]
-
-# JWT tokens: three base64url segments separated by dots
-_JWT_RE = re.compile(
-    r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
-)
-
-# Generic long hex secrets in assignment context (40+ hex chars)
-_GENERIC_HEX_SECRET_RE = re.compile(
-    r'(?:token|secret|key|password|credential)[\s]*[=:]\s*["\']?([a-fA-F0-9]{40,})["\']?',
-    re.IGNORECASE,
-)
 
 # ENV assignment patterns: KEY=value where KEY contains a secret-like name
 _SECRET_ENV_NAMES = r"(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)"
 _ENV_ASSIGN_RE = re.compile(
-    rf"([A-Z_]*{_SECRET_ENV_NAMES}[A-Z_]*)\s*=\s*(['\"]?)(\S+)\2",
-    re.IGNORECASE,
+    rf"([A-Z0-9_]{{0,50}}{_SECRET_ENV_NAMES}[A-Z0-9_]{{0,50}})\s*=\s*(['\"]?)(\S+)\2",
 )
 
 # JSON field patterns: "apiKey": "value", "token": "value", etc.
@@ -86,8 +82,6 @@ _TELEGRAM_RE = re.compile(
     r"(bot)?(\d{8,}):([-A-Za-z0-9_]{30,})",
 )
 
-# --- Critical patterns (always redacted, even when toggle is off) ---
-
 # Private key blocks: -----BEGIN RSA PRIVATE KEY----- ... -----END RSA PRIVATE KEY-----
 _PRIVATE_KEY_RE = re.compile(
     r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----"
@@ -100,6 +94,23 @@ _DB_CONNSTR_RE = re.compile(
     re.IGNORECASE,
 )
 
+# JWT tokens: header.payload[.signature] — always start with "eyJ" (base64 for "{")
+# Matches 1-part (header only), 2-part (header.payload), and full 3-part JWTs.
+_JWT_RE = re.compile(
+    r"eyJ[A-Za-z0-9_-]{10,}"           # Header (always starts with eyJ)
+    r"(?:\.[A-Za-z0-9_=-]{4,}){0,2}"   # Optional payload and/or signature
+)
+
+# Discord user/role mentions: <@123456789012345678> or <@!123456789012345678>
+# Snowflake IDs are 17-20 digit integers that resolve to specific Discord accounts.
+_DISCORD_MENTION_RE = re.compile(r"<@!?(\d{17,20})>")
+
+# Generic long hex secrets in assignment context (40+ hex chars)
+_GENERIC_HEX_SECRET_RE = re.compile(
+    r'(?:token|secret|key|password|credential)[\s]*[=:]\s*["\']?([a-fA-F0-9]{40,})["\']?',
+    re.IGNORECASE,
+)
+
 # AWS Access Key ID (critical credential)
 _AWS_KEY_RE = re.compile(r"(?<![A-Za-z0-9_-])AKIA[A-Z0-9]{16}(?![A-Za-z0-9_-])")
 
@@ -107,7 +118,7 @@ _AWS_KEY_RE = re.compile(r"(?<![A-Za-z0-9_-])AKIA[A-Z0-9]{16}(?![A-Za-z0-9_-])")
 # Negative lookahead prevents matching hex strings or identifiers
 _SIGNAL_PHONE_RE = re.compile(r"(\+[1-9]\d{6,14})(?![A-Za-z0-9])")
 
-# Compile known prefix patterns into one alternation (excludes AWS which is critical)
+# Compile known prefix patterns into one alternation
 _PREFIX_RE = re.compile(
     r"(?<![A-Za-z0-9_-])(" + "|".join(_PREFIX_PATTERNS) + r")(?![A-Za-z0-9_-])"
 )
@@ -123,20 +134,10 @@ def _mask_token(token: str) -> str:
 
 
 def _apply_critical_redaction(text: str) -> str:
-    """Apply critical redaction patterns that are ALWAYS active.
-
-    Critical patterns cover private keys, database connection strings,
-    and AWS credentials -- secrets whose exposure carries the highest risk.
-    """
-    # Private key blocks
+    """Apply redaction patterns that must stay active even when standard masking is disabled."""
     text = _PRIVATE_KEY_RE.sub("[REDACTED PRIVATE KEY]", text)
-
-    # Database connection string passwords
     text = _DB_CONNSTR_RE.sub(lambda m: f"{m.group(1)}***{m.group(3)}", text)
-
-    # AWS Access Key IDs
     text = _AWS_KEY_RE.sub(lambda m: _mask_token(m.group(0)), text)
-
     return text
 
 
@@ -144,10 +145,7 @@ def redact_sensitive_text(text: str) -> str:
     """Apply all redaction patterns to a block of text.
 
     Safe to call on any string -- non-matching text passes through unchanged.
-
-    When HERMES_REDACT_SECRETS is set to false, only *standard* redaction is
-    disabled. Critical patterns (private keys, database credentials, AWS keys)
-    remain active regardless of the toggle.
+    Critical patterns stay enabled even when standard redaction is disabled.
     """
     global _STANDARD_REDACTION_DISABLED_WARNED
 
@@ -157,34 +155,17 @@ def redact_sensitive_text(text: str) -> str:
         text = str(text)
     if not text:
         return text
-
-    # Critical redaction is ALWAYS applied
     text = _apply_critical_redaction(text)
-
-    # Check if standard redaction is disabled
-    if os.getenv("HERMES_REDACT_SECRETS", "").lower() in ("0", "false", "no", "off"):
+    if not _REDACT_ENABLED:
         if not _STANDARD_REDACTION_DISABLED_WARNED:
             logger.warning(
-                "Secret redaction partially disabled — critical patterns "
-                "(private keys, database credentials) remain protected"
+                "Secret redaction partially disabled; critical patterns remain protected"
             )
             _STANDARD_REDACTION_DISABLED_WARNED = True
         return text
 
-    # --- Standard redaction (toggleable) ---
-
     # Known prefixes (sk-, ghp_, etc.)
     text = _PREFIX_RE.sub(lambda m: _mask_token(m.group(1)), text)
-
-    # JWT tokens
-    text = _JWT_RE.sub(lambda m: _mask_token(m.group(0)), text)
-
-    # Generic hex secrets in assignment context
-    def _redact_hex_secret(m):
-        full = m.group(0)
-        secret = m.group(1)
-        return full.replace(secret, _mask_token(secret))
-    text = _GENERIC_HEX_SECRET_RE.sub(_redact_hex_secret, text)
 
     # ENV assignments: OPENAI_API_KEY=sk-abc...
     def _redact_env(m):
@@ -210,6 +191,26 @@ def redact_sensitive_text(text: str) -> str:
         digits = m.group(2)
         return f"{prefix}{digits}:***"
     text = _TELEGRAM_RE.sub(_redact_telegram, text)
+
+    # Private key blocks
+    text = _PRIVATE_KEY_RE.sub("[REDACTED PRIVATE KEY]", text)
+
+    # Database connection string passwords
+    text = _DB_CONNSTR_RE.sub(lambda m: f"{m.group(1)}***{m.group(3)}", text)
+
+    # JWT tokens (eyJ... — base64-encoded JSON headers)
+    text = _JWT_RE.sub(lambda m: _mask_token(m.group(0)), text)
+
+    # Generic long hex secrets in assignment context
+    def _redact_hex_secret(m):
+        full = m.group(0)
+        secret = m.group(1)
+        return full.replace(secret, _mask_token(secret))
+
+    text = _GENERIC_HEX_SECRET_RE.sub(_redact_hex_secret, text)
+
+    # Discord user/role mentions (<@snowflake_id>)
+    text = _DISCORD_MENTION_RE.sub(lambda m: f"<@{'!' if '!' in m.group(0) else ''}***>", text)
 
     # E.164 phone numbers (Signal, WhatsApp)
     def _redact_phone(m):

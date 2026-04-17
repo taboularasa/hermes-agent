@@ -414,8 +414,10 @@ class TrajectoryCompressor:
             return "codex"
         if "api.z.ai" in url:
             return "zai"
-        if "moonshot.ai" in url or "api.kimi.com" in url:
+        if "moonshot.ai" in url or "moonshot.cn" in url or "api.kimi.com" in url:
             return "kimi-coding"
+        if "arcee.ai" in url:
+            return "arcee"
         if "minimaxi.com" in url:
             return "minimax-cn"
         if "minimax.io" in url:
@@ -634,7 +636,7 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
                         max_tokens=self.config.summary_target_tokens * 2,
                     )
                 else:
-                    async_client = self.async_client or self._get_async_client()
+                    async_client = getattr(self, "async_client", None) or self._get_async_client()
                     response = await async_client.chat.completions.create(
                         model=self.config.summarization_model,
                         messages=[{"role": "user", "content": prompt}],

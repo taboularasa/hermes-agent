@@ -17,7 +17,10 @@ class TestDiscordImportSafety:
         monkeypatch.delitem(sys.modules, "gateway.platforms.discord", raising=False)
         monkeypatch.setattr(builtins, "__import__", fake_import)
 
-        module = importlib.import_module("gateway.platforms.discord")
+        try:
+            module = importlib.import_module("gateway.platforms.discord")
 
-        assert module.DISCORD_AVAILABLE is False
-        assert module.discord is None
+            assert module.DISCORD_AVAILABLE is False
+            assert module.discord is None
+        finally:
+            sys.modules.pop("gateway.platforms.discord", None)

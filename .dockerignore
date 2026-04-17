@@ -1,37 +1,16 @@
 # Git
-.git/
+.git
 .gitignore
 .gitmodules
 
 # Dependencies
 node_modules
+.venv
 
 # CI/CD
-.github/
+.github
 
 # Environment files
 .env
 
-# Python artifacts
-__pycache__/
-*.pyc
-*.pyo
-*.egg-info/
-venv/
-
-# Tests
-tests/
-
-# Documentation & website
-website/
-docs/
 *.md
-!README.md
-!RELEASE_*.md
-
-# Claude/IDE files
-.claude/
-.plans/
-
-# Examples & non-runtime data
-datagen-config-examples/

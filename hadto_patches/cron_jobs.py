@@ -387,6 +387,7 @@ def create_job(
     model: Optional[str] = None,
     provider: Optional[str] = None,
     base_url: Optional[str] = None,
+    script: Optional[str] = None,
     role: Optional[str] = None,
     scope: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -405,6 +406,8 @@ def create_job(
         model: Optional per-job model override
         provider: Optional per-job provider override
         base_url: Optional per-job base URL override
+        script: Optional path to a Python script whose stdout is injected into the
+                prompt each run
 
     Returns:
         The created job dict
@@ -433,6 +436,8 @@ def create_job(
     normalized_model = normalized_model or None
     normalized_provider = normalized_provider or None
     normalized_base_url = normalized_base_url or None
+    normalized_script = str(script).strip() if isinstance(script, str) else None
+    normalized_script = normalized_script or None
     normalized_role = _normalize_taxonomy_value(role)
     normalized_scope = _normalize_taxonomy_value(scope)
 
@@ -446,6 +451,7 @@ def create_job(
         "model": normalized_model,
         "provider": normalized_provider,
         "base_url": normalized_base_url,
+        "script": normalized_script,
         "role": normalized_role,
         "scope": normalized_scope,
         "schedule": parsed_schedule,
@@ -463,6 +469,7 @@ def create_job(
         "last_run_at": None,
         "last_status": None,
         "last_error": None,
+        "last_delivery_error": None,
         # Delivery configuration
         "deliver": deliver,
         "origin": origin,  # Tracks where job was created for "origin" delivery
@@ -654,9 +661,15 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
             updated["role"] = _normalize_taxonomy_value(updated.get("role"))
         if "scope" in updates:
             updated["scope"] = _normalize_taxonomy_value(updated.get("scope"))
+        if "script" in updates:
+            normalized_script = str(updated.get("script")).strip() if isinstance(updated.get("script"), str) else None
+            updated["script"] = normalized_script or None
 
         if schedule_changed:
             updated_schedule = updated["schedule"]
+            if isinstance(updated_schedule, str):
+                updated_schedule = parse_schedule(updated_schedule)
+                updated["schedule"] = updated_schedule
             updated["schedule_display"] = updates.get(
                 "schedule_display",
                 updated_schedule.get("display", updated.get("schedule_display")),
@@ -733,12 +746,20 @@ def remove_job(job_id: str) -> bool:
     return False
 
 
-def mark_job_run(job_id: str, success: bool, error: Optional[str] = None):
+def mark_job_run(
+    job_id: str,
+    success: bool,
+    error: Optional[str] = None,
+    delivery_error: Optional[str] = None,
+):
     """
     Mark a job as having been run.
     
     Updates last_run_at, last_status, increments completed count,
     computes next_run_at, and auto-deletes if repeat limit reached.
+
+    ``delivery_error`` is tracked separately from the agent error so a run can
+    succeed while message delivery still fails.
     """
     jobs = load_jobs()
     for i, job in enumerate(jobs):
@@ -747,6 +768,7 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None):
             job["last_run_at"] = now
             job["last_status"] = "ok" if success else "error"
             job["last_error"] = error if not success else None
+            job["last_delivery_error"] = delivery_error
             
             # Increment completed count
             if job.get("repeat"):

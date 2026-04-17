@@ -163,6 +163,13 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
         elif key not in _HERMES_PROVIDER_ENV_BLOCKLIST or _is_passthrough(key):
             sanitized[key] = value
 
+    # Per-profile HOME isolation for background processes (same as _make_run_env).
+    from hermes_constants import get_subprocess_home
+
+    _profile_home = get_subprocess_home()
+    if _profile_home:
+        sanitized["HOME"] = _profile_home
+
     return sanitized
 
 
@@ -291,6 +298,15 @@ def _make_run_env(env: dict) -> dict:
     existing_path = run_env.get("PATH", "")
     if "/usr/bin" not in existing_path.split(":"):
         run_env["PATH"] = f"{existing_path}:{_SANE_PATH}" if existing_path else _SANE_PATH
+
+    # Per-profile HOME isolation: redirect system tool configs into
+    # {HERMES_HOME}/home/ when that directory exists. Only the subprocess
+    # sees the override; the Python process keeps the real HOME.
+    from hermes_constants import get_subprocess_home
+
+    _profile_home = get_subprocess_home()
+    if _profile_home:
+        run_env["HOME"] = _profile_home
     return run_env
 
 
@@ -374,6 +390,15 @@ class LocalEnvironment(PersistentShellMixin, BaseEnvironment):
         self._persistent_temp_root = _get_local_persistent_temp_root()
         if self.persistent:
             self._init_persistent_shell()
+
+    def get_temp_dir(self) -> str:
+        """Return the writable temp dir for local session artifacts."""
+        for key in ("TMPDIR", "TMP", "TEMP"):
+            value = (self.env or {}).get(key) or os.environ.get(key)
+            if not value:
+                continue
+            return value.rstrip("/") or value
+        return tempfile.gettempdir()
 
     @property
     def _temp_prefix(self) -> str:

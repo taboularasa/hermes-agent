@@ -42,7 +42,7 @@ import os
 import re
 import asyncio
 from typing import List, Dict, Any, Optional
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 import httpx
 from firecrawl import Firecrawl
 from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
@@ -58,6 +58,14 @@ WEB_PROVIDER_ENV_KEYS = {
     "tavily": ("TAVILY_API_KEY",),
     "firecrawl": ("FIRECRAWL_API_KEY", "FIRECRAWL_API_URL"),
 }
+
+
+def _url_contains_embedded_secret(url: str) -> bool:
+    """Return True when a URL appears to embed an API key or token."""
+    from agent.redact import _PREFIX_RE
+
+    decoded = unquote(url or "")
+    return bool(_PREFIX_RE.search(url or "") or _PREFIX_RE.search(decoded))
 
 
 # ─── Backend Selection ────────────────────────────────────────────────────────
@@ -1032,6 +1040,13 @@ async def web_extract_tool(
     try:
         logger.info("Extracting content from %d URL(s)", len(urls))
 
+        for url in urls:
+            if _url_contains_embedded_secret(url):
+                return json.dumps({
+                    "success": False,
+                    "error": "Blocked: URL contains what appears to be an API key or token. Secrets must not be sent in URLs.",
+                }, ensure_ascii=False)
+
         # ── SSRF protection — filter out private/internal URLs before any backend ──
         safe_urls = []
         ssrf_blocked: List[Dict[str, Any]] = []
@@ -1358,6 +1373,12 @@ async def web_crawl_tool(
     
     try:
         backend = _get_backend()
+
+        if _url_contains_embedded_secret(url):
+            return json.dumps({
+                "success": False,
+                "error": "Blocked: URL contains what appears to be an API key or token. Secrets must not be sent in URLs.",
+            }, ensure_ascii=False)
 
         # Tavily supports crawl via its /crawl endpoint
         if backend == "tavily":

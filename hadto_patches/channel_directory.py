@@ -8,15 +8,29 @@ action="list" and for resolving human-friendly channel names to numeric IDs.
 
 import json
 import logging
-import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from hermes_cli.config import get_hermes_home
+from utils import atomic_json_write
 
 logger = logging.getLogger("gateway.channel_directory")
 
 DIRECTORY_PATH = get_hermes_home() / "channel_directory.json"
+
+
+def _normalize_channel_query(value: str) -> str:
+    return value.lstrip("#").strip().lower()
+
+
+def _channel_target_name(platform_name: str, channel: Dict[str, Any]) -> str:
+    """Return the human-facing target label shown to users for a channel entry."""
+    name = channel["name"]
+    if platform_name == "discord" and channel.get("guild"):
+        return f"#{name}"
+    if platform_name != "discord" and channel.get("type"):
+        return f"{name} ({channel['type']})"
+    return name
 
 
 def _session_entry_id(origin: Dict[str, Any]) -> Optional[str]:
@@ -73,10 +87,7 @@ def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
     }
 
     try:
-        DIRECTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(DIRECTORY_PATH, "w", encoding="utf-8") as f:
-            json.dump(directory, f, indent=2, ensure_ascii=False)
-        os.chmod(DIRECTORY_PATH, 0o600)
+        atomic_json_write(DIRECTORY_PATH, directory)
     except Exception as e:
         logger.warning("Channel directory: failed to write: %s", e)
 
@@ -190,11 +201,13 @@ def resolve_channel_name(platform_name: str, name: str) -> Optional[str]:
     if not channels:
         return None
 
-    query = name.lstrip("#").lower()
+    query = _normalize_channel_query(name)
 
-    # 1. Exact name match
+    # 1. Exact name match, including display labels shown by send_message(action="list")
     for ch in channels:
-        if ch["name"].lower() == query:
+        if _normalize_channel_query(ch["name"]) == query:
+            return ch["id"]
+        if _normalize_channel_query(_channel_target_name(platform_name, ch)) == query:
             return ch["id"]
 
     # 2. Guild-qualified match for Discord ("GuildName/channel")
