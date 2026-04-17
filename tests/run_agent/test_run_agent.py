@@ -384,7 +384,11 @@ class TestInit:
                 skip_memory=True,
             )
             assert agent.api_mode == "anthropic_messages"
-            mock_anthropic.Anthropic.assert_called_once()
+            assert any(
+                call.kwargs.get("api_key") == "test-key-1234567890"
+                and call.kwargs.get("base_url") == "https://api.anthropic.com/v1/"
+                for call in mock_anthropic.Anthropic.call_args_list
+            )
 
     def test_prompt_caching_claude_openrouter(self):
         """Claude model via OpenRouter should enable prompt caching."""
