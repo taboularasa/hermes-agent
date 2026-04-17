@@ -411,6 +411,118 @@ def _sanitize_messages_surrogates(messages: list) -> bool:
                     if isinstance(text, str) and _SURROGATE_RE.search(text):
                         part["text"] = _SURROGATE_RE.sub('\ufffd', text)
                         found = True
+        name = msg.get("name")
+        if isinstance(name, str) and _SURROGATE_RE.search(name):
+            msg["name"] = _SURROGATE_RE.sub('\ufffd', name)
+            found = True
+        tool_calls = msg.get("tool_calls")
+        if isinstance(tool_calls, list):
+            for tc in tool_calls:
+                if not isinstance(tc, dict):
+                    continue
+                tc_id = tc.get("id")
+                if isinstance(tc_id, str) and _SURROGATE_RE.search(tc_id):
+                    tc["id"] = _SURROGATE_RE.sub('\ufffd', tc_id)
+                    found = True
+                fn = tc.get("function")
+                if isinstance(fn, dict):
+                    fn_name = fn.get("name")
+                    if isinstance(fn_name, str) and _SURROGATE_RE.search(fn_name):
+                        fn["name"] = _SURROGATE_RE.sub('\ufffd', fn_name)
+                        found = True
+                    fn_args = fn.get("arguments")
+                    if isinstance(fn_args, str) and _SURROGATE_RE.search(fn_args):
+                        fn["arguments"] = _SURROGATE_RE.sub('\ufffd', fn_args)
+                        found = True
+    return found
+
+
+def _strip_non_ascii(text: str) -> str:
+    """Remove non-ASCII characters, replacing with closest ASCII equivalent or removing."""
+    return text.encode('ascii', errors='ignore').decode('ascii')
+
+
+def _sanitize_messages_non_ascii(messages: list) -> bool:
+    """Strip non-ASCII characters from all string content in a messages list."""
+    found = False
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            sanitized = _strip_non_ascii(content)
+            if sanitized != content:
+                msg["content"] = sanitized
+                found = True
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    text = part.get("text")
+                    if isinstance(text, str):
+                        sanitized = _strip_non_ascii(text)
+                        if sanitized != text:
+                            part["text"] = sanitized
+                            found = True
+        name = msg.get("name")
+        if isinstance(name, str):
+            sanitized = _strip_non_ascii(name)
+            if sanitized != name:
+                msg["name"] = sanitized
+                found = True
+        tool_calls = msg.get("tool_calls")
+        if isinstance(tool_calls, list):
+            for tc in tool_calls:
+                if isinstance(tc, dict):
+                    fn = tc.get("function", {})
+                    if isinstance(fn, dict):
+                        fn_args = fn.get("arguments")
+                        if isinstance(fn_args, str):
+                            sanitized = _strip_non_ascii(fn_args)
+                            if sanitized != fn_args:
+                                fn["arguments"] = sanitized
+                                found = True
+        for key, value in msg.items():
+            if key in {"content", "name", "tool_calls", "role"}:
+                continue
+            if isinstance(value, str):
+                sanitized = _strip_non_ascii(value)
+                if sanitized != value:
+                    msg[key] = sanitized
+                    found = True
+    return found
+
+
+def _sanitize_tools_non_ascii(tools: list) -> bool:
+    """Strip non-ASCII characters from tool payloads in-place."""
+    return _sanitize_structure_non_ascii(tools)
+
+
+def _sanitize_structure_non_ascii(payload: Any) -> bool:
+    """Strip non-ASCII characters from nested dict/list payloads in-place."""
+    found = False
+
+    def _walk(node):
+        nonlocal found
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if isinstance(value, str):
+                    sanitized = _strip_non_ascii(value)
+                    if sanitized != value:
+                        node[key] = sanitized
+                        found = True
+                elif isinstance(value, (dict, list)):
+                    _walk(value)
+        elif isinstance(node, list):
+            for idx, value in enumerate(node):
+                if isinstance(value, str):
+                    sanitized = _strip_non_ascii(value)
+                    if sanitized != value:
+                        node[idx] = sanitized
+                        found = True
+                elif isinstance(value, (dict, list)):
+                    _walk(value)
+
+    _walk(payload)
     return found
 
 
@@ -509,6 +621,7 @@ class AIAgent:
         honcho_config=None,
         iteration_budget: "IterationBudget" = None,
         fallback_model: Dict[str, Any] = None,
+        credential_pool=None,
         checkpoints_enabled: bool = False,
         checkpoint_max_snapshots: int = 50,
         pass_session_id: bool = False,
@@ -577,6 +690,7 @@ class AIAgent:
         self.background_review_callback = None  # Optional sync callback for gateway delivery
         self.skip_context_files = skip_context_files
         self.pass_session_id = pass_session_id
+        self._credential_pool = credential_pool
         self.log_prefix_chars = log_prefix_chars
         self.log_prefix = f"{log_prefix} " if log_prefix else ""
         # Store effective base URL for feature detection (prompt caching, reasoning, etc.)
@@ -1259,6 +1373,12 @@ class AIAgent:
             else:
                 print(f"📊 Context limit: {self.context_compressor.context_length:,} tokens (auto-compression disabled)")
 
+        # Check immediately so CLI users see the warning at startup.
+        # Gateway status_callback is not yet wired, so any warning is stored
+        # in _compression_warning and replayed on the first turn.
+        self._compression_warning = None
+        self._check_compression_model_feasibility()
+
     def reset_session_state(self):
         """Reset all session-scoped token counters to 0 for a fresh session.
         
@@ -1305,6 +1425,127 @@ class AIAgent:
             # Iterative summary from previous session must not bleed into new one (#2635)
             self.context_compressor._previous_summary = None
     
+    def switch_model(self, new_model, new_provider, api_key='', base_url='', api_mode=''):
+        """Switch the model/provider in-place for a live agent."""
+        import logging
+        import re as _re
+        from hermes_cli.providers import determine_api_mode
+
+        if not api_mode:
+            api_mode = determine_api_mode(new_provider, base_url)
+
+        if (
+            api_mode == "anthropic_messages"
+            and new_provider in ("opencode-zen", "opencode-go")
+            and isinstance(base_url, str)
+            and base_url
+        ):
+            base_url = _re.sub(r"/v1/?$", "", base_url)
+
+        old_model = self.model
+        old_provider = self.provider
+
+        self.model = new_model
+        self.provider = new_provider
+        self.base_url = base_url or self.base_url
+        self.api_mode = api_mode
+        if api_key:
+            self.api_key = api_key
+
+        if api_mode == "anthropic_messages":
+            from agent.anthropic_adapter import (
+                _is_oauth_token,
+                build_anthropic_client,
+                resolve_anthropic_token,
+            )
+
+            _is_native_anthropic = new_provider == "anthropic"
+            effective_key = (
+                (api_key or self.api_key or resolve_anthropic_token() or "")
+                if _is_native_anthropic
+                else (api_key or self.api_key or "")
+            )
+            self.api_key = effective_key
+            self._anthropic_api_key = effective_key
+            self._anthropic_base_url = base_url or getattr(self, "_anthropic_base_url", None)
+            self._anthropic_client = build_anthropic_client(
+                effective_key,
+                self._anthropic_base_url,
+            )
+            self._is_anthropic_oauth = _is_oauth_token(effective_key)
+            self.client = None
+            self._client_kwargs = {}
+        else:
+            effective_key = api_key or self.api_key
+            effective_base = base_url or self.base_url
+            self._client_kwargs = {
+                "api_key": effective_key,
+                "base_url": effective_base,
+            }
+            self.client = self._create_openai_client(
+                dict(self._client_kwargs),
+                reason="switch_model",
+                shared=True,
+            )
+
+        is_native_anthropic = api_mode == "anthropic_messages" and new_provider == "anthropic"
+        self._use_prompt_caching = (
+            ("openrouter" in (self.base_url or "").lower() and "claude" in new_model.lower())
+            or is_native_anthropic
+        )
+
+        if hasattr(self, "context_compressor") and self.context_compressor:
+            from agent.model_metadata import get_model_context_length
+
+            new_context_length = get_model_context_length(
+                self.model,
+                base_url=self.base_url,
+                api_key=self.api_key,
+                provider=self.provider,
+                config_context_length=getattr(self, "_config_context_length", None),
+            )
+            self.context_compressor.update_model(
+                model=self.model,
+                context_length=new_context_length,
+                base_url=self.base_url,
+                api_key=getattr(self, "api_key", ""),
+                provider=self.provider,
+                api_mode=self.api_mode,
+            )
+
+        self._cached_system_prompt = None
+
+        _cc = self.context_compressor if hasattr(self, "context_compressor") and self.context_compressor else None
+        self._primary_runtime = {
+            "model": self.model,
+            "provider": self.provider,
+            "base_url": self.base_url,
+            "api_mode": self.api_mode,
+            "api_key": getattr(self, "api_key", ""),
+            "client_kwargs": dict(getattr(self, "_client_kwargs", {})),
+            "use_prompt_caching": getattr(self, "_use_prompt_caching", False),
+            "compressor_model": getattr(_cc, "model", self.model) if _cc else self.model,
+            "compressor_base_url": getattr(_cc, "base_url", self.base_url) if _cc else self.base_url,
+            "compressor_api_key": getattr(_cc, "api_key", "") if _cc else "",
+            "compressor_provider": getattr(_cc, "provider", self.provider) if _cc else self.provider,
+            "compressor_context_length": _cc.context_length if _cc else 0,
+            "compressor_threshold_tokens": _cc.threshold_tokens if _cc else 0,
+        }
+        if api_mode == "anthropic_messages":
+            self._primary_runtime.update({
+                "anthropic_api_key": self._anthropic_api_key,
+                "anthropic_base_url": self._anthropic_base_url,
+                "is_anthropic_oauth": self._is_anthropic_oauth,
+            })
+
+        self._fallback_activated = False
+        self._fallback_index = 0
+
+        logging.info(
+            "Model switched in-place: %s (%s) -> %s (%s)",
+            old_model, old_provider, new_model, new_provider,
+        )
+
     def _safe_print(self, *args, **kwargs):
         """Print that silently handles broken pipes / closed stdout.
 
@@ -1362,6 +1603,102 @@ class AIAgent:
                 self.status_callback("lifecycle", message)
             except Exception:
                 logger.debug("status_callback error in _emit_status", exc_info=True)
+
+    def _current_main_runtime(self) -> Dict[str, str]:
+        """Return the live main runtime for session-scoped auxiliary routing."""
+        return {
+            "model": getattr(self, "model", "") or "",
+            "provider": getattr(self, "provider", "") or "",
+            "base_url": getattr(self, "base_url", "") or "",
+            "api_key": getattr(self, "api_key", "") or "",
+            "api_mode": getattr(self, "api_mode", "") or "",
+        }
+
+    def _check_compression_model_feasibility(self) -> None:
+        """Warn when the configured compression model cannot fit the threshold."""
+        if not self.compression_enabled:
+            return
+        try:
+            from agent.auxiliary_client import get_text_auxiliary_client
+            from agent.model_metadata import get_model_context_length
+
+            client, aux_model = get_text_auxiliary_client(
+                "compression",
+                main_runtime=self._current_main_runtime(),
+            )
+            if client is None or not aux_model:
+                msg = (
+                    "⚠ No auxiliary LLM provider configured — context "
+                    "compression will drop middle turns without a summary. "
+                    "Run `hermes setup` or set OPENROUTER_API_KEY."
+                )
+                self._compression_warning = msg
+                self._emit_status(msg)
+                logger.warning(
+                    "No auxiliary LLM provider for compression — summaries will be unavailable."
+                )
+                return
+
+            aux_base_url = str(getattr(client, "base_url", ""))
+            aux_api_key = str(getattr(client, "api_key", ""))
+
+            aux_cfg = (self.config or {}).get("auxiliary", {}).get("compression", {})
+            aux_context_config = aux_cfg.get("context_length") if isinstance(aux_cfg, dict) else None
+            if aux_context_config is not None:
+                try:
+                    aux_context_config = int(aux_context_config)
+                except (TypeError, ValueError):
+                    aux_context_config = None
+
+            aux_context = get_model_context_length(
+                aux_model,
+                base_url=aux_base_url,
+                api_key=aux_api_key,
+                config_context_length=aux_context_config,
+            )
+
+            threshold = self.context_compressor.threshold_tokens
+            if aux_context < threshold:
+                safe_pct = int(
+                    (aux_context / self.context_compressor.context_length) * 100
+                )
+                msg = (
+                    f"⚠ Compression model ({aux_model}) context "
+                    f"is {aux_context:,} tokens, but the main model's "
+                    f"compression threshold is {threshold:,} tokens. "
+                    f"Context compression will not be possible — the "
+                    f"content to summarise will exceed the auxiliary "
+                    f"model's context window.\n"
+                    f"  Fix options (config.yaml):\n"
+                    f"  1. Use a larger compression model:\n"
+                    f"       auxiliary:\n"
+                    f"         compression:\n"
+                    f"           model: <model-with-{threshold:,}+-context>\n"
+                    f"  2. Lower the compression threshold to fit "
+                    f"the current model:\n"
+                    f"       compression:\n"
+                    f"         threshold: 0.{safe_pct:02d}"
+                )
+                self._compression_warning = msg
+                self._emit_status(msg)
+                logger.warning(
+                    "Auxiliary compression model %s has %d token context, "
+                    "below the main model's compression threshold of %d tokens.",
+                    aux_model,
+                    aux_context,
+                    threshold,
+                )
+        except Exception as exc:
+            logger.debug("Compression feasibility check failed (non-fatal): %s", exc)
+
+    def _replay_compression_warning(self) -> None:
+        """Re-send the stored compression warning through status_callback once."""
+        msg = getattr(self, "_compression_warning", None)
+        if msg and self.status_callback:
+            try:
+                self.status_callback("lifecycle", msg)
+            except Exception:
+                pass
 
     def _is_direct_openai_url(self, base_url: str = None) -> bool:
         """Return True when a base URL targets OpenAI's native API."""
@@ -3913,6 +4250,116 @@ class AIAgent:
         self._is_anthropic_oauth = _is_oauth_token(new_token)
         return True
 
+    def _swap_credential(self, entry) -> None:
+        """Swap the live runtime credentials to a new pool entry."""
+        runtime_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
+        runtime_base = (
+            getattr(entry, "runtime_base_url", None)
+            or getattr(entry, "base_url", None)
+            or self.base_url
+        )
+
+        if self.api_mode == "anthropic_messages" and hasattr(self, "_anthropic_client"):
+            from agent.anthropic_adapter import _is_oauth_token, build_anthropic_client
+
+            try:
+                self._anthropic_client.close()
+            except Exception:
+                pass
+
+            self._anthropic_api_key = runtime_key
+            self._anthropic_base_url = runtime_base
+            self._anthropic_client = build_anthropic_client(runtime_key, runtime_base)
+            self._is_anthropic_oauth = _is_oauth_token(runtime_key)
+            self.api_key = runtime_key
+            self.base_url = runtime_base
+            return
+
+        self.api_key = runtime_key
+        self.base_url = runtime_base.rstrip("/") if isinstance(runtime_base, str) else runtime_base
+        if hasattr(self, "_client_kwargs"):
+            self._client_kwargs["api_key"] = self.api_key
+            self._client_kwargs["base_url"] = self.base_url
+        if hasattr(self, "_replace_primary_openai_client"):
+            try:
+                self._replace_primary_openai_client(reason="credential_rotation")
+            except Exception:
+                pass
+
+    def _recover_with_credential_pool(
+        self,
+        *,
+        status_code: Optional[int],
+        has_retried_429: bool,
+        classified_reason: Optional[Any] = None,
+        error_context: Optional[Dict[str, Any]] = None,
+    ) -> tuple[bool, bool]:
+        """Attempt credential recovery via pool rotation."""
+        pool = getattr(self, "_credential_pool", None)
+        if pool is None:
+            return False, has_retried_429
+
+        effective_reason = getattr(classified_reason, "value", classified_reason)
+        if effective_reason is None:
+            if status_code == 402:
+                effective_reason = "billing"
+            elif status_code == 429:
+                effective_reason = "rate_limit"
+            elif status_code == 401:
+                effective_reason = "auth"
+
+        if effective_reason == "billing":
+            rotate_status = status_code if status_code is not None else 402
+            next_entry = pool.mark_exhausted_and_rotate(status_code=rotate_status, error_context=error_context)
+            if next_entry is not None:
+                logger.info(
+                    "Credential %s (billing) — rotated to pool entry %s",
+                    rotate_status,
+                    getattr(next_entry, "id", "?"),
+                )
+                self._swap_credential(next_entry)
+                return True, False
+            return False, has_retried_429
+
+        if effective_reason == "rate_limit":
+            if not has_retried_429:
+                return False, True
+            rotate_status = status_code if status_code is not None else 429
+            next_entry = pool.mark_exhausted_and_rotate(status_code=rotate_status, error_context=error_context)
+            if next_entry is not None:
+                logger.info(
+                    "Credential %s (rate limit) — rotated to pool entry %s",
+                    rotate_status,
+                    getattr(next_entry, "id", "?"),
+                )
+                self._swap_credential(next_entry)
+                return True, False
+            return False, True
+
+        if effective_reason == "auth":
+            refreshed = None
+            if hasattr(pool, "try_refresh_current"):
+                refreshed = pool.try_refresh_current()
+            if refreshed is not None:
+                logger.info(
+                    "Credential auth failure — refreshed pool entry %s",
+                    getattr(refreshed, "id", "?"),
+                )
+                self._swap_credential(refreshed)
+                return True, has_retried_429
+            rotate_status = status_code if status_code is not None else 401
+            next_entry = pool.mark_exhausted_and_rotate(status_code=rotate_status, error_context=error_context)
+            if next_entry is not None:
+                logger.info(
+                    "Credential %s (auth refresh failed) — rotated to pool entry %s",
+                    rotate_status,
+                    getattr(next_entry, "id", "?"),
+                )
+                self._swap_credential(next_entry)
+                return True, False
+
+        return False, has_retried_429
+
     def _anthropic_messages_create(self, api_kwargs: dict):
         if self.api_mode == "anthropic_messages":
             self._try_refresh_anthropic_client_credentials()
@@ -4795,11 +5242,24 @@ class AIAgent:
         return transformed
 
     def _anthropic_preserve_dots(self) -> bool:
-        """True when using Alibaba/DashScope anthropic-compatible endpoint (model names keep dots, e.g. qwen3.5-plus)."""
-        if (getattr(self, "provider", "") or "").lower() == "alibaba":
+        """True when using an anthropic-compatible endpoint that preserves dots in model names."""
+        if (getattr(self, "provider", "") or "").lower() in {
+            "alibaba",
+            "minimax",
+            "minimax-cn",
+            "opencode-go",
+            "opencode-zen",
+            "zai",
+        }:
             return True
         base = (getattr(self, "base_url", "") or "").lower()
-        return "dashscope" in base or "aliyuncs" in base
+        return (
+            "dashscope" in base
+            or "aliyuncs" in base
+            or "minimax" in base
+            or "opencode.ai/zen/" in base
+            or "bigmodel.cn" in base
+        )
 
     def _build_api_kwargs(self, api_messages: list) -> dict:
         """Build the keyword arguments dict for the active API mode."""
@@ -6268,6 +6728,9 @@ class AIAgent:
         self._last_content_with_tools = None
         self._mute_post_response = False
         self._surrogate_sanitized = False
+        if self._compression_warning:
+            self._replay_compression_warning()
+            self._compression_warning = None
         # NOTE: _turns_since_memory and _iters_since_skill are NOT reset here.
         # They are initialized in __init__ and must persist across run_conversation
         # calls so that nudge logic accumulates correctly in CLI mode.
@@ -7585,6 +8048,10 @@ class AIAgent:
                 # infinite loops when compression reduces messages but not enough
                 # to fit the context window.
                 retry_count += 1
+                # Compression can create a fresh session / flush baseline.
+                # Keep persistence aligned to the compressed transcript rather
+                # than the pre-compression history snapshot.
+                conversation_history = None
                 restart_with_compressed_messages = False
                 continue
 

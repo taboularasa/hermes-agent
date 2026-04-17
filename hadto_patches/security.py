@@ -9,6 +9,7 @@ This module is the single source of truth for the dangerous command system:
 - Permanent allowlist persistence (config.yaml)
 """
 
+import contextvars
 import logging
 import os
 import re
@@ -18,6 +19,38 @@ import unicodedata
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# Per-thread/per-task gateway session identity.
+# Gateway runs agent turns concurrently in executor threads, so reading a
+# process-global env var for session identity is racy. Keep env fallback for
+# legacy single-threaded callers, but prefer the context-local value when set.
+_approval_session_key: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "approval_session_key",
+    default="",
+)
+
+
+def set_current_session_key(session_key: str) -> contextvars.Token[str]:
+    """Bind the active approval session key to the current context."""
+    return _approval_session_key.set(session_key or "")
+
+
+def reset_current_session_key(token: contextvars.Token[str]) -> None:
+    """Restore the prior approval session key context."""
+    _approval_session_key.reset(token)
+
+
+def get_current_session_key(default: str = "default") -> str:
+    """Return the active session key, preferring context-local state."""
+    session_key = _approval_session_key.get()
+    if session_key:
+        return session_key
+    try:
+        from gateway.session_context import get_session_env
+
+        return get_session_env("HERMES_SESSION_KEY", default)
+    except Exception:
+        return os.getenv("HERMES_SESSION_KEY", default)
 
 # Sensitive write targets that should trigger approval even when referenced
 # via shell expansions like $HOME or $HERMES_HOME.
@@ -53,7 +86,7 @@ DANGEROUS_PATTERNS = [
     (r'\bDELETE\s+FROM\b(?!.*\bWHERE\b)', "SQL DELETE without WHERE"),
     (r'\bTRUNCATE\s+(TABLE)?\s*\w', "SQL TRUNCATE"),
     (r'>\s*/etc/', "overwrite system config"),
-    (r'\bsystemctl\s+(stop|disable|mask)\b', "stop/disable system service"),
+    (r'\bsystemctl\s+(-[^\s]+\s+)*(stop|restart|disable|mask)\b', "stop/restart system service"),
     (r'\bkill\s+-9\s+-1\b', "kill all processes"),
     (r'\bpkill\s+-9\b', "force kill processes"),
     (r':\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:', "fork bomb"),
@@ -67,15 +100,40 @@ DANGEROUS_PATTERNS = [
     (r'\bxargs\s+.*\brm\b', "xargs with rm"),
     (r'\bfind\b.*-exec\s+(/\S*/)?rm\b', "find -exec rm"),
     (r'\bfind\b.*-delete\b', "find -delete"),
+    # Gateway lifecycle protection: prevent the agent from killing its own
+    # gateway process. These commands trigger a gateway restart/stop that
+    # terminates all running agents mid-work.
+    (r'\bhermes\s+gateway\s+(stop|restart)\b', "stop/restart hermes gateway (kills running agents)"),
+    (r'\bhermes\s+update\b', "hermes update (restarts gateway, kills running agents)"),
     # Gateway protection: never start gateway outside systemd management
     (r'gateway\s+run\b.*(&\s*$|&\s*;|\bdisown\b|\bsetsid\b)', "start gateway outside systemd (use 'systemctl --user restart hermes-gateway')"),
     (r'\bnohup\b.*gateway\s+run\b', "start gateway outside systemd (use 'systemctl --user restart hermes-gateway')"),
     # Self-termination protection: prevent agent from killing its own process
     (r'\b(pkill|killall)\b.*\b(hermes|gateway|cli\.py)\b', "kill hermes/gateway process (self-termination)"),
+    # Self-termination via kill + command substitution (pgrep/pidof).
+    # The name-based pattern above catches `pkill hermes` but not
+    # `kill -9 $(pgrep -f hermes)` because the substitution is opaque
+    # to regex at detection time. Catch the structural pattern instead.
+    (r'\bkill\b.*\$\(\s*pgrep\b', "kill process via pgrep expansion (self-termination)"),
+    (r'\bkill\b.*`\s*pgrep\b', "kill process via backtick pgrep expansion (self-termination)"),
     # File copy/move/edit into sensitive system paths
     (r'\b(cp|mv|install)\b.*\s/etc/', "copy/move file into /etc/"),
     (r'\bsed\s+-[^\s]*i.*\s/etc/', "in-place edit of system config"),
     (r'\bsed\s+--in-place\b.*\s/etc/', "in-place edit of system config (long flag)"),
+    # Script execution via heredoc — bypasses the -e/-c flag patterns above.
+    # `python3 << 'EOF'` feeds arbitrary code via stdin without -c/-e flags.
+    (r'\b(python[23]?|perl|ruby|node)\s+<<', "script execution via heredoc"),
+    # Git destructive operations that can lose uncommitted work or rewrite
+    # shared history. Not captured by rm/chmod/etc patterns.
+    (r'\bgit\s+reset\s+--hard\b', "git reset --hard (destroys uncommitted changes)"),
+    (r'\bgit\s+push\b.*--force\b', "git force push (rewrites remote history)"),
+    (r'\bgit\s+push\b.*-f\b', "git force push short flag (rewrites remote history)"),
+    (r'\bgit\s+clean\s+-[^\s]*f', "git clean with force (deletes untracked files)"),
+    (r'\bgit\s+branch\s+-D\b', "git branch force delete"),
+    # Script execution after chmod +x — catches the two-step pattern where
+    # a script is first made executable then immediately run. The script
+    # content may contain dangerous commands that individual patterns miss.
+    (r'\bchmod\s+\+x\b.*[;&|]+\s*\./', "chmod +x followed by immediate execution"),
 ]
 
 _GATEWAY_SESSION_SELF_MANAGEMENT_PATTERNS = [
@@ -165,6 +223,20 @@ def detect_gateway_session_self_management(command: str) -> tuple:
     return (False, None, None)
 
 
+def _is_safe_gateway_service_restart_outside_gateway(command: str) -> bool:
+    """Allow the sanctioned systemd restart path when not inside gateway mode."""
+    if os.getenv("HERMES_GATEWAY_SESSION"):
+        return False
+    command_lower = _normalize_command_for_detection(command).lower()
+    return bool(
+        re.search(
+            r'\bsystemctl\s+(?:--user\s+)?restart\s+hermes-gateway(?:\.service)?\b',
+            command_lower,
+            re.IGNORECASE | re.DOTALL,
+        )
+    )
+
+
 # =========================================================================
 # Per-session approval state (thread-safe)
 # =========================================================================
@@ -172,7 +244,70 @@ def detect_gateway_session_self_management(command: str) -> tuple:
 _lock = threading.Lock()
 _pending: dict[str, dict] = {}
 _session_approved: dict[str, set] = {}
+_session_yolo: set[str] = set()
 _permanent_approved: set = set()
+
+# Blocking gateway approval (mirrors CLI synchronous input flow)
+
+
+class _ApprovalEntry:
+    """One pending dangerous-command approval inside a gateway session."""
+
+    __slots__ = ("event", "data", "result")
+
+    def __init__(self, data: dict):
+        self.event = threading.Event()
+        self.data = data
+        self.result: Optional[str] = None
+
+
+_gateway_queues: dict[str, list] = {}
+_gateway_notify_cbs: dict[str, object] = {}
+
+
+def register_gateway_notify(session_key: str, cb) -> None:
+    """Register a per-session callback for sending approval requests."""
+    with _lock:
+        _gateway_notify_cbs[session_key] = cb
+
+
+def unregister_gateway_notify(session_key: str) -> None:
+    """Unregister the gateway approval callback and unblock waiters."""
+    with _lock:
+        _gateway_notify_cbs.pop(session_key, None)
+        entries = _gateway_queues.pop(session_key, [])
+        for entry in entries:
+            entry.event.set()
+
+
+def resolve_gateway_approval(
+    session_key: str,
+    choice: str,
+    resolve_all: bool = False,
+) -> int:
+    """Resolve one or more blocking approvals for a session."""
+    with _lock:
+        queue = _gateway_queues.get(session_key)
+        if not queue:
+            return 0
+        if resolve_all:
+            targets = list(queue)
+            queue.clear()
+        else:
+            targets = [queue.pop(0)]
+        if not queue:
+            _gateway_queues.pop(session_key, None)
+
+    for entry in targets:
+        entry.result = choice
+        entry.event.set()
+    return len(targets)
+
+
+def has_blocking_approval(session_key: str) -> bool:
+    """Check if a session has one or more blocking approvals waiting."""
+    with _lock:
+        return bool(_gateway_queues.get(session_key))
 
 
 def submit_pending(session_key: str, approval: dict):
@@ -197,6 +332,35 @@ def approve_session(session_key: str, pattern_key: str):
     """Approve a pattern for this session only."""
     with _lock:
         _session_approved.setdefault(session_key, set()).add(pattern_key)
+
+
+def enable_session_yolo(session_key: str) -> None:
+    """Enable YOLO bypass for a single session key."""
+    if not session_key:
+        return
+    with _lock:
+        _session_yolo.add(session_key)
+
+
+def disable_session_yolo(session_key: str) -> None:
+    """Disable YOLO bypass for a single session key."""
+    if not session_key:
+        return
+    with _lock:
+        _session_yolo.discard(session_key)
+
+
+def is_session_yolo_enabled(session_key: str) -> bool:
+    """Return True when YOLO bypass is enabled for a specific session."""
+    if not session_key:
+        return False
+    with _lock:
+        return session_key in _session_yolo
+
+
+def is_current_session_yolo_enabled() -> bool:
+    """Return True when the active approval session has YOLO bypass enabled."""
+    return is_session_yolo_enabled(get_current_session_key(default=""))
 
 
 def is_approved(session_key: str, pattern_key: str) -> bool:
@@ -229,7 +393,9 @@ def clear_session(session_key: str):
     """Clear all approvals and pending requests for a session."""
     with _lock:
         _session_approved.pop(session_key, None)
+        _session_yolo.discard(session_key)
         _pending.pop(session_key, None)
+        _gateway_queues.pop(session_key, None)
 
 
 # =========================================================================
@@ -456,6 +622,29 @@ def _has_host_mounts(container_config: Optional[dict]) -> bool:
     return False
 
 
+def _is_container_backend(env_type: str) -> bool:
+    return env_type in ("docker", "singularity", "modal", "daytona")
+
+
+def _yolo_bypass_allowed(env_type: str) -> bool:
+    """Check whether YOLO mode should bypass approvals for this backend."""
+    session_yolo = is_current_session_yolo_enabled()
+    global_yolo = bool(os.getenv("HERMES_YOLO_MODE"))
+    if not (session_yolo or global_yolo):
+        return False
+    if _is_container_backend(env_type):
+        return True
+    if session_yolo:
+        return True
+    if global_yolo and os.getenv("HERMES_YOLO_ALLOW_LOCAL"):
+        logger.warning(
+            "YOLO mode active on local backend — all command safety "
+            "checks disabled for host execution"
+        )
+        return True
+    return False
+
+
 def check_dangerous_command(command: str, env_type: str,
                             approval_callback=None,
                             container_config: Optional[dict] = None) -> dict:
@@ -476,22 +665,13 @@ def check_dangerous_command(command: str, env_type: str,
         {"approved": True/False, "message": str or None, ...}
     """
     # C-04: Only skip checks for truly isolated containers (no host mounts)
-    if env_type in ("docker", "singularity", "modal", "daytona"):
+    if _is_container_backend(env_type):
         if not _has_host_mounts(container_config):
             return {"approved": True, "message": None}
         # Container has host mounts — fall through to normal checks
 
-    # C-05: YOLO mode requires HERMES_YOLO_ALLOW_LOCAL for local backend
-    if os.getenv("HERMES_YOLO_MODE"):
-        if env_type in ("docker", "singularity", "modal", "daytona"):
-            return {"approved": True, "message": None}
-        if os.getenv("HERMES_YOLO_ALLOW_LOCAL"):
-            logger.warning(
-                "YOLO mode active on local backend — all command safety "
-                "checks disabled for host execution"
-            )
-            return {"approved": True, "message": None}
-        # YOLO without HERMES_YOLO_ALLOW_LOCAL on local — do not bypass
+    if _yolo_bypass_allowed(env_type):
+        return {"approved": True, "message": None}
 
     is_dangerous, pattern_key, description = detect_gateway_session_self_management(command)
     if not is_dangerous:
@@ -499,7 +679,7 @@ def check_dangerous_command(command: str, env_type: str,
     if not is_dangerous:
         return {"approved": True, "message": None}
 
-    session_key = os.getenv("HERMES_SESSION_KEY", "default")
+    session_key = get_current_session_key()
     if is_approved(session_key, pattern_key):
         return {"approved": True, "message": None}
 
@@ -610,7 +790,7 @@ def check_all_command_guards(command: str, env_type: str,
     other was shown to the user.
     """
     # C-04: Only skip checks for truly isolated containers (no host mounts)
-    if env_type in ("docker", "singularity", "modal", "daytona"):
+    if _is_container_backend(env_type):
         if not _has_host_mounts(container_config):
             return {"approved": True, "message": None}
         # Container has host mounts — fall through to normal checks
@@ -620,17 +800,8 @@ def check_all_command_guards(command: str, env_type: str,
     if approval_mode == "off":
         return {"approved": True, "message": None}
 
-    # C-05: YOLO mode requires HERMES_YOLO_ALLOW_LOCAL for local backend
-    if os.getenv("HERMES_YOLO_MODE"):
-        if env_type in ("docker", "singularity", "modal", "daytona"):
-            return {"approved": True, "message": None}
-        if os.getenv("HERMES_YOLO_ALLOW_LOCAL"):
-            logger.warning(
-                "YOLO mode active on local backend — all command safety "
-                "checks disabled for host execution"
-            )
-            return {"approved": True, "message": None}
-        # YOLO without HERMES_YOLO_ALLOW_LOCAL on local — do not bypass
+    if _yolo_bypass_allowed(env_type):
+        return {"approved": True, "message": None}
 
     is_cli = os.getenv("HERMES_INTERACTIVE")
     is_gateway = os.getenv("HERMES_GATEWAY_SESSION")
@@ -651,13 +822,17 @@ def check_all_command_guards(command: str, env_type: str,
     is_dangerous, pattern_key, description = detect_gateway_session_self_management(command)
     if not is_dangerous:
         is_dangerous, pattern_key, description = detect_dangerous_command(command)
+    if is_dangerous and _is_safe_gateway_service_restart_outside_gateway(command):
+        is_dangerous = False
+        pattern_key = None
+        description = None
 
     # --- Phase 2: Decide ---
 
     # Collect warnings that need approval
     warnings = []  # list of (pattern_key, description, is_tirith)
 
-    session_key = os.getenv("HERMES_SESSION_KEY", "default")
+    session_key = get_current_session_key()
 
     # Tirith block/warn → approvable warning with rich findings.
     # Previously, tirith "block" was a hard block with no approval prompt.
@@ -733,15 +908,87 @@ def check_all_command_guards(command: str, env_type: str,
         key == _GATEWAY_SESSION_SELF_MANAGEMENT_KEY for key, _, _ in warnings
     )
 
-    # Gateway/async: single approval_required with combined description
-    # Store all pattern keys so gateway replay approves all of them
     if is_gateway or is_ask:
-        submit_pending(session_key, {
-            "command": command,
-            "pattern_key": primary_key,        # backward compat
-            "pattern_keys": all_keys,           # all keys for replay
-            "description": combined_desc,
-        })
+        notify_cb = None
+        with _lock:
+            notify_cb = _gateway_notify_cbs.get(session_key)
+
+        if notify_cb is not None:
+            approval_data = {
+                "command": command,
+                "pattern_key": primary_key,
+                "pattern_keys": all_keys,
+                "description": combined_desc,
+            }
+            entry = _ApprovalEntry(approval_data)
+            with _lock:
+                _gateway_queues.setdefault(session_key, []).append(entry)
+
+            try:
+                notify_cb(approval_data)
+            except Exception as exc:
+                logger.warning("Gateway approval notify failed: %s", exc)
+                with _lock:
+                    queue = _gateway_queues.get(session_key, [])
+                    if entry in queue:
+                        queue.remove(entry)
+                    if not queue:
+                        _gateway_queues.pop(session_key, None)
+                return {
+                    "approved": False,
+                    "message": "BLOCKED: Failed to send approval request to user. Do NOT retry.",
+                    "pattern_key": primary_key,
+                    "description": combined_desc,
+                }
+
+            timeout = _get_approval_config().get("gateway_timeout", 300)
+            try:
+                timeout = int(timeout)
+            except (ValueError, TypeError):
+                timeout = 300
+            resolved = entry.event.wait(timeout=timeout)
+
+            with _lock:
+                queue = _gateway_queues.get(session_key, [])
+                if entry in queue:
+                    queue.remove(entry)
+                if not queue:
+                    _gateway_queues.pop(session_key, None)
+
+            choice = entry.result
+            if not resolved or choice is None or choice == "deny":
+                reason = "timed out" if not resolved else "denied by user"
+                return {
+                    "approved": False,
+                    "message": f"BLOCKED: Command {reason}. Do NOT retry this command.",
+                    "pattern_key": primary_key,
+                    "description": combined_desc,
+                }
+
+            for key, _, is_tirith in warnings:
+                if choice == "session" or (choice == "always" and is_tirith):
+                    approve_session(session_key, key)
+                elif choice == "always" and key != _GATEWAY_SESSION_SELF_MANAGEMENT_KEY:
+                    approve_session(session_key, key)
+                    approve_permanent(key)
+                    save_permanent_allowlist(_permanent_approved)
+
+            return {
+                "approved": True,
+                "message": None,
+                "user_approved": True,
+                "description": combined_desc,
+            }
+
+        submit_pending(
+            session_key,
+            {
+                "command": command,
+                "pattern_key": primary_key,
+                "pattern_keys": all_keys,
+                "description": combined_desc,
+            },
+        )
         return {
             "approved": False,
             "pattern_key": primary_key,

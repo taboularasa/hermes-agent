@@ -113,11 +113,36 @@ def _normalize_optional_job_value(value: Optional[Any], *, strip_trailing_slash:
     return text or None
 
 
+def _validate_cron_script_path(script: Optional[str]) -> Optional[str]:
+    """Validate a cron job script path at the API boundary."""
+    if not script or not script.strip():
+        return None
+
+    from hermes_constants import get_hermes_home
+    from tools.path_security import validate_within_dir
+
+    raw = script.strip()
+    if raw.startswith(("/", "~")) or (len(raw) >= 2 and raw[1] == ":"):
+        return (
+            f"Script path must be relative to ~/.hermes/scripts/. "
+            f"Got absolute or home-relative path: {raw!r}. "
+            f"Place scripts in ~/.hermes/scripts/ and use just the filename."
+        )
+
+    scripts_dir = get_hermes_home() / "scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    containment_error = validate_within_dir(scripts_dir / raw, scripts_dir)
+    if containment_error:
+        return f"Script path escapes the scripts directory via traversal: {raw!r}"
+
+    return None
+
+
 
 def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
     prompt = job.get("prompt", "")
     skills = _canonical_skills(job.get("skill"), job.get("skills"))
-    return {
+    result = {
         "job_id": job["id"],
         "name": job["name"],
         "skill": skills[0] if skills else None,
@@ -139,6 +164,9 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         "paused_at": job.get("paused_at"),
         "paused_reason": job.get("paused_reason"),
     }
+    if job.get("script"):
+        result["script"] = job["script"]
+    return result
 
 
 def _format_topology(snapshot: Dict[str, Any]) -> Dict[str, Any]:
@@ -180,6 +208,7 @@ def cronjob(
     model: Optional[str] = None,
     provider: Optional[str] = None,
     base_url: Optional[str] = None,
+    script: Optional[str] = None,
     role: Optional[str] = None,
     scope: Optional[str] = None,
     reason: Optional[str] = None,
@@ -207,6 +236,10 @@ def cronjob(
                 scan_error = _scan_cron_prompt(prompt)
                 if scan_error:
                     return json.dumps({"success": False, "error": scan_error}, indent=2)
+            if script:
+                script_error = _validate_cron_script_path(script)
+                if script_error:
+                    return json.dumps({"success": False, "error": script_error}, indent=2)
 
             job = create_job(
                 prompt=prompt or "",
@@ -219,6 +252,7 @@ def cronjob(
                 model=_normalize_optional_job_value(model),
                 provider=_normalize_optional_job_value(provider),
                 base_url=_normalize_optional_job_value(base_url, strip_trailing_slash=True),
+                script=_normalize_optional_job_value(script),
                 role=_normalize_optional_job_value(role),
                 scope=_normalize_optional_job_value(scope),
             )
@@ -321,6 +355,11 @@ def cronjob(
                 updates["provider"] = _normalize_optional_job_value(provider)
             if base_url is not None:
                 updates["base_url"] = _normalize_optional_job_value(base_url, strip_trailing_slash=True)
+            if script is not None:
+                script_error = _validate_cron_script_path(script)
+                if script_error:
+                    return json.dumps({"success": False, "error": script_error}, indent=2)
+                updates["script"] = _normalize_optional_job_value(script)
             if role is not None:
                 updates["role"] = _normalize_optional_job_value(role)
             if scope is not None:
@@ -446,6 +485,10 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
             "base_url": {
                 "type": "string",
                 "description": "Optional per-job base URL override paired with provider/model routing"
+            },
+            "script": {
+                "type": "string",
+                "description": "Optional relative path under ~/.hermes/scripts/ for a pre-run Python script whose stdout is injected into the prompt"
             },
             "role": {
                 "type": "string",

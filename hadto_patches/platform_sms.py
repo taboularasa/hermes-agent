@@ -10,6 +10,9 @@ Shares credentials with the optional telephony skill — same env vars:
 
 Gateway-specific env vars:
   - SMS_WEBHOOK_PORT     (default 8080)
+  - SMS_WEBHOOK_HOST     (default 0.0.0.0)
+  - SMS_WEBHOOK_URL      (public URL for Twilio signature validation — required)
+  - SMS_INSECURE_NO_SIGNATURE  (true to disable signature validation — dev only)
   - SMS_ALLOWED_USERS    (comma-separated E.164 phone numbers)
   - SMS_ALLOW_ALL_USERS  (true/false)
   - SMS_HOME_CHANNEL     (phone number for cron delivery)
@@ -17,13 +20,10 @@ Gateway-specific env vars:
 
 import asyncio
 import base64
-import collections
 import hashlib
 import hmac
 import logging
 import os
-import re
-import time
 import urllib.parse
 from typing import Any, Dict, Optional
 
@@ -34,24 +34,14 @@ from gateway.platforms.base import (
     MessageType,
     SendResult,
 )
+from gateway.platforms.helpers import redact_phone, strip_markdown
 
-logger = logging.getLogger("gateway.platforms.sms")
+logger = logging.getLogger(__name__)
 
 TWILIO_API_BASE = "https://api.twilio.com/2010-04-01/Accounts"
 MAX_SMS_LENGTH = 1600  # ~10 SMS segments
 DEFAULT_WEBHOOK_PORT = 8080
-
-# E.164 phone number pattern for redaction
-_PHONE_RE = re.compile(r"\+[1-9]\d{6,14}")
-
-
-def _redact_phone(phone: str) -> str:
-    """Redact a phone number for logging: +15551234567 -> +1555***4567."""
-    if not phone:
-        return "<none>"
-    if len(phone) <= 8:
-        return phone[:2] + "***" + phone[-2:] if len(phone) > 4 else "****"
-    return phone[:5] + "***" + phone[-4:]
+DEFAULT_WEBHOOK_HOST = "0.0.0.0"
 
 
 def check_sms_requirements() -> bool:
@@ -81,12 +71,10 @@ class SmsAdapter(BasePlatformAdapter):
         self._webhook_port: int = int(
             os.getenv("SMS_WEBHOOK_PORT", str(DEFAULT_WEBHOOK_PORT))
         )
-        self._webhook_host: str = os.getenv("SMS_WEBHOOK_HOST", "127.0.0.1")
+        self._webhook_host: str = os.getenv("SMS_WEBHOOK_HOST", DEFAULT_WEBHOOK_HOST)
+        self._webhook_url: str = os.getenv("SMS_WEBHOOK_URL", "").strip()
         self._runner = None
         self._http_session: Optional["aiohttp.ClientSession"] = None
-        # Rate limiting: track request timestamps per source IP
-        self._rate_window: Dict[str, collections.deque] = {}
-        self._rate_limit: int = 30  # max requests per minute per IP
 
     def _basic_auth_header(self) -> str:
         """Build HTTP Basic auth header value for Twilio."""
@@ -106,6 +94,26 @@ class SmsAdapter(BasePlatformAdapter):
             logger.error("[sms] TWILIO_PHONE_NUMBER not set — cannot send replies")
             return False
 
+        insecure_no_sig = os.getenv("SMS_INSECURE_NO_SIGNATURE", "").lower() == "true"
+
+        if not self._webhook_url and not insecure_no_sig:
+            logger.error(
+                "[sms] Refusing to start: SMS_WEBHOOK_URL is required for Twilio "
+                "signature validation. Set it to the public URL configured in your "
+                "Twilio console (e.g. https://example.com/webhooks/twilio). "
+                "For local development without validation, set "
+                "SMS_INSECURE_NO_SIGNATURE=true (NOT recommended for production).",
+            )
+            return False
+
+        if insecure_no_sig and not self._webhook_url:
+            logger.warning(
+                "[sms] SMS_INSECURE_NO_SIGNATURE=true — Twilio signature validation "
+                "is DISABLED. Any client that can reach port %d can inject messages. "
+                "Do NOT use this in production.",
+                self._webhook_port,
+            )
+
         app = web.Application()
         app.router.add_post("/webhooks/twilio", self._handle_webhook)
         app.router.add_get("/health", lambda _: web.Response(text="ok"))
@@ -123,7 +131,7 @@ class SmsAdapter(BasePlatformAdapter):
             "[sms] Twilio webhook server listening on %s:%d, from: %s",
             self._webhook_host,
             self._webhook_port,
-            _redact_phone(self._from_number),
+            redact_phone(self._from_number),
         )
         return True
 
@@ -172,7 +180,7 @@ class SmsAdapter(BasePlatformAdapter):
                             error_msg = body.get("message", str(body))
                             logger.error(
                                 "[sms] send failed to %s: %s %s",
-                                _redact_phone(chat_id),
+                                redact_phone(chat_id),
                                 resp.status,
                                 error_msg,
                             )
@@ -183,7 +191,7 @@ class SmsAdapter(BasePlatformAdapter):
                         msg_sid = body.get("sid", "")
                         last_result = SendResult(success=True, message_id=msg_sid)
                 except Exception as e:
-                    logger.error("[sms] send error to %s: %s", _redact_phone(chat_id), e)
+                    logger.error("[sms] send error to %s: %s", redact_phone(chat_id), e)
                     return SendResult(success=False, error=str(e))
         finally:
             # Close session only if we created a fallback (no persistent session)
@@ -201,66 +209,75 @@ class SmsAdapter(BasePlatformAdapter):
 
     def format_message(self, content: str) -> str:
         """Strip markdown — SMS renders it as literal characters."""
-        content = re.sub(r"\*\*(.+?)\*\*", r"\1", content, flags=re.DOTALL)
-        content = re.sub(r"\*(.+?)\*", r"\1", content, flags=re.DOTALL)
-        content = re.sub(r"__(.+?)__", r"\1", content, flags=re.DOTALL)
-        content = re.sub(r"_(.+?)_", r"\1", content, flags=re.DOTALL)
-        content = re.sub(r"```[a-z]*\n?", "", content)
-        content = re.sub(r"`(.+?)`", r"\1", content)
-        content = re.sub(r"^#{1,6}\s+", "", content, flags=re.MULTILINE)
-        content = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", content)
-        content = re.sub(r"\n{3,}", "\n\n", content)
-        return content.strip()
+        return strip_markdown(content)
 
     # ------------------------------------------------------------------
-    # Twilio signature verification
+    # Twilio signature validation
     # ------------------------------------------------------------------
 
-    def _validate_twilio_signature(self, request, raw_body: bytes) -> bool:
-        """Validate Twilio request signature per https://www.twilio.com/docs/usage/security"""
-        auth_token = os.getenv("TWILIO_AUTH_TOKEN", "")
-        if not auth_token:
-            logger.warning("TWILIO_AUTH_TOKEN not set — cannot verify webhook signatures")
-            return False
+    def _validate_twilio_signature(
+        self, url: str, post_params: dict, signature: str,
+    ) -> bool:
+        """Validate ``X-Twilio-Signature`` header (HMAC-SHA1, base64).
 
-        signature = request.headers.get("X-Twilio-Signature", "")
-        if not signature:
-            return False
+        Tries both with and without the default port for the URL scheme,
+        since Twilio may sign with either variant.
 
-        # Reconstruct the full URL Twilio used to generate the signature
-        url = str(request.url)
+        Algorithm: https://www.twilio.com/docs/usage/security#validating-requests
+        """
+        if self._check_signature(url, post_params, signature):
+            return True
 
-        # Parse the POST body and sort params
-        params = urllib.parse.parse_qs(raw_body.decode("utf-8"))
-        sorted_params = ""
-        for key in sorted(params.keys()):
-            sorted_params += key + params[key][0]
+        variant = self._port_variant_url(url)
+        if variant and self._check_signature(variant, post_params, signature):
+            return True
 
-        # Compute expected signature
-        data = url + sorted_params
-        expected = base64.b64encode(
-            hmac.new(auth_token.encode("utf-8"), data.encode("utf-8"), hashlib.sha1).digest()
-        ).decode("utf-8")
+        return False
 
-        return hmac.compare_digest(signature, expected)
+    def _check_signature(
+        self, url: str, post_params: dict, signature: str,
+    ) -> bool:
+        """Compute and compare a single Twilio signature."""
+        data_to_sign = url
+        for key in sorted(post_params.keys()):
+            data_to_sign += key + post_params[key]
+        mac = hmac.new(
+            self._auth_token.encode("utf-8"),
+            data_to_sign.encode("utf-8"),
+            hashlib.sha1,
+        )
+        computed = base64.b64encode(mac.digest()).decode("utf-8")
+        return hmac.compare_digest(computed, signature)
 
-    # ------------------------------------------------------------------
-    # Rate limiting
-    # ------------------------------------------------------------------
+    @staticmethod
+    def _port_variant_url(url: str) -> str | None:
+        """Return the URL with the default port toggled, or None.
 
-    def _check_rate_limit(self, source_ip: str) -> bool:
-        """Return True if the request is within rate limits."""
-        now = time.monotonic()
-        if source_ip not in self._rate_window:
-            self._rate_window[source_ip] = collections.deque()
-        window = self._rate_window[source_ip]
-        # Purge entries older than 60 seconds
-        while window and now - window[0] > 60:
-            window.popleft()
-        if len(window) >= self._rate_limit:
-            return False
-        window.append(now)
-        return True
+        Only toggles default ports (443 for https, 80 for http).
+        Non-standard ports are never modified.
+        """
+        parsed = urllib.parse.urlparse(url)
+        default_ports = {"https": 443, "http": 80}
+        default_port = default_ports.get(parsed.scheme)
+        if default_port is None:
+            return None
+
+        if parsed.port == default_port:
+            # Has explicit default port → strip it
+            return urllib.parse.urlunparse(
+                (parsed.scheme, parsed.hostname, parsed.path,
+                 parsed.params, parsed.query, parsed.fragment)
+            )
+        elif parsed.port is None:
+            # No port → add default
+            netloc = f"{parsed.hostname}:{default_port}"
+            return urllib.parse.urlunparse(
+                (parsed.scheme, netloc, parsed.path,
+                 parsed.params, parsed.query, parsed.fragment)
+            )
+
+        # Non-standard port — no variant
+        return None
 
     # ------------------------------------------------------------------
     # Twilio webhook handler
@@ -269,20 +286,10 @@ class SmsAdapter(BasePlatformAdapter):
     async def _handle_webhook(self, request) -> "aiohttp.web.Response":
         from aiohttp import web
 
-        # Rate limiting by source IP
-        source_ip = request.remote or "unknown"
-        if not self._check_rate_limit(source_ip):
-            logger.warning("[sms] rate limit exceeded for %s", source_ip)
-            return web.Response(
-                text='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
-                content_type="application/xml",
-                status=429,
-            )
-
         try:
             raw = await request.read()
             # Twilio sends form-encoded data, not JSON
-            form = urllib.parse.parse_qs(raw.decode("utf-8"))
+            form = urllib.parse.parse_qs(raw.decode("utf-8"), keep_blank_values=True)
         except Exception as e:
             logger.error("[sms] webhook parse error: %s", e)
             return web.Response(
@@ -291,14 +298,26 @@ class SmsAdapter(BasePlatformAdapter):
                 status=400,
             )
 
-        # Validate Twilio signature
-        if not self._validate_twilio_signature(request, raw):
-            logger.warning("[sms] invalid Twilio signature from %s", source_ip)
-            return web.Response(
-                text='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
-                content_type="application/xml",
-                status=403,
-            )
+        # Validate Twilio request signature when SMS_WEBHOOK_URL is configured
+        if self._webhook_url:
+            twilio_sig = request.headers.get("X-Twilio-Signature", "")
+            if not twilio_sig:
+                logger.warning("[sms] Rejected: missing X-Twilio-Signature header")
+                return web.Response(
+                    text='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                    content_type="application/xml",
+                    status=403,
+                )
+            flat_params = {k: v[0] for k, v in form.items() if v}
+            if not self._validate_twilio_signature(
+                self._webhook_url, flat_params, twilio_sig
+            ):
+                logger.warning("[sms] Rejected: invalid Twilio signature")
+                return web.Response(
+                    text='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                    content_type="application/xml",
+                    status=403,
+                )
 
         # Extract fields (parse_qs returns lists)
         from_number = (form.get("From", [""]))[0].strip()
@@ -314,7 +333,7 @@ class SmsAdapter(BasePlatformAdapter):
 
         # Ignore messages from our own number (echo prevention)
         if from_number == self._from_number:
-            logger.debug("[sms] ignoring echo from own number %s", _redact_phone(from_number))
+            logger.debug("[sms] ignoring echo from own number %s", redact_phone(from_number))
             return web.Response(
                 text='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
                 content_type="application/xml",
@@ -322,8 +341,8 @@ class SmsAdapter(BasePlatformAdapter):
 
         logger.info(
             "[sms] inbound from %s -> %s: %s",
-            _redact_phone(from_number),
-            _redact_phone(to_number),
+            redact_phone(from_number),
+            redact_phone(to_number),
             text[:80],
         )
 
