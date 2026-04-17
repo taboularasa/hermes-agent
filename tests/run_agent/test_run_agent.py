@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import run_agent
-from honcho_integration.client import HonchoClientConfig
+from plugins.memory.honcho.client import HonchoClientConfig
 from tools.todo_tool import todo_tool
 from run_agent import (
     AIAgent,
@@ -2126,8 +2126,8 @@ class TestHonchoActivation:
             patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
             patch("run_agent.check_toolset_requirements", return_value={}),
             patch("run_agent.OpenAI"),
-            patch("honcho_integration.client.HonchoClientConfig.from_global_config", return_value=hcfg),
-            patch("honcho_integration.client.get_honcho_client") as mock_client,
+            patch("plugins.memory.honcho.client.HonchoClientConfig.from_global_config", return_value=hcfg),
+            patch("plugins.memory.honcho.client.get_honcho_client") as mock_client,
         ):
             agent = AIAgent(
                 api_key="test-key-1234567890",
@@ -2144,7 +2144,6 @@ class TestHonchoActivation:
         hcfg = HonchoClientConfig(
             enabled=True,
             api_key="honcho-key",
-            memory_mode="hybrid",
             peer_name="user",
             ai_peer="hermes",
             recall_mode="hybrid",
@@ -2158,7 +2157,7 @@ class TestHonchoActivation:
             patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
             patch("run_agent.check_toolset_requirements", return_value={}),
             patch("run_agent.OpenAI"),
-            patch("honcho_integration.client.get_honcho_client") as mock_client,
+            patch("plugins.memory.honcho.client.get_honcho_client") as mock_client,
             patch("tools.honcho_tools.set_session_context"),
         ):
             agent = AIAgent(
@@ -2184,7 +2183,6 @@ class TestHonchoActivation:
         hcfg = HonchoClientConfig(
             enabled=True,
             api_key="honcho-key",
-            memory_mode="hybrid",
             peer_name="user",
             ai_peer="hermes",
             recall_mode="context",
@@ -2240,8 +2238,8 @@ class TestHonchoActivation:
             patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search", "honcho_context")),
             patch("run_agent.check_toolset_requirements", return_value={}),
             patch("run_agent.OpenAI"),
-            patch("honcho_integration.client.HonchoClientConfig.from_global_config", return_value=hcfg),
-            patch("honcho_integration.client.get_honcho_client") as mock_client,
+            patch("plugins.memory.honcho.client.HonchoClientConfig.from_global_config", return_value=hcfg),
+            patch("plugins.memory.honcho.client.get_honcho_client") as mock_client,
         ):
             agent = AIAgent(
                 api_key="test-key-1234567890",
@@ -2456,8 +2454,8 @@ class TestSafeWriter:
                 patch("run_agent.check_toolset_requirements", return_value={}),
                 patch("run_agent.OpenAI"),
                 patch("hermes_cli.config.load_config", return_value={"memory": {}}),
-                patch("honcho_integration.client.HonchoClientConfig.from_global_config", return_value=hcfg),
-                patch("honcho_integration.client.get_honcho_client", side_effect=RuntimeError("boom")),
+                patch("plugins.memory.honcho.client.HonchoClientConfig.from_global_config", return_value=hcfg),
+                patch("plugins.memory.honcho.client.get_honcho_client", side_effect=RuntimeError("boom")),
             ):
                 agent = AIAgent(
                     api_key="test-k...7890",

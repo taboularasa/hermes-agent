@@ -1255,11 +1255,16 @@ class AIAgent:
                             session_db=session_db,
                         )
                 else:
-                    from honcho_integration.client import HonchoClientConfig, get_honcho_client
+                    from plugins.memory.honcho.client import (
+                        HonchoClientConfig,
+                        get_honcho_client,
+                    )
+
                     hcfg = HonchoClientConfig.from_global_config()
                     self._honcho_config = hcfg
                     if self._honcho_should_activate(hcfg):
-                        from honcho_integration.session import HonchoSessionManager
+                        from plugins.memory.honcho.session import HonchoSessionManager
+
                         client = get_honcho_client(hcfg)
                         self._honcho = HonchoSessionManager(
                             honcho=client,

@@ -261,6 +261,10 @@ class HonchoClientConfig:
     # "context" — auto-injected context only, Honcho tools removed
     # "tools"   — Honcho tools only, no auto-injected context
     recall_mode: str = "hybrid"
+    # Legacy compatibility alias used by older callers. Honcho no longer
+    # differentiates per-peer write modes here, but keeping the field avoids
+    # breaking sealed fork code that still reports or gates on memory_mode.
+    memory_mode: str = "hybrid"
     # Eager init in tools mode — when true, initializes session during
     # initialize() instead of deferring to first tool call
     init_on_session_start: bool = False
@@ -461,6 +465,13 @@ class HonchoClientConfig:
                 or raw.get("recallMode")
                 or "hybrid"
             ),
+            memory_mode=(
+                host_block.get("memoryMode")
+                or raw.get("memoryMode")
+                or host_block.get("memory_mode")
+                or raw.get("memory_mode")
+                or "hybrid"
+            ),
             init_on_session_start=_resolve_bool(
                 host_block.get("initOnSessionStart"),
                 raw.get("initOnSessionStart"),
@@ -575,6 +586,10 @@ class HonchoClientConfig:
 
         # global: single session across all directories
         return self.workspace_id
+
+    def peer_memory_mode(self, _peer_name: str) -> str:
+        """Backward-compatible per-peer memory mode lookup."""
+        return self.memory_mode or "hybrid"
 
 
 _honcho_client: Honcho | None = None
