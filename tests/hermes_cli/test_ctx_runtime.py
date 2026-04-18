@@ -562,6 +562,81 @@ def test_normalize_ctx_bindings_deactivates_missing_worktree_and_clears_override
     assert get_task_cwd(session_id, default="fallback") == "fallback"
 
 
+def test_normalize_ctx_bindings_deactivates_missing_worktree_despite_active_codex_handoff(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    session_id = "sess-missing-handoff"
+    missing_worktree = tmp_path / "ctx-data" / "worktrees" / "ws-1" / "wt-missing"
+    _write_binding_record(
+        tmp_path,
+        session_id,
+        {
+            "active": True,
+            "reason": "ctx task handed off to delegated Codex run",
+            "session_id": session_id,
+            "platform": "cli",
+            "workspace_id": "ws-1",
+            "task_id": "task-1",
+            "worktree_id": "wt-missing",
+            "worktree_path": str(missing_worktree),
+            "source": "ctx-daemon",
+        },
+    )
+
+    monkeypatch.setattr(
+        ctx_runtime,
+        "_load_active_codex_handoff_indexes",
+        lambda **_kwargs: {
+            "binding_session_id": {session_id},
+            "task_id": {"task-1"},
+            "ctx_session_id": set(),
+            "worktree_id": {"wt-missing"},
+            "worktree_path": {str(missing_worktree)},
+        },
+    )
+
+    retired = ctx_runtime.normalize_ctx_bindings(session_id=session_id)
+    record = json.loads((tmp_path / "ctx" / "session_bindings.json").read_text(encoding="utf-8"))
+
+    assert retired == {session_id: "ctx binding retired: worktree missing"}
+    assert record["sessions"][session_id]["active"] is False
+    assert record["sessions"][session_id]["reason"] == "ctx binding retired: worktree missing"
+
+
+def test_load_active_codex_handoff_indexes_ignores_missing_worktree_runs(monkeypatch, tmp_path):
+    runs_path = tmp_path / "runs.json"
+    missing_worktree = tmp_path / "ctx-data" / "worktrees" / "ws-1" / "wt-missing"
+    runs_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "runs": {
+                    "codex-missing": {
+                        "run_id": "codex-missing",
+                        "status": "running",
+                        "task_id": "sess-1",
+                        "ctx_task_id": "task-1",
+                        "ctx_worktree_id": "wt-missing",
+                        "ctx_worktree_path": str(missing_worktree),
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ctx_runtime, "_load_normalize_codex_runs", lambda: (lambda **_kwargs: {}))
+
+    indexes = ctx_runtime._load_active_codex_handoff_indexes(runs_path=runs_path)
+
+    assert indexes == {
+        "binding_session_id": set(),
+        "task_id": set(),
+        "ctx_session_id": set(),
+        "worktree_id": set(),
+        "worktree_path": set(),
+    }
+
+
 def test_normalize_ctx_bindings_deactivates_active_record_already_marked_retired(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
