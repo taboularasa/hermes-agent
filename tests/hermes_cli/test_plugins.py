@@ -191,6 +191,26 @@ class TestPluginLoading:
 
         assert "hermes_plugins.ns_plugin" in sys.modules
 
+    def test_load_hadto_plugin_prepares_ctx_runtime_bridge(self, tmp_path, monkeypatch):
+        """The Hadto plugin gets the core ctx-runtime bridge before import."""
+        from hadto_patches import ctx as hadto_ctx
+
+        plugins_dir = tmp_path / "hermes_test" / "plugins"
+        _make_plugin_dir(plugins_dir, "hadto")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_test"))
+
+        calls = []
+        monkeypatch.setattr(
+            hadto_ctx,
+            "_install_hadto_plugin_ctx_runtime_alias",
+            lambda: calls.append("bridged"),
+        )
+
+        mgr = PluginManager()
+        mgr.discover_and_load()
+
+        assert "bridged" in calls
+
 
 # ── TestPluginHooks ────────────────────────────────────────────────────────
 

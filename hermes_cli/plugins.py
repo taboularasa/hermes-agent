@@ -530,6 +530,15 @@ class PluginManager:
         loaded = LoadedPlugin(manifest=manifest)
 
         try:
+            if manifest.name == "hadto":
+                try:
+                    from hadto_patches import ctx as _hadto_ctx_runtime
+
+                    alias_fn = getattr(_hadto_ctx_runtime, "_install_hadto_plugin_ctx_runtime_alias", None)
+                    if callable(alias_fn):
+                        alias_fn()
+                except Exception:
+                    logger.debug("Failed to prepare Hadto ctx runtime bridge", exc_info=True)
             if manifest.source in ("user", "project"):
                 module = self._load_directory_module(manifest)
             else:

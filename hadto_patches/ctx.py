@@ -159,9 +159,19 @@ def _ctx_binding_age_hours(record: Dict[str, Any], *, now: datetime) -> Optional
     return (now - ts).total_seconds() / 3600
 
 
+def _install_hadto_plugin_ctx_runtime_alias() -> None:
+    current_module = sys.modules.get(__name__)
+    if current_module is None:
+        return
+    sys.modules["hadto_hermes_plugin.ctx_runtime"] = current_module
+
+
 def _path_missing(path: Any) -> bool:
     normalized = str(path or "").strip()
     return bool(normalized) and not Path(normalized).exists()
+
+
+_install_hadto_plugin_ctx_runtime_alias()
 
 
 def _ctx_bindings_path(bindings_path: Optional[Path] = None) -> Path:
@@ -175,6 +185,34 @@ def _default_state_db_path(bindings_path: Optional[Path] = None) -> Path:
     if resolved_bindings_path.name == "session_bindings.json" and resolved_bindings_path.parent.name == "ctx":
         return resolved_bindings_path.parent.parent / "state.db"
     return resolved_bindings_path.parent / "state.db"
+
+
+def _codex_runs_path(runs_path: Optional[Path] = None) -> Path:
+    if runs_path is not None:
+        return Path(runs_path).expanduser()
+    return get_hermes_home() / "codex" / "runs.json"
+
+
+def _load_codex_runs(runs_path: Optional[Path] = None) -> Dict[str, Any]:
+    path = _codex_runs_path(runs_path)
+    if not path.exists():
+        return {"version": 1, "runs": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.warning("Failed to read codex runs from %s", path, exc_info=True)
+        return {"version": 1, "runs": {}}
+    if not isinstance(data, dict):
+        return {"version": 1, "runs": {}}
+    data.setdefault("version", 1)
+    data.setdefault("runs", {})
+    if not isinstance(data["runs"], dict):
+        data["runs"] = {}
+    return data
+
+
+def _save_codex_runs(data: Dict[str, Any], runs_path: Optional[Path] = None) -> None:
+    atomic_json_write(_codex_runs_path(runs_path), data)
 
 
 def _load_bindings(bindings_path: Optional[Path] = None) -> Dict[str, Any]:
@@ -249,6 +287,93 @@ def _open_session_db(*, state_db_path: Optional[Path] = None, bindings_path: Opt
     except Exception:
         logger.debug("Failed to open SessionDB while normalizing ctx bindings", exc_info=True)
         return None
+
+
+def _process_cwd_snapshot(pid: Any) -> tuple[str, bool]:
+    try:
+        normalized_pid = int(pid)
+    except (TypeError, ValueError):
+        return "", False
+    if normalized_pid <= 0:
+        return "", False
+    proc_cwd = Path(f"/proc/{normalized_pid}/cwd")
+    if not proc_cwd.exists():
+        return "", False
+    try:
+        resolved = os.readlink(proc_cwd)
+    except OSError:
+        return "", False
+    return resolved, resolved.endswith(" (deleted)")
+
+
+def _infer_terminal_status_from_record(record: Dict[str, Any]) -> tuple[str, Optional[int]]:
+    exit_code = record.get("exit_code")
+    try:
+        normalized_exit_code = int(exit_code) if exit_code is not None else None
+    except (TypeError, ValueError):
+        normalized_exit_code = None
+
+    if normalized_exit_code == 0:
+        return "completed", 0
+    if normalized_exit_code is not None:
+        return "failed", normalized_exit_code
+    if str(record.get("final_message") or "").strip():
+        return "completed", 0
+    return "failed", None
+
+
+def _retire_broken_codex_runs_for_missing_worktrees(
+    *,
+    runs_path: Optional[Path] = None,
+    now: Optional[datetime] = None,
+) -> Dict[str, str]:
+    data = _load_codex_runs(runs_path)
+    runs = data.get("runs", {})
+    if not isinstance(runs, dict):
+        return {}
+
+    retired: Dict[str, str] = {}
+    changed = False
+    now_epoch = (now or datetime.now(timezone.utc)).timestamp()
+    for run_id, raw_record in runs.items():
+        if not isinstance(raw_record, dict):
+            continue
+        status = str(raw_record.get("status") or "").strip().lower()
+        if status not in {"running", "unknown"}:
+            continue
+
+        proc_cwd, proc_cwd_deleted = _process_cwd_snapshot(raw_record.get("pid"))
+        reason = ""
+        if proc_cwd_deleted:
+            reason = "process_cwd_deleted"
+        elif _path_missing(raw_record.get("ctx_worktree_path")):
+            reason = "ctx_worktree_missing"
+        elif _path_missing(raw_record.get("workdir")):
+            reason = "workdir_missing"
+        if not reason:
+            continue
+
+        terminal_status, exit_code = _infer_terminal_status_from_record(raw_record)
+        raw_record["status"] = terminal_status
+        if exit_code is not None:
+            raw_record["exit_code"] = exit_code
+        raw_record["completed_at"] = raw_record.get("completed_at") or now_epoch
+        raw_record["stale_reason"] = reason
+        if raw_record.get("process_session_id"):
+            raw_record.setdefault("stale_process_session_id", raw_record.get("process_session_id"))
+            raw_record["process_session_id"] = ""
+        if raw_record.get("pid") not in (None, ""):
+            raw_record.setdefault("stale_pid", raw_record.get("pid"))
+            raw_record["pid"] = None
+        if proc_cwd:
+            raw_record.setdefault("stale_process_cwd", proc_cwd)
+
+        retired[str(run_id)] = reason
+        changed = True
+
+    if changed:
+        _save_codex_runs(data, runs_path)
+    return retired
 
 
 def _load_active_codex_handoff_indexes(
@@ -420,6 +545,7 @@ def normalize_ctx_bindings(
     bindings_path = _ctx_bindings_path(bindings_path)
     session_db = _open_session_db(state_db_path=state_db_path, bindings_path=bindings_path)
     now = now or datetime.now(timezone.utc)
+    _retire_broken_codex_runs_for_missing_worktrees(runs_path=codex_runs_path, now=now)
     active_codex_indexes = _load_active_codex_handoff_indexes(runs_path=codex_runs_path, now=now)
     try:
         with _BINDINGS_LOCK:

@@ -1,6 +1,8 @@
+import importlib
 import io
 import json
 import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -82,6 +84,16 @@ def _write_binding_record(tmp_path, session_id: str, payload: dict):
     record_path.parent.mkdir(parents=True, exist_ok=True)
     record_path.write_text(
         json.dumps({"version": 1, "sessions": {session_id: payload}}),
+        encoding="utf-8",
+    )
+    return record_path
+
+
+def _write_codex_runs(tmp_path, runs: dict):
+    record_path = tmp_path / "codex" / "runs.json"
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_text(
+        json.dumps({"version": 1, "runs": runs}),
         encoding="utf-8",
     )
     return record_path
@@ -635,6 +647,90 @@ def test_load_active_codex_handoff_indexes_ignores_missing_worktree_runs(monkeyp
         "worktree_id": set(),
         "worktree_path": set(),
     }
+
+
+def test_install_hadto_plugin_ctx_runtime_alias_bridges_relative_import(monkeypatch, tmp_path):
+    package_root = tmp_path / "hadto_hermes_plugin"
+    tools_root = package_root / "tools"
+    tools_root.mkdir(parents=True, exist_ok=True)
+    (package_root / "__init__.py").write_text("", encoding="utf-8")
+    (tools_root / "__init__.py").write_text("", encoding="utf-8")
+    (tools_root / "fake_tool.py").write_text(
+        "from ..ctx_runtime import normalize_ctx_bindings\n",
+        encoding="utf-8",
+    )
+
+    for name in list(sys.modules):
+        if name == "hadto_hermes_plugin" or name.startswith("hadto_hermes_plugin."):
+            sys.modules.pop(name, None)
+
+    monkeypatch.syspath_prepend(str(tmp_path))
+    ctx_runtime._install_hadto_plugin_ctx_runtime_alias()
+
+    fake_tool = importlib.import_module("hadto_hermes_plugin.tools.fake_tool")
+
+    assert fake_tool.normalize_ctx_bindings is ctx_runtime.normalize_ctx_bindings
+    assert sys.modules["hadto_hermes_plugin.ctx_runtime"] is ctx_runtime
+
+
+def test_normalize_ctx_bindings_retires_running_codex_record_with_deleted_worktree(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    session_id = "sess-missing-worktree"
+    missing_worktree = tmp_path / "ctx-data" / "worktrees" / "ws-1" / "wt-missing"
+    _write_binding_record(
+        tmp_path,
+        session_id,
+        {
+            "active": True,
+            "reason": "ctx task bound",
+            "session_id": session_id,
+            "platform": "cli",
+            "workspace_id": "ws-1",
+            "task_id": "task-1",
+            "worktree_id": "wt-missing",
+            "worktree_path": str(missing_worktree),
+            "source": "ctx-daemon",
+        },
+    )
+    runs_path = _write_codex_runs(
+        tmp_path,
+        {
+            "codex-run-1": {
+                "run_id": "codex-run-1",
+                "status": "running",
+                "task_id": session_id,
+                "ctx_task_id": "task-1",
+                "ctx_worktree_id": "wt-missing",
+                "ctx_worktree_path": str(missing_worktree),
+                "workdir": str(missing_worktree),
+                "process_session_id": "proc-1",
+                "pid": 185156,
+            }
+        },
+    )
+
+    monkeypatch.setattr(ctx_runtime, "_load_normalize_codex_runs", lambda: (lambda **_kwargs: {}))
+    monkeypatch.setattr(
+        ctx_runtime,
+        "_process_cwd_snapshot",
+        lambda pid: (f"{missing_worktree} (deleted)" if int(pid) == 185156 else "", int(pid) == 185156),
+    )
+
+    retired = ctx_runtime.normalize_ctx_bindings(session_id=session_id, codex_runs_path=runs_path)
+    binding_record = json.loads((tmp_path / "ctx" / "session_bindings.json").read_text(encoding="utf-8"))
+    codex_record = json.loads(runs_path.read_text(encoding="utf-8"))
+
+    assert retired == {session_id: "ctx binding retired: worktree missing"}
+    assert binding_record["sessions"][session_id]["active"] is False
+    run = codex_record["runs"]["codex-run-1"]
+    assert run["status"] == "failed"
+    assert run["stale_reason"] == "process_cwd_deleted"
+    assert run["process_session_id"] == ""
+    assert run["pid"] is None
+    assert run["stale_process_session_id"] == "proc-1"
+    assert run["stale_pid"] == 185156
+    assert run["stale_process_cwd"].endswith(" (deleted)")
 
 
 def test_normalize_ctx_bindings_deactivates_active_record_already_marked_retired(monkeypatch, tmp_path):
