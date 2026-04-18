@@ -159,6 +159,11 @@ def _ctx_binding_age_hours(record: Dict[str, Any], *, now: datetime) -> Optional
     return (now - ts).total_seconds() / 3600
 
 
+def _path_missing(path: Any) -> bool:
+    normalized = str(path or "").strip()
+    return bool(normalized) and not Path(normalized).exists()
+
+
 def _ctx_bindings_path(bindings_path: Optional[Path] = None) -> Path:
     if bindings_path is not None:
         return Path(bindings_path).expanduser()
@@ -288,6 +293,8 @@ def _load_active_codex_handoff_indexes(
             continue
         if str(raw_record.get("status") or "").strip().lower() not in {"running", "unknown"}:
             continue
+        if _path_missing(raw_record.get("ctx_worktree_path")):
+            continue
         values = {
             "binding_session_id": str(raw_record.get("task_id") or "").strip(),
             "task_id": str(raw_record.get("ctx_task_id") or "").strip(),
@@ -362,7 +369,7 @@ def _ctx_binding_retirement_reason(
         return existing_reason
 
     worktree_path = record.get("worktree_path")
-    if worktree_path and not Path(worktree_path).exists():
+    if _path_missing(worktree_path):
         return "ctx binding retired: worktree missing"
     if _binding_has_active_codex_handoff(record, active_codex_indexes=active_codex_indexes):
         return None
@@ -428,7 +435,10 @@ def normalize_ctx_bindings(
                 record = sessions.get(current_session_id)
                 if not isinstance(record, dict):
                     continue
-                if _binding_has_active_codex_handoff(record, active_codex_indexes=active_codex_indexes):
+                if (
+                    _binding_has_active_codex_handoff(record, active_codex_indexes=active_codex_indexes)
+                    and not _path_missing(record.get("worktree_path"))
+                ):
                     if _set_binding_record_active(
                         record,
                         reason=_ACTIVE_CODEX_HANDOFF_REASON,
