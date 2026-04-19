@@ -141,6 +141,32 @@ def test_aiagent_reuses_existing_errors_log_handler():
             root_logger.addHandler(handler)
 
 
+def test_aiagent_accepts_tool_start_and_complete_callbacks():
+    with (
+        patch(
+            "run_agent.get_tool_definitions",
+            return_value=_make_tool_defs("web_search"),
+        ),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        started = []
+        completed = []
+        agent = AIAgent(
+            api_key="test-k...7890",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            tool_start_callback=lambda *args: started.append(args),
+            tool_complete_callback=lambda *args: completed.append(args),
+        )
+
+    assert agent.tool_start_callback is not None
+    assert agent.tool_complete_callback is not None
+    assert started == []
+    assert completed == []
+
+
 # ---------------------------------------------------------------------------
 # Helper to build mock assistant messages (API response objects)
 # ---------------------------------------------------------------------------

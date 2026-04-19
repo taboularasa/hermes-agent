@@ -74,6 +74,24 @@ class TestHandleFunctionCall:
             ),
         ]
 
+    def test_honcho_compat_kwargs_are_accepted(self):
+        with patch("model_tools.registry.dispatch", return_value='{"ok":true}') as mock_dispatch:
+            result = handle_function_call(
+                "web_search",
+                {"q": "test"},
+                task_id="task-1",
+                honcho_manager=object(),
+                honcho_session_key="gateway-session",
+            )
+
+        assert result == '{"ok":true}'
+        mock_dispatch.assert_called_once_with(
+            "web_search",
+            {"q": "test"},
+            task_id="task-1",
+            user_task=None,
+        )
+
 
 # =========================================================================
 # Agent loop tools

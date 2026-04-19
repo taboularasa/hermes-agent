@@ -427,6 +427,8 @@ def handle_function_call(
     user_task: Optional[str] = None,
     enabled_tools: Optional[List[str]] = None,
     skip_pre_tool_call_hook: bool = False,
+    honcho_manager: Any = None,
+    honcho_session_key: Optional[str] = None,
 ) -> str:
     """
     Main function call dispatcher that routes calls to the tool registry.
@@ -440,6 +442,10 @@ def handle_function_call(
                        execute_code uses this list to determine which sandbox
                        tools to generate.  Falls back to the process-global
                        ``_last_resolved_tool_names`` for backward compat.
+        honcho_manager: Backward-compatible no-op for call sites that still
+                        pass an injected Honcho session manager.
+        honcho_session_key: Backward-compatible no-op for legacy Honcho-aware
+                            call sites.
 
     Returns:
         Function result as a JSON string.
