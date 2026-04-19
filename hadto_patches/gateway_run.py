@@ -8734,7 +8734,11 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, interval: int
     logger.info("Cron ticker stopped")
 
 
-async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = False) -> bool:
+async def start_gateway(
+    config: Optional[GatewayConfig] = None,
+    replace: bool = False,
+    verbosity: Optional[int] = 0,
+) -> bool:
     """
     Start the gateway and run until interrupted.
     
@@ -8747,6 +8751,8 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         replace: If True, kill any existing gateway instance before starting.
                  Useful for systemd services to avoid restart-loop deadlocks
                  when the previous process hasn't fully exited yet.
+        verbosity: Stderr log verbosity count added on top of default WARNING.
+                   Use None to suppress stderr log output.
     """
     # ── Duplicate-instance guard ──────────────────────────────────────
     # Prevent two gateways from running under the same HERMES_HOME.
@@ -8845,6 +8851,20 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     error_handler.setLevel(logging.WARNING)
     error_handler.setFormatter(RedactingFormatter('%(asctime)s %(levelname)s %(name)s: %(message)s'))
     logging.getLogger().addHandler(error_handler)
+
+    # Optional stderr handler driven by CLI -v/-q flags.
+    # verbosity=None (-q/--quiet): no stderr output
+    # verbosity=0    (default):    WARNING and above
+    # verbosity=1    (-v):         INFO and above
+    # verbosity=2+   (-vv/-vvv):   DEBUG
+    if verbosity is not None:
+        stderr_level = {0: logging.WARNING, 1: logging.INFO}.get(verbosity, logging.DEBUG)
+        stderr_handler = logging.StreamHandler()
+        stderr_handler.setLevel(stderr_level)
+        stderr_handler.setFormatter(RedactingFormatter('%(levelname)s %(name)s: %(message)s'))
+        logging.getLogger().addHandler(stderr_handler)
+        if stderr_level < logging.getLogger().level:
+            logging.getLogger().setLevel(stderr_level)
 
     runner = GatewayRunner(config)
     

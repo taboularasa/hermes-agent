@@ -113,3 +113,49 @@ async def test_runner_startup_resumes_interrupted_codex_runs(monkeypatch, tmp_pa
 
     assert ok is True
     assert calls == ["called"]
+
+
+@pytest.mark.asyncio
+async def test_start_gateway_accepts_verbosity_argument(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    class _CleanExitRunner:
+        def __init__(self, config):
+            self.config = config
+            self.should_exit_cleanly = True
+            self.exit_reason = None
+            self.adapters = {}
+
+        async def start(self):
+            return True
+
+        async def stop(self):
+            return None
+
+    import logging
+    import gateway.run as gateway_run
+
+    root_logger = logging.getLogger()
+    saved_handlers = list(root_logger.handlers)
+    saved_level = root_logger.level
+    for handler in list(root_logger.handlers):
+        root_logger.removeHandler(handler)
+
+    monkeypatch.setattr("gateway.status.get_running_pid", lambda: None)
+    monkeypatch.setattr("tools.skills_sync.sync_skills", lambda quiet=True: None)
+    monkeypatch.setattr(gateway_run, "GatewayRunner", _CleanExitRunner)
+    monkeypatch.setattr(gateway_run, "RotatingFileHandler", lambda *args, **kwargs: logging.NullHandler())
+
+    try:
+        ok = await gateway_run.start_gateway(config=GatewayConfig(), replace=False, verbosity=1)
+        assert ok is True
+    finally:
+        for handler in list(root_logger.handlers):
+            root_logger.removeHandler(handler)
+            try:
+                handler.close()
+            except Exception:
+                pass
+        for handler in saved_handlers:
+            root_logger.addHandler(handler)
+        root_logger.setLevel(saved_level)

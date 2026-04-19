@@ -357,6 +357,10 @@ class SessionEntry:
     total_tokens: int = 0
     estimated_cost_usd: float = 0.0
     cost_status: str = "unknown"
+    cost_source: Optional[str] = None
+    model: Optional[str] = None
+    provider: Optional[str] = None
+    base_url: Optional[str] = None
     
     # Last API-reported prompt tokens (for accurate compression pre-check)
     last_prompt_tokens: int = 0
@@ -395,6 +399,10 @@ class SessionEntry:
             "last_prompt_tokens": self.last_prompt_tokens,
             "estimated_cost_usd": self.estimated_cost_usd,
             "cost_status": self.cost_status,
+            "cost_source": self.cost_source,
+            "model": self.model,
+            "provider": self.provider,
+            "base_url": self.base_url,
             "memory_flushed": self.memory_flushed,
             "suspended": self.suspended,
         }
@@ -432,6 +440,10 @@ class SessionEntry:
             last_prompt_tokens=data.get("last_prompt_tokens", 0),
             estimated_cost_usd=data.get("estimated_cost_usd", 0.0),
             cost_status=data.get("cost_status", "unknown"),
+            cost_source=data.get("cost_source"),
+            model=data.get("model"),
+            provider=data.get("provider"),
+            base_url=data.get("base_url"),
             memory_flushed=data.get("memory_flushed", False),
             suspended=data.get("suspended", False),
         )
@@ -776,6 +788,16 @@ class SessionStore:
         self,
         session_key: str,
         last_prompt_tokens: int = None,
+        input_tokens: int = None,
+        output_tokens: int = None,
+        cache_read_tokens: int = None,
+        cache_write_tokens: int = None,
+        model: str = None,
+        estimated_cost_usd: float = None,
+        cost_status: str = None,
+        cost_source: str = None,
+        provider: str = None,
+        base_url: str = None,
     ) -> None:
         """Update lightweight session metadata after an interaction."""
         with self._lock:
@@ -784,8 +806,73 @@ class SessionStore:
             if session_key in self._entries:
                 entry = self._entries[session_key]
                 entry.updated_at = _now()
+                if input_tokens is not None:
+                    entry.input_tokens = input_tokens
+                if output_tokens is not None:
+                    entry.output_tokens = output_tokens
+                if cache_read_tokens is not None:
+                    entry.cache_read_tokens = cache_read_tokens
+                if cache_write_tokens is not None:
+                    entry.cache_write_tokens = cache_write_tokens
                 if last_prompt_tokens is not None:
                     entry.last_prompt_tokens = last_prompt_tokens
+                if estimated_cost_usd is not None:
+                    entry.estimated_cost_usd = estimated_cost_usd
+                if cost_status is not None:
+                    entry.cost_status = cost_status
+                if cost_source is not None:
+                    entry.cost_source = cost_source
+                if model is not None:
+                    entry.model = model
+                if provider is not None:
+                    entry.provider = provider
+                if base_url is not None:
+                    entry.base_url = base_url
+
+                entry.total_tokens = (
+                    entry.input_tokens
+                    + entry.output_tokens
+                    + entry.cache_read_tokens
+                    + entry.cache_write_tokens
+                )
+
+                if self._db and any(
+                    value is not None
+                    for value in (
+                        input_tokens,
+                        output_tokens,
+                        cache_read_tokens,
+                        cache_write_tokens,
+                        model,
+                        estimated_cost_usd,
+                        cost_status,
+                        cost_source,
+                        provider,
+                        base_url,
+                    )
+                ):
+                    try:
+                        self._db.ensure_session(
+                            session_id=entry.session_id,
+                            source="gateway",
+                            model=entry.model,
+                        )
+                        self._db.update_token_counts(
+                            entry.session_id,
+                            input_tokens=entry.input_tokens,
+                            output_tokens=entry.output_tokens,
+                            model=entry.model,
+                            cache_read_tokens=entry.cache_read_tokens,
+                            cache_write_tokens=entry.cache_write_tokens,
+                            estimated_cost_usd=entry.estimated_cost_usd,
+                            cost_status=entry.cost_status,
+                            cost_source=entry.cost_source,
+                            billing_provider=entry.provider,
+                            billing_base_url=entry.base_url,
+                            absolute=True,
+                        )
+                    except Exception:
+                        logger.debug("Failed to sync session token counts to SQLite", exc_info=True)
                 self._save()
 
     def suspend_session(self, session_key: str) -> bool:

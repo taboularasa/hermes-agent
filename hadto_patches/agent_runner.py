@@ -609,6 +609,8 @@ class AIAgent:
         stream_delta_callback: callable = None,
         interim_assistant_callback: callable = None,
         tool_gen_callback: callable = None,
+        tool_start_callback: callable = None,
+        tool_complete_callback: callable = None,
         status_callback: callable = None,
         max_tokens: int = None,
         reasoning_config: Dict[str, Any] = None,
@@ -654,6 +656,8 @@ class AIAgent:
             provider_sort (str): Sort providers by price/throughput/latency (optional)
             session_id (str): Pre-generated session ID for logging (optional, auto-generated if not provided)
             tool_progress_callback (callable): Callback function(tool_name, args_preview) for progress notifications
+            tool_start_callback (callable): Optional callback for UI layers that want tool-start events.
+            tool_complete_callback (callable): Optional callback for UI layers that want tool-complete events.
             clarify_callback (callable): Callback function(question, choices) -> str for interactive user questions.
                 Provided by the platform layer (CLI or gateway). If None, the clarify tool returns an error.
             max_tokens (int): Maximum tokens for model responses (optional, uses model default if not set)
@@ -759,6 +763,9 @@ class AIAgent:
         self.interim_assistant_callback = interim_assistant_callback
         self.status_callback = status_callback
         self.tool_gen_callback = tool_gen_callback
+        # Backward-compatible no-op hooks accepted by newer CLI/API surfaces.
+        self.tool_start_callback = tool_start_callback
+        self.tool_complete_callback = tool_complete_callback
         self._last_reported_tool = None  # Track for "new tool" mode
         self._current_streamed_assistant_text = ""
         self._disable_streaming = False

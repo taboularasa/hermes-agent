@@ -1,0 +1,5 @@
+name: zep
+version: 1.0.0
+description: "Zep long-term memory with stable Hermes user/session mapping, automatic context recall, and mirrored built-in memory writes."
+pip_dependencies:
+  - zep-cloud
