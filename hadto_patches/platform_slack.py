@@ -46,6 +46,7 @@ from gateway.platforms.base import (
 
 
 logger = logging.getLogger(__name__)
+_SLACK_MEMBER_ID_MENTION_RE = re.compile(r"(?<![<\w])@([UW][A-Z0-9]{8,})(?![A-Z0-9])")
 
 
 @dataclass
@@ -480,7 +481,11 @@ class SlackAdapter(BasePlatformAdapter):
             text,
         )
 
-        # 4) Protect existing Slack entities/manual links so escaping and later
+        # 4) Normalize raw Slack member IDs (@U123..., @W123...) into
+        #    canonical mention entities before we protect/escape them.
+        text = _SLACK_MEMBER_ID_MENTION_RE.sub(lambda m: f"<@{m.group(1)}>", text)
+
+        # 5) Protect existing Slack entities/manual links so escaping and later
         #    formatting passes don't break them.
         text = re.sub(
             r'(<(?:[@#!]|(?:https?|mailto|tel):)[^>\n]+>)',
@@ -488,15 +493,15 @@ class SlackAdapter(BasePlatformAdapter):
             text,
         )
 
-        # 5) Protect blockquote markers before escaping
+        # 6) Protect blockquote markers before escaping
         text = re.sub(r'^(>+\s)', lambda m: _ph(m.group(0)), text, flags=re.MULTILINE)
 
-        # 6) Escape Slack control characters in remaining plain text.
+        # 7) Escape Slack control characters in remaining plain text.
         # Unescape first so already-escaped input doesn't get double-escaped.
         text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
         text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
-        # 7) Convert headers (## Title) → *Title* (bold)
+        # 8) Convert headers (## Title) → *Title* (bold)
         def _convert_header(m):
             inner = m.group(1).strip()
             # Strip redundant bold markers inside a header
@@ -507,21 +512,21 @@ class SlackAdapter(BasePlatformAdapter):
             r'^#{1,6}\s+(.+)$', _convert_header, text, flags=re.MULTILINE
         )
 
-        # 8) Convert bold+italic: ***text*** → *_text_* (Slack bold wrapping italic)
+        # 9) Convert bold+italic: ***text*** → *_text_* (Slack bold wrapping italic)
         text = re.sub(
             r'\*\*\*(.+?)\*\*\*',
             lambda m: _ph(f'*_{m.group(1)}_*'),
             text,
         )
 
-        # 9) Convert bold: **text** → *text* (Slack bold)
+        # 10) Convert bold: **text** → *text* (Slack bold)
         text = re.sub(
             r'\*\*(.+?)\*\*',
             lambda m: _ph(f'*{m.group(1)}*'),
             text,
         )
 
-        # 10) Convert italic: _text_ stays as _text_ (already Slack italic)
+        # 11) Convert italic: _text_ stays as _text_ (already Slack italic)
         #     Single *text* → _text_ (Slack italic)
         text = re.sub(
             r'(?<!\*)\*([^*\n]+)\*(?!\*)',
@@ -529,16 +534,16 @@ class SlackAdapter(BasePlatformAdapter):
             text,
         )
 
-        # 11) Convert strikethrough: ~~text~~ → ~text~
+        # 12) Convert strikethrough: ~~text~~ → ~text~
         text = re.sub(
             r'~~(.+?)~~',
             lambda m: _ph(f'~{m.group(1)}~'),
             text,
         )
 
-        # 12) Blockquotes: > prefix is already protected by step 5 above.
+        # 13) Blockquotes: > prefix is already protected by step 6 above.
 
-        # 13) Restore placeholders in reverse order
+        # 14) Restore placeholders in reverse order
         for key in reversed(placeholders):
             text = text.replace(key, placeholders[key])
 

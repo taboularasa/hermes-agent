@@ -71,7 +71,16 @@ class TestSendMessageTool:
             get_home_channel=lambda _platform: None,
         )
 
-        with patch("gateway.config.load_gateway_config", return_value=config), \
+        with patch.dict(
+            os.environ,
+            {
+                "HERMES_CRON_AUTO_DELIVER_PLATFORM": "",
+                "HERMES_CRON_AUTO_DELIVER_CHAT_ID": "",
+                "HERMES_CRON_AUTO_DELIVER_THREAD_ID": "",
+            },
+            clear=False,
+        ), \
+             patch("gateway.config.load_gateway_config", return_value=config), \
              patch("tools.interrupt.is_interrupted", return_value=False), \
              patch("model_tools._run_async", side_effect=_run_async_immediately), \
              patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
@@ -96,6 +105,54 @@ class TestSendMessageTool:
             media_files=[],
         )
         mirror_mock.assert_called_once_with("slack", "C0APDPNRGVB", "hello", source_label="cli", thread_id=None)
+
+    def test_sends_to_explicit_slack_thread_target(self):
+        slack_cfg = SimpleNamespace(enabled=True, token="***", extra={})
+        config = SimpleNamespace(
+            platforms={Platform.SLACK: slack_cfg},
+            get_home_channel=lambda _platform: None,
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "HERMES_CRON_AUTO_DELIVER_PLATFORM": "",
+                "HERMES_CRON_AUTO_DELIVER_CHAT_ID": "",
+                "HERMES_CRON_AUTO_DELIVER_THREAD_ID": "",
+            },
+            clear=False,
+        ), \
+             patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "slack:C0APDPNRGVB:1740000000.123456",
+                        "message": "hello",
+                    }
+                )
+            )
+
+        assert result["success"] is True
+        send_mock.assert_awaited_once_with(
+            Platform.SLACK,
+            slack_cfg,
+            "C0APDPNRGVB",
+            "hello",
+            thread_id="1740000000.123456",
+            media_files=[],
+        )
+        mirror_mock.assert_called_once_with(
+            "slack",
+            "C0APDPNRGVB",
+            "hello",
+            source_label="cli",
+            thread_id="1740000000.123456",
+        )
 
     def test_cron_duplicate_target_is_skipped_and_explained(self):
         home = SimpleNamespace(chat_id="-1001")
@@ -576,6 +633,7 @@ class TestSendToPlatformChunking:
             "***",
             "C123",
             "*hello* from <https://example.com|Hermes>",
+            thread_id=None,
         )
 
     def test_slack_bold_italic_formatted_before_send(self, monkeypatch):
@@ -597,6 +655,28 @@ class TestSendToPlatformChunking:
         assert result["success"] is True
         sent_text = send.await_args.args[2]
         assert "*_important_*" in sent_text
+
+    def test_slack_member_id_mentions_are_normalized_before_send(self, monkeypatch):
+        """Known Slack member IDs should be sent in canonical <@U...> form."""
+        _ensure_slack_mock(monkeypatch)
+        import gateway.platforms.slack as slack_mod
+
+        monkeypatch.setattr(slack_mod, "SLACK_AVAILABLE", True)
+        send = AsyncMock(return_value={"success": True, "message_id": "1"})
+
+        with patch("tools.send_message_tool._send_slack", send):
+            result = asyncio.run(
+                _send_to_platform(
+                    Platform.SLACK,
+                    SimpleNamespace(enabled=True, token="***", extra={}),
+                    "C123",
+                    "Ping @U0APAQGJF7D and @channel",
+                )
+            )
+
+        assert result["success"] is True
+        sent_text = send.await_args.args[2]
+        assert "Ping <@U0APAQGJF7D> and @channel" == sent_text
 
     def test_slack_blockquote_formatted_before_send(self, monkeypatch):
         """Blockquote '>' markers must survive formatting (not escaped to '&gt;')."""
@@ -997,6 +1077,25 @@ class TestParseTargetRefMatrix:
         assert is_explicit is False
 
 
+class TestParseTargetRefSlack:
+    """_parse_target_ref correctly handles Slack channel and thread targets."""
+
+    def test_slack_channel_id_is_explicit(self):
+        chat_id, thread_id, is_explicit = _parse_target_ref("slack", "C0APDPNRGVB")
+        assert chat_id == "C0APDPNRGVB"
+        assert thread_id is None
+        assert is_explicit is True
+
+    def test_slack_channel_with_thread_ts_is_explicit(self):
+        chat_id, thread_id, is_explicit = _parse_target_ref(
+            "slack",
+            "C0APDPNRGVB:1740000000.123456",
+        )
+        assert chat_id == "C0APDPNRGVB"
+        assert thread_id == "1740000000.123456"
+        assert is_explicit is True
+
+
 class TestSendDiscordThreadId:
     """_send_discord uses thread_id when provided."""
 
@@ -1099,6 +1198,32 @@ class TestSendToPlatformDiscordThread:
         send_mock.assert_awaited_once()
         _, call_kwargs = send_mock.await_args
         assert call_kwargs["thread_id"] is None
+
+
+class TestSendToPlatformSlackThread:
+    """_send_to_platform passes thread_id through to _send_slack."""
+
+    def test_slack_thread_id_passed_to_send_slack(self, monkeypatch):
+        _ensure_slack_mock(monkeypatch)
+        import gateway.platforms.slack as slack_mod
+
+        monkeypatch.setattr(slack_mod, "SLACK_AVAILABLE", True)
+        send_mock = AsyncMock(return_value={"success": True, "message_id": "1"})
+
+        with patch("tools.send_message_tool._send_slack", send_mock):
+            result = asyncio.run(
+                _send_to_platform(
+                    Platform.SLACK,
+                    SimpleNamespace(enabled=True, token="tok", extra={}),
+                    "C0APDPNRGVB",
+                    "hello thread",
+                    thread_id="1740000000.123456",
+                )
+            )
+
+        assert result["success"] is True
+        send_mock.assert_awaited_once()
+        assert send_mock.await_args.kwargs["thread_id"] == "1740000000.123456"
 
 
 # ---------------------------------------------------------------------------
