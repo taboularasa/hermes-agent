@@ -168,6 +168,7 @@ AUTHOR_MAP = {
     "hata1234@gmail.com": "hata1234",
     "hmbown@gmail.com": "Hmbown",
     "iacobs@m0n5t3r.info": "m0n5t3r",
+    "david@hadto.net": "taboularasa",
     "jiayuw794@gmail.com": "JiayuuWang",
     "jonny@nousresearch.com": "jquesnelle",
     "juan.ovalle@mistral.ai": "jjovalle99",
