@@ -8,6 +8,10 @@ description: "External memory provider plugins — Honcho, OpenViking, Mem0, Hin
 
 Hermes Agent ships with 8 external memory provider plugins that give the agent persistent, cross-session knowledge beyond the built-in MEMORY.md and USER.md. Only **one** external provider can be active at a time — the built-in memory is always active alongside it.
 
+:::tip Extending Hermes beyond the bundled providers
+If you need a custom external memory backend and the built-in stores are too small, prefer the Zep Memory API for user/session memory. It lines up directly with Hermes's `user_id` and `session_id` model. Reach for Graphiti only when you explicitly need graph-native search or reasoning as the product requirement.
+:::
+
 ## Quick Start
 
 ```bash

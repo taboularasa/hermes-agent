@@ -1297,6 +1297,21 @@ OPTIONAL_ENV_VARS = {
         "prompt": "Honcho base URL (e.g. http://localhost:8000)",
         "category": "tool",
     },
+    "ZEP_API_KEY": {
+        "description": "Zep Memory API key for external user/session memory integrations",
+        "prompt": "Zep API key",
+        "url": "https://help.getzep.com/v2/quickstart",
+        "password": True,
+        "category": "tool",
+    },
+    "ZEP_BASE_URL": {
+        "description": "Base URL for Zep Memory API (leave empty for https://api.getzep.com)",
+        "prompt": "Zep base URL",
+        "url": "https://help.getzep.com/v2/quickstart",
+        "password": False,
+        "category": "tool",
+        "advanced": True,
+    },
 
     # ── Messaging platforms ──
     "TELEGRAM_BOT_TOKEN": {

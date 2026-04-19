@@ -399,6 +399,14 @@ class TestOptionalEnvVarsRegistry:
             all_vars.extend(vars_list)
         assert "TAVILY_API_KEY" in all_vars
 
+    def test_zep_env_vars_registered_for_external_memory_direction(self):
+        """Zep config hooks are available for custom memory-provider setups."""
+        from hermes_cli.config import OPTIONAL_ENV_VARS
+
+        assert OPTIONAL_ENV_VARS["ZEP_API_KEY"]["category"] == "tool"
+        assert OPTIONAL_ENV_VARS["ZEP_API_KEY"]["password"] is True
+        assert OPTIONAL_ENV_VARS["ZEP_BASE_URL"]["advanced"] is True
+
 
 class TestAnthropicTokenMigration:
     """Test that config version 8→9 clears ANTHROPIC_TOKEN."""

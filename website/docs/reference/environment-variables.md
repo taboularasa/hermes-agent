@@ -105,6 +105,8 @@ For native Anthropic auth, Hermes prefers Claude Code's own credential files whe
 | `GITHUB_TOKEN` | GitHub token for Skills Hub (higher API rate limits, skill publish) |
 | `HONCHO_API_KEY` | Cross-session user modeling ([honcho.dev](https://honcho.dev/)) |
 | `HONCHO_BASE_URL` | Base URL for self-hosted Honcho instances (default: Honcho cloud). No API key required for local instances |
+| `ZEP_API_KEY` | Zep Memory API key for custom external user/session memory providers ([help.getzep.com](https://help.getzep.com/v2/quickstart)) |
+| `ZEP_BASE_URL` | Base URL override for Zep Memory API (optional, defaults to `https://api.getzep.com`) |
 | `SUPERMEMORY_API_KEY` | Semantic long-term memory with profile recall and session ingest ([supermemory.ai](https://supermemory.ai)) |
 | `TINKER_API_KEY` | RL training ([tinker-console.thinkingmachines.ai](https://tinker-console.thinkingmachines.ai/)) |
 | `WANDB_API_KEY` | RL training metrics ([wandb.ai](https://wandb.ai/)) |
