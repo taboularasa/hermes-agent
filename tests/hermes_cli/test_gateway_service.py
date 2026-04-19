@@ -761,6 +761,7 @@ class TestGeneratedUnitUsesDetectedVenv:
         dot_venv = tmp_path / ".venv"
         dot_venv.mkdir()
         (dot_venv / "bin").mkdir()
+        (dot_venv / "bin" / "hermes").write_text("#!/bin/sh\n", encoding="utf-8")
 
         monkeypatch.setattr(gateway_cli, "_detect_venv_dir", lambda: dot_venv)
         monkeypatch.setattr(gateway_cli, "get_python_path", lambda: str(dot_venv / "bin" / "python"))
@@ -769,8 +770,49 @@ class TestGeneratedUnitUsesDetectedVenv:
 
         assert f"VIRTUAL_ENV={dot_venv}" in unit
         assert f"{dot_venv}/bin" in unit
+        assert f"ExecStart={dot_venv}/bin/hermes gateway run --replace" in unit
+        assert f"WorkingDirectory={tmp_path}" in unit
         # Must NOT contain a hardcoded /venv/ path
         assert "/venv/" not in unit or "/.venv/" in unit
+
+    def test_systemd_unit_prefers_detected_venv_parent_over_imported_project_root(self, tmp_path, monkeypatch):
+        imported_root = tmp_path / "upstream"
+        imported_root.mkdir()
+        fork_root = tmp_path / "fork"
+        venv = fork_root / "venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin" / "hermes").write_text("#!/bin/sh\n", encoding="utf-8")
+
+        monkeypatch.setattr(gateway_cli, "PROJECT_ROOT", imported_root)
+        monkeypatch.setattr(gateway_cli, "_detect_venv_dir", lambda: venv)
+        monkeypatch.setattr(gateway_cli, "get_python_path", lambda: str(venv / "bin" / "python"))
+
+        unit = gateway_cli.generate_systemd_unit(system=False)
+
+        assert f"ExecStart={venv}/bin/hermes gateway run --replace" in unit
+        assert f"WorkingDirectory={fork_root}" in unit
+        assert f"{fork_root}/node_modules/.bin" in unit
+        assert str(imported_root) not in unit
+
+    def test_launchd_plist_prefers_detected_venv_parent_over_imported_project_root(self, tmp_path, monkeypatch):
+        imported_root = tmp_path / "upstream"
+        imported_root.mkdir()
+        fork_root = tmp_path / "fork"
+        venv = fork_root / "venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin" / "hermes").write_text("#!/bin/sh\n", encoding="utf-8")
+
+        monkeypatch.setattr(gateway_cli, "PROJECT_ROOT", imported_root)
+        monkeypatch.setattr(gateway_cli, "_detect_venv_dir", lambda: venv)
+        monkeypatch.setattr(gateway_cli, "get_python_path", lambda: str(venv / "bin" / "python"))
+
+        plist = gateway_cli.generate_launchd_plist()
+
+        assert f"<string>{venv}/bin/hermes</string>" in plist
+        assert "<string>gateway</string>" in plist
+        assert f"<string>{fork_root}</string>" in plist
+        assert f"{fork_root}/node_modules/.bin" in plist
+        assert str(imported_root) not in plist
 
 
 class TestGeneratedUnitIncludesLocalBin:

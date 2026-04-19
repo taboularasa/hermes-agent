@@ -756,6 +756,64 @@ def get_python_path() -> str:
     return sys.executable
 
 
+def _service_project_root(detected_venv: Path | None = None) -> Path:
+    """Return the project root a generated service should anchor to.
+
+    When Hermes is invoked as ``python -m hermes_cli.main`` from a sibling
+    checkout, Python resolves ``hermes_cli`` from the current working
+    directory before the active virtualenv's editable install. That can
+    produce a split service definition with one checkout supplying
+    ``PROJECT_ROOT`` and another supplying ``VIRTUAL_ENV``.
+
+    If the active environment is a conventional in-repo ``venv`` or
+    ``.venv``, trust the venv parent as the install root for service
+    generation. Otherwise fall back to the imported module's PROJECT_ROOT.
+    """
+    venv = detected_venv or _detect_venv_dir()
+    if venv is not None and venv.name in {".venv", "venv"}:
+        parent = venv.parent
+        if parent.is_dir():
+            return parent.resolve()
+    return PROJECT_ROOT
+
+
+def _get_hermes_entrypoint_path(detected_venv: Path | None = None) -> str | None:
+    """Return the installed Hermes CLI script for the active environment."""
+    venv = detected_venv or _detect_venv_dir()
+    if venv is None:
+        return None
+
+    script_name = "hermes.exe" if is_windows() else "hermes"
+    bin_dir = venv / ("Scripts" if is_windows() else "bin")
+    hermes_path = bin_dir / script_name
+    if hermes_path.exists():
+        return str(hermes_path)
+    return None
+
+
+def _gateway_exec_parts(
+    *,
+    hermes_home: str,
+    detected_venv: Path | None = None,
+) -> list[str]:
+    """Return the argv used to start the gateway service."""
+    profile_arg = _profile_arg(hermes_home)
+    hermes_path = _get_hermes_entrypoint_path(detected_venv)
+    if hermes_path:
+        parts = [hermes_path]
+        if profile_arg:
+            parts.extend(profile_arg.split())
+        parts.extend(["gateway", "run", "--replace"])
+        return parts
+
+    python_path = get_python_path()
+    parts = [python_path, "-m", "hermes_cli.main"]
+    if profile_arg:
+        parts.extend(profile_arg.split())
+    parts.extend(["gateway", "run", "--replace"])
+    return parts
+
+
 # =============================================================================
 # Systemd (Linux)
 # =============================================================================
@@ -824,12 +882,12 @@ def _hermes_home_for_target_user(target_home_dir: str) -> str:
 
 
 def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) -> str:
-    python_path = get_python_path()
-    working_dir = str(PROJECT_ROOT)
     detected_venv = _detect_venv_dir()
-    venv_dir = str(detected_venv) if detected_venv else str(PROJECT_ROOT / "venv")
-    venv_bin = str(detected_venv / "bin") if detected_venv else str(PROJECT_ROOT / "venv" / "bin")
-    node_bin = str(PROJECT_ROOT / "node_modules" / ".bin")
+    service_root = _service_project_root(detected_venv)
+    working_dir = str(service_root)
+    venv_dir = str(detected_venv) if detected_venv else str(service_root / "venv")
+    venv_bin = str(detected_venv / "bin") if detected_venv else str(service_root / "venv" / "bin")
+    node_bin = str(service_root / "node_modules" / ".bin")
 
     path_entries = [venv_bin, node_bin]
     resolved_node = shutil.which("node")
@@ -844,19 +902,20 @@ def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) 
     if system:
         username, group_name, home_dir = _system_service_identity(run_as_user)
         hermes_home = _hermes_home_for_target_user(home_dir)
-        profile_arg = _profile_arg(hermes_home)
+        exec_parts = _gateway_exec_parts(hermes_home=hermes_home, detected_venv=detected_venv)
         # Remap all paths that may resolve under the calling user's home
         # (e.g. /root/) to the target user's home so the service can
         # actually access them.
-        python_path = _remap_path_for_user(python_path, home_dir)
         working_dir = _remap_path_for_user(working_dir, home_dir)
         venv_dir = _remap_path_for_user(venv_dir, home_dir)
         venv_bin = _remap_path_for_user(venv_bin, home_dir)
         node_bin = _remap_path_for_user(node_bin, home_dir)
+        exec_parts = [_remap_path_for_user(part, home_dir) if part.startswith("/") else part for part in exec_parts]
         path_entries = [_remap_path_for_user(p, home_dir) for p in path_entries]
         path_entries.extend(_build_user_local_paths(Path(home_dir), path_entries))
         path_entries.extend(common_bin_paths)
         sane_path = ":".join(path_entries)
+        exec_start = " ".join(exec_parts)
         return f"""[Unit]
 Description={SERVICE_DESCRIPTION}
 After=network-online.target
@@ -868,7 +927,7 @@ StartLimitBurst=5
 Type=simple
 User={username}
 Group={group_name}
-ExecStart={python_path} -m hermes_cli.main{f" {profile_arg}" if profile_arg else ""} gateway run --replace
+ExecStart={exec_start}
 WorkingDirectory={working_dir}
 Environment="HOME={home_dir}"
 Environment="USER={username}"
@@ -891,10 +950,11 @@ WantedBy=multi-user.target
 """
 
     hermes_home = str(get_hermes_home().resolve())
-    profile_arg = _profile_arg(hermes_home)
+    exec_parts = _gateway_exec_parts(hermes_home=hermes_home, detected_venv=detected_venv)
     path_entries.extend(_build_user_local_paths(Path.home(), path_entries))
     path_entries.extend(common_bin_paths)
     sane_path = ":".join(path_entries)
+    exec_start = " ".join(exec_parts)
     return f"""[Unit]
 Description={SERVICE_DESCRIPTION}
 After=network.target
@@ -903,7 +963,7 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-ExecStart={python_path} -m hermes_cli.main{f" {profile_arg}" if profile_arg else ""} gateway run --replace
+ExecStart={exec_start}
 WorkingDirectory={working_dir}
 Environment="PATH={sane_path}"
 Environment="VIRTUAL_ENV={venv_dir}"
@@ -1288,22 +1348,21 @@ def _launchd_domain() -> str:
 
 
 def generate_launchd_plist() -> str:
-    python_path = get_python_path()
-    working_dir = str(PROJECT_ROOT)
+    detected_venv = _detect_venv_dir()
+    service_root = _service_project_root(detected_venv)
+    working_dir = str(service_root)
     hermes_home = str(get_hermes_home().resolve())
     log_dir = get_hermes_home() / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     label = get_launchd_label()
-    profile_arg = _profile_arg(hermes_home)
     # Build a sane PATH for the launchd plist.  launchd provides only a
     # minimal default (/usr/bin:/bin:/usr/sbin:/sbin) which misses Homebrew,
     # nvm, cargo, etc.  We prepend venv/bin and node_modules/.bin (matching
     # the systemd unit), then capture the user's full shell PATH so every
     # user-installed tool (node, ffmpeg, …) is reachable.
-    detected_venv = _detect_venv_dir()
-    venv_bin = str(detected_venv / "bin") if detected_venv else str(PROJECT_ROOT / "venv" / "bin")
-    venv_dir = str(detected_venv) if detected_venv else str(PROJECT_ROOT / "venv")
-    node_bin = str(PROJECT_ROOT / "node_modules" / ".bin")
+    venv_bin = str(detected_venv / "bin") if detected_venv else str(service_root / "venv" / "bin")
+    venv_dir = str(detected_venv) if detected_venv else str(service_root / "venv")
+    node_bin = str(service_root / "node_modules" / ".bin")
     # Resolve the directory containing the node binary (e.g. Homebrew, nvm)
     # so it's explicitly in PATH even if the user's shell PATH changes later.
     priority_dirs = [venv_bin, node_bin]
@@ -1317,19 +1376,10 @@ def generate_launchd_plist() -> str:
     )
 
     # Build ProgramArguments array, including --profile when using a named profile
-    prog_args = [
-        f"<string>{python_path}</string>",
-        "<string>-m</string>",
-        "<string>hermes_cli.main</string>",
-    ]
-    if profile_arg:
-        for part in profile_arg.split():
-            prog_args.append(f"<string>{part}</string>")
-    prog_args.extend([
-        "<string>gateway</string>",
-        "<string>run</string>",
-        "<string>--replace</string>",
-    ])
+    prog_args = [f"<string>{part}</string>" for part in _gateway_exec_parts(
+        hermes_home=hermes_home,
+        detected_venv=detected_venv,
+    )]
     prog_args_xml = "\n        ".join(prog_args)
 
     return f"""<?xml version="1.0" encoding="UTF-8"?>
