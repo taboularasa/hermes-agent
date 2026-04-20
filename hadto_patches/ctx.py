@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,7 +30,18 @@ from utils import atomic_json_write
 
 logger = logging.getLogger(__name__)
 
-_BINDINGS_LOCK = threading.Lock()
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
+
+_BINDINGS_LOCK = threading.RLock()
+_BINDINGS_LOCK_STATE = threading.local()
 _CTX_DAEMON_RECOVERY_LOCK = threading.Lock()
 _DEFAULT_DAEMON_URL = "http://127.0.0.1:19876"
 _DEFAULT_DATA_DIR = "~/.ctx-data"
@@ -194,8 +206,62 @@ def _save_bindings(data: Dict[str, Any], bindings_path: Optional[Path] = None) -
     atomic_json_write(_ctx_bindings_path(bindings_path), data)
 
 
-def _load_binding_record(session_id: str, bindings_path: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+def _ctx_bindings_lock_path(bindings_path: Optional[Path] = None) -> Path:
+    path = _ctx_bindings_path(bindings_path)
+    return path.with_suffix(path.suffix + ".lock")
+
+
+@contextmanager
+def _bindings_store_lock(bindings_path: Optional[Path] = None):
+    """Serialize ctx binding read/modify/write cycles across processes."""
+
     with _BINDINGS_LOCK:
+        if getattr(_BINDINGS_LOCK_STATE, "depth", 0) > 0:
+            _BINDINGS_LOCK_STATE.depth += 1
+            try:
+                yield
+            finally:
+                _BINDINGS_LOCK_STATE.depth -= 1
+            return
+
+        lock_path = _ctx_bindings_lock_path(bindings_path)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if fcntl is None and msvcrt is None:
+            _BINDINGS_LOCK_STATE.depth = 1
+            try:
+                yield
+            finally:
+                _BINDINGS_LOCK_STATE.depth = 0
+            return
+
+        if msvcrt and (not lock_path.exists() or lock_path.stat().st_size == 0):
+            lock_path.write_text(" ", encoding="utf-8")
+
+        with lock_path.open("r+" if msvcrt else "a+") as lock_file:
+            if fcntl:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            else:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+
+            _BINDINGS_LOCK_STATE.depth = 1
+            try:
+                yield
+            finally:
+                _BINDINGS_LOCK_STATE.depth = 0
+                if fcntl:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                elif msvcrt:
+                    try:
+                        lock_file.seek(0)
+                        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                    except (OSError, IOError):
+                        pass
+
+
+def _load_binding_record(session_id: str, bindings_path: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+    with _bindings_store_lock(bindings_path):
         data = _load_bindings(bindings_path)
         record = data.get("sessions", {}).get(session_id)
         return dict(record) if isinstance(record, dict) else None
@@ -415,7 +481,7 @@ def normalize_ctx_bindings(
     now = now or datetime.now(timezone.utc)
     active_codex_indexes = _load_active_codex_handoff_indexes(runs_path=codex_runs_path, now=now)
     try:
-        with _BINDINGS_LOCK:
+        with _bindings_store_lock(bindings_path):
             data = _load_bindings(bindings_path)
             sessions = data.setdefault("sessions", {})
             if not isinstance(sessions, dict):
@@ -481,7 +547,7 @@ def retire_ctx_binding(
     active_codex_indexes = (
         _load_active_codex_handoff_indexes(runs_path=codex_runs_path) if preserve_codex_handoff else None
     )
-    with _BINDINGS_LOCK:
+    with _bindings_store_lock():
         data = _load_bindings()
         record = data.get("sessions", {}).get(session_id)
         if isinstance(record, dict):
@@ -502,7 +568,7 @@ def retire_ctx_binding(
 
 
 def _persist_binding(binding: CtxBinding) -> None:
-    with _BINDINGS_LOCK:
+    with _bindings_store_lock():
         data = _load_bindings()
         sessions = data.setdefault("sessions", {})
         record = asdict(binding)

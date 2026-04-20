@@ -1,7 +1,11 @@
 import io
 import json
+import os
 import subprocess
+import sys
+import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -661,6 +665,119 @@ def test_normalize_ctx_bindings_accepts_explicit_bindings_path(tmp_path):
     assert record["sessions"][session_id]["active"] is False
     assert record["sessions"][session_id]["reason"] == "ctx binding retired: stale active binding (>12h)"
     assert record["sessions"][session_id]["updated_at"] == now.isoformat()
+
+
+def test_ctx_binding_store_serializes_cross_process_updates(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    now = datetime(2026, 4, 20, 12, 22, 50, tzinfo=timezone.utc)
+    updated_at = (now - timedelta(hours=13)).isoformat()
+    worktree = tmp_path / "ctx-data" / "worktrees" / "ws-1" / "wt-old"
+    worktree.mkdir(parents=True, exist_ok=True)
+    bindings_path = _write_binding_record(
+        tmp_path,
+        "sess-old",
+        {
+            "active": True,
+            "reason": "ctx task bound",
+            "session_id": "sess-old",
+            "platform": "cli",
+            "workspace_id": "ws-1",
+            "task_id": "task-old",
+            "worktree_id": "wt-old",
+            "worktree_path": str(worktree),
+            "updated_at": updated_at,
+            "created_at": updated_at,
+            "source": "ctx-daemon",
+        },
+    )
+    ready_marker = tmp_path / "ctx" / "normalize.ready"
+    repo_root = Path(__file__).resolve().parents[2]
+    env = os.environ.copy()
+    env["HERMES_HOME"] = str(tmp_path)
+
+    normalize_script = """
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+from hermes_cli import ctx_runtime
+
+bindings_path = Path(sys.argv[1])
+ready_marker = Path(sys.argv[2])
+now = datetime.fromisoformat(sys.argv[3])
+original = ctx_runtime._load_bindings
+
+def slow_load(path=None):
+    data = original(path)
+    ready_marker.write_text("ready", encoding="utf-8")
+    time.sleep(0.4)
+    return data
+
+ctx_runtime._load_bindings = slow_load
+ctx_runtime.normalize_ctx_bindings(bindings_path=bindings_path, now=now)
+"""
+    persist_script = """
+import sys
+from pathlib import Path
+from hermes_cli import ctx_runtime
+
+root = Path(sys.argv[1])
+worktree = root / "ctx-data" / "worktrees" / "ws-1" / "wt-new"
+worktree.mkdir(parents=True, exist_ok=True)
+ctx_runtime._persist_binding(ctx_runtime.CtxBinding(
+    active=True,
+    reason="ctx task bound",
+    session_id="sess-new",
+    platform="cli",
+    workspace_id="ws-1",
+    task_id="task-new",
+    worktree_id="wt-new",
+    worktree_path=str(worktree),
+    source="ctx-daemon",
+))
+"""
+
+    normalize_proc = subprocess.Popen(
+        [sys.executable, "-c", normalize_script, str(bindings_path), str(ready_marker), now.isoformat()],
+        cwd=repo_root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    deadline = time.time() + 5
+    while not ready_marker.exists():
+        if normalize_proc.poll() is not None:
+            stdout, stderr = normalize_proc.communicate()
+            pytest.fail(f"normalize process exited early: stdout={stdout} stderr={stderr}")
+        if time.time() >= deadline:
+            normalize_proc.kill()
+            stdout, stderr = normalize_proc.communicate()
+            pytest.fail(f"normalize process never reached load barrier: stdout={stdout} stderr={stderr}")
+        time.sleep(0.01)
+
+    persist_result = subprocess.run(
+        [sys.executable, "-c", persist_script, str(tmp_path)],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    normalize_stdout, normalize_stderr = normalize_proc.communicate(timeout=10)
+
+    assert persist_result.returncode == 0, persist_result.stderr
+    assert normalize_proc.returncode == 0, normalize_stderr
+
+    record = json.loads(bindings_path.read_text(encoding="utf-8"))
+
+    assert record["sessions"]["sess-old"]["active"] is False
+    assert record["sessions"]["sess-old"]["reason"] == "ctx binding retired: stale active binding (>12h)"
+    assert record["sessions"]["sess-old"]["updated_at"] == now.isoformat()
+    assert record["sessions"]["sess-new"]["active"] is True
+    assert record["sessions"]["sess-new"]["task_id"] == "task-new"
+    assert normalize_stdout == ""
 
 
 def test_normalize_ctx_bindings_deactivates_stale_active_session(monkeypatch, tmp_path):
