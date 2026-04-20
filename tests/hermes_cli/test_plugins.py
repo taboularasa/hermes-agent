@@ -191,6 +191,26 @@ class TestPluginLoading:
 
         assert "hermes_plugins.ns_plugin" in sys.modules
 
+    def test_load_applies_runtime_plugin_compatibility(self, tmp_path, monkeypatch):
+        """Plugin loading passes the live module context into compatibility shims."""
+        plugins_dir = tmp_path / "hermes_test" / "plugins"
+        plugin_dir = _make_plugin_dir(plugins_dir, "compat_plugin")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_test"))
+
+        calls: list[tuple[str, str | None, str | None]] = []
+
+        def fake_apply(plugin_name: str, *, plugin_path: str | None = None, module=None) -> None:
+            calls.append((plugin_name, plugin_path, getattr(module, "__name__", None)))
+
+        monkeypatch.setattr("hermes_cli.plugins.apply_runtime_plugin_compatibility", fake_apply)
+
+        mgr = PluginManager()
+        mgr.discover_and_load()
+
+        assert calls == [
+            ("compat_plugin", str(plugin_dir), "hermes_plugins.compat_plugin"),
+        ]
+
 
 # ── TestPluginHooks ────────────────────────────────────────────────────────
 
