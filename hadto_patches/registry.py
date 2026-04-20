@@ -299,17 +299,24 @@ class ToolRegistry:
             result.append({"type": "function", "function": schema_with_name})
         return result
 
-    def dispatch(self, name: str, args: dict, **kwargs) -> str:
-        """Execute a tool handler by name."""
+    def dispatch(self, name: str, args: dict | None, **kwargs) -> str:
+        """Execute a tool handler by name.
+
+        ``None`` is normalized to ``{}`` so zero-argument tool calls do not
+        crash handlers that read optional fields via ``args.get(...)``. Other
+        non-dict payloads pass through unchanged so genuinely invalid input
+        still surfaces as a handler error.
+        """
         entry = self.get_entry(name)
         if not entry:
             return json.dumps({"error": f"Unknown tool: {name}"})
+        handler_args = {} if args is None else args
         try:
             if entry.is_async:
                 from model_tools import _run_async
 
-                return _run_async(entry.handler(args, **kwargs))
-            return entry.handler(args, **kwargs)
+                return _run_async(entry.handler(handler_args, **kwargs))
+            return entry.handler(handler_args, **kwargs)
         except Exception as e:
             logger.exception("Tool %s dispatch error: %s", name, e)
             return json.dumps(

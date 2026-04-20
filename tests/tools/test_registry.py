@@ -47,6 +47,37 @@ class TestRegisterAndDispatch:
         result = json.loads(reg.dispatch("echo", {"msg": "hi"}))
         assert result == {"msg": "hi"}
 
+    def test_dispatch_normalizes_none_args_to_empty_dict(self):
+        reg = ToolRegistry()
+
+        def dict_only_handler(args, **kw):
+            return json.dumps({"arg_type": type(args).__name__, "msg": args.get("msg")})
+
+        reg.register(
+            name="echo",
+            toolset="core",
+            schema=_make_schema("echo"),
+            handler=dict_only_handler,
+        )
+        result = json.loads(reg.dispatch("echo", None))
+        assert result == {"arg_type": "dict", "msg": None}
+
+    def test_dispatch_preserves_non_none_invalid_args(self):
+        reg = ToolRegistry()
+
+        def dict_only_handler(args, **kw):
+            return json.dumps({"msg": args.get("msg")})
+
+        reg.register(
+            name="echo",
+            toolset="core",
+            schema=_make_schema("echo"),
+            handler=dict_only_handler,
+        )
+        result = json.loads(reg.dispatch("echo", []))
+        assert "error" in result
+        assert "AttributeError" in result["error"]
+
 
 class TestGetDefinitions:
     def test_returns_openai_format(self):
