@@ -1,6 +1,13 @@
 """Tests for plugin runtime compatibility helpers."""
 
-from hermes_cli.plugin_compat import migrate_legacy_hadto_capability_ledger_payload
+import json
+from types import SimpleNamespace
+
+from hermes_cli import plugin_compat
+from hermes_cli.plugin_compat import (
+    _migrate_hadto_capability_ledger_file,
+    migrate_legacy_hadto_capability_ledger_payload,
+)
 
 
 def test_migrate_legacy_hadto_capability_ledger_payload_shapes_current_contract():
@@ -134,3 +141,62 @@ def test_migrate_legacy_hadto_capability_ledger_payload_shapes_current_contract(
     assert evidence["source_kind"] == "log"
     assert evidence["source_ref"] == "/tmp/hadto.log"
     assert evidence["summary"] == "Ledger recovery log"
+
+
+def test_migrate_hadto_capability_ledger_file_uses_active_profile_when_default_path_missing(
+    tmp_path,
+    monkeypatch,
+):
+    hermes_home = tmp_path / "profile-home"
+    ledger_path = hermes_home / "self_improvement" / "capability_ledger.json"
+    ledger_path.parent.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    legacy_payload = {
+        "version": "legacy-v0",
+        "updated_at": "2026-04-20T07:00:00+00:00",
+        "capabilities": [
+            {
+                "id": "capability.legacy.pipeline",
+                "title": "Legacy pipeline",
+                "lane_affinity": "Growth",
+                "change_surface": "pipeline",
+            }
+        ],
+        "gaps": [
+            {
+                "id": "gap.legacy.pipeline",
+                "capability_ids": ["capability.legacy.pipeline"],
+            }
+        ],
+        "interventions": [
+            {
+                "id": "intervention.legacy.pipeline",
+                "capability_ids": ["capability.legacy.pipeline"],
+                "target_surface": "pipeline",
+            }
+        ],
+    }
+    ledger_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+
+    class FakeCapabilityLedger:
+        @classmethod
+        def model_validate(cls, payload):
+            if payload.get("contract_version") != "v1":
+                raise ValueError("legacy payload")
+            if "version" in payload:
+                raise ValueError("legacy keys still present")
+            return payload
+
+    fake_module = SimpleNamespace(
+        CapabilityLedger=FakeCapabilityLedger,
+        CAPABILITY_LEDGER_CONTRACT_VERSION="v1",
+    )
+
+    migrated = _migrate_hadto_capability_ledger_file(fake_module)
+
+    assert migrated is True
+    saved = json.loads(ledger_path.read_text(encoding="utf-8"))
+    assert saved["contract_version"] == "v1"
+    assert "version" not in saved
+    assert saved["interventions"][0]["change_surface"] == "pipeline"

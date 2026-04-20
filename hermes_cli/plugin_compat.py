@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from hermes_constants import get_hermes_home
 from utils import atomic_json_write
 
 logger = logging.getLogger(__name__)
@@ -158,6 +159,7 @@ def _patch_hadto_capability_ledger(module: Any) -> None:
     contract_version = str(getattr(module, "CAPABILITY_LEDGER_CONTRACT_VERSION", "v1") or "v1")
 
     if callable(original_coerce):
+
         def _compat_coerce(payload: Any, *, now: datetime | None = None):  # type: ignore[override]
             try:
                 return original_coerce(payload, now=now)
@@ -179,7 +181,11 @@ def _patch_hadto_capability_ledger(module: Any) -> None:
 
 def _migrate_hadto_capability_ledger_file(module: Any) -> bool:
     ledger_path = Path(
-        getattr(module, "DEFAULT_CAPABILITY_LEDGER_PATH", Path.home() / ".hermes" / "self_improvement" / "capability_ledger.json")
+        getattr(
+            module,
+            "DEFAULT_CAPABILITY_LEDGER_PATH",
+            get_hermes_home() / "self_improvement" / "capability_ledger.json",
+        )
     )
     if not ledger_path.exists():
         return False
@@ -332,7 +338,9 @@ def _migrate_legacy_outcome(record: dict[str, Any]) -> dict[str, Any] | None:
         "intervention_id": _first_text(record, "intervention_id"),
         "verification_ids": _string_list(record.get("verification_ids") or record.get("verification_target_ids")),
         "result_status": _normalize_outcome_status(record),
-        "evidence_ref_ids": _string_list(record.get("evidence_ref_ids") or record.get("evidence_refs") or record.get("evidence_ids")),
+        "evidence_ref_ids": _string_list(
+            record.get("evidence_ref_ids") or record.get("evidence_refs") or record.get("evidence_ids")
+        ),
         "delta_summary": _first_text(record, "delta_summary", "detail", "notes", "summary") or "",
         "next_decision": _first_text(record, "next_decision", "recommended_next_step") or "",
     }
