@@ -343,7 +343,11 @@ def coerce_tool_args(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     Handles ``"type": "integer"``, ``"type": "number"``, ``"type": "boolean"``,
     and union types (``"type": ["integer", "string"]``).
     """
-    if not args or not isinstance(args, dict):
+    if args is None:
+        return {}
+    if not isinstance(args, dict):
+        return {}
+    if not args:
         return args
 
     schema = registry.get_schema(tool_name)
@@ -450,7 +454,8 @@ def handle_function_call(
     Returns:
         Function result as a JSON string.
     """
-    # Coerce string arguments to their schema-declared types (e.g. "42"→42)
+    # Normalize zero-arg tool calls to an empty dict before hooks or handlers
+    # see them, then coerce string arguments to schema-declared types.
     function_args = coerce_tool_args(function_name, function_args)
 
     try:
