@@ -47,6 +47,21 @@ class TestRegisterAndDispatch:
         result = json.loads(reg.dispatch("echo", {"msg": "hi"}))
         assert result == {"msg": "hi"}
 
+    def test_dispatch_coerces_none_args_to_empty_dict(self):
+        reg = ToolRegistry()
+
+        def echo_handler(args, **kw):
+            return json.dumps(args)
+
+        reg.register(
+            name="echo_none",
+            toolset="core",
+            schema=_make_schema("echo_none"),
+            handler=echo_handler,
+        )
+        result = json.loads(reg.dispatch("echo_none", None))
+        assert result == {}
+
 
 class TestGetDefinitions:
     def test_returns_openai_format(self):

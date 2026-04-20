@@ -13,6 +13,7 @@ from model_tools import (
     _LEGACY_TOOLSET_MAP,
     TOOL_TO_TOOLSET_MAP,
 )
+from tools.registry import registry
 
 
 # =========================================================================
@@ -39,6 +40,30 @@ class TestHandleFunctionCall:
         assert "error" in parsed
         assert len(parsed["error"]) > 0
         assert "error" in parsed["error"].lower() or "failed" in parsed["error"].lower()
+
+    def test_none_args_reach_handler_as_empty_dict(self):
+        tool_name = "test_none_args_dispatch"
+        registry.register(
+            name=tool_name,
+            toolset="test",
+            schema={
+                "name": tool_name,
+                "description": "Test tool for None args dispatch.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+            handler=lambda args, **kw: json.dumps({"args": args}),
+        )
+
+        try:
+            with (
+                patch("hermes_cli.plugins.get_pre_tool_call_block_message", return_value=None),
+                patch("hermes_cli.plugins.invoke_hook"),
+            ):
+                result = json.loads(handle_function_call(tool_name, None))
+        finally:
+            registry.deregister(tool_name)
+
+        assert result == {"args": {}}
 
     def test_tool_hooks_receive_session_and_tool_call_ids(self):
         with (
