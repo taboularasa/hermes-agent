@@ -4,15 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    paths:
-      - 'flake.nix'
-      - 'flake.lock'
-      - 'nix/**'
-      - 'pyproject.toml'
-      - 'uv.lock'
-      - 'hermes_cli/**'
-      - 'run_agent.py'
-      - 'acp_adapter/**'
+    branches: [main]
 
 permissions:
   contents: read
