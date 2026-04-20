@@ -198,7 +198,7 @@ class TestCoerceToolArgs:
         assert coerce_tool_args("test_tool", {}) == {}
 
     def test_none_args(self):
-        assert coerce_tool_args("test_tool", None) is None
+        assert coerce_tool_args("test_tool", None) == {}
 
     def test_preserves_non_string_values(self):
         """Lists, dicts, and other non-string values are never touched."""
