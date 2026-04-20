@@ -74,6 +74,63 @@ class TestHandleFunctionCall:
             ),
         ]
 
+    def test_honcho_compat_kwargs_are_accepted(self):
+        with patch("model_tools.registry.dispatch", return_value='{"ok":true}') as mock_dispatch:
+            result = handle_function_call(
+                "web_search",
+                {"q": "test"},
+                task_id="task-1",
+                honcho_manager=object(),
+                honcho_session_key="gateway-session",
+            )
+
+        assert result == '{"ok":true}'
+        mock_dispatch.assert_called_once_with(
+            "web_search",
+            {"q": "test"},
+            task_id="task-1",
+            user_task=None,
+        )
+
+    def test_none_args_are_normalized_before_hooks_and_dispatch(self):
+        with (
+            patch("model_tools.registry.dispatch", return_value='{"ok":true}') as mock_dispatch,
+            patch("hermes_cli.plugins.get_pre_tool_call_block_message", return_value=None) as mock_block,
+            patch("hermes_cli.plugins.invoke_hook") as mock_invoke_hook,
+        ):
+            result = handle_function_call(
+                "web_search",
+                None,
+                task_id="task-1",
+                tool_call_id="call-1",
+                session_id="session-1",
+            )
+
+        assert result == '{"ok":true}'
+        mock_block.assert_called_once_with(
+            "web_search",
+            {},
+            task_id="task-1",
+            session_id="session-1",
+            tool_call_id="call-1",
+        )
+        mock_dispatch.assert_called_once_with(
+            "web_search",
+            {},
+            task_id="task-1",
+            user_task=None,
+        )
+        assert mock_invoke_hook.call_args_list == [
+            call(
+                "post_tool_call",
+                tool_name="web_search",
+                args={},
+                result='{"ok":true}',
+                task_id="task-1",
+                session_id="session-1",
+                tool_call_id="call-1",
+            ),
+        ]
 
 # =========================================================================
 # Agent loop tools
@@ -174,6 +231,39 @@ class TestPreToolCallBlocking:
         # is not called — invoke_hook fires directly in the skip=True branch.
         assert "pre_tool_call" in hook_calls
         assert "post_tool_call" in hook_calls
+
+    def test_skip_flag_normalizes_none_args_for_observer_hook(self, monkeypatch):
+        hook_calls = []
+
+        def fake_invoke_hook(hook_name, **kwargs):
+            hook_calls.append((hook_name, kwargs))
+            return []
+
+        monkeypatch.setattr("hermes_cli.plugins.invoke_hook", fake_invoke_hook)
+        monkeypatch.setattr("model_tools.registry.dispatch",
+                            lambda *a, **kw: json.dumps({"ok": True}))
+
+        result = json.loads(handle_function_call("web_search", None, task_id="t1",
+                                                 skip_pre_tool_call_hook=True))
+
+        assert result == {"ok": True}
+        assert hook_calls == [
+            ("pre_tool_call", {
+                "tool_name": "web_search",
+                "args": {},
+                "task_id": "t1",
+                "session_id": "",
+                "tool_call_id": "",
+            }),
+            ("post_tool_call", {
+                "tool_name": "web_search",
+                "args": {},
+                "result": json.dumps({"ok": True}),
+                "task_id": "t1",
+                "session_id": "",
+                "tool_call_id": "",
+            }),
+        ]
 
 
 # =========================================================================

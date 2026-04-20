@@ -20,9 +20,14 @@ import json
 import logging
 import threading
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_tool_args(args: Any) -> dict:
+    """Normalize tool-call args to the dict shape expected by handlers."""
+    return args if isinstance(args, dict) else {}
 
 
 def _is_registry_register_call(node: ast.AST) -> bool:
@@ -299,11 +304,12 @@ class ToolRegistry:
         entry = self.get_entry(name)
         if not entry:
             return json.dumps({"error": f"Unknown tool: {name}"})
+        normalized_args = _normalize_tool_args(args)
         try:
             if entry.is_async:
                 from model_tools import _run_async
-                return _run_async(entry.handler(args, **kwargs))
-            return entry.handler(args, **kwargs)
+                return _run_async(entry.handler(normalized_args, **kwargs))
+            return entry.handler(normalized_args, **kwargs)
         except Exception as e:
             logger.exception("Tool %s dispatch error: %s", name, e)
             return json.dumps({"error": f"Tool execution failed: {type(e).__name__}: {e}"})
