@@ -13,6 +13,7 @@ from model_tools import (
     _LEGACY_TOOLSET_MAP,
     TOOL_TO_TOOLSET_MAP,
 )
+from tools.registry import registry
 
 
 # =========================================================================
@@ -39,6 +40,30 @@ class TestHandleFunctionCall:
         assert "error" in parsed
         assert len(parsed["error"]) > 0
         assert "error" in parsed["error"].lower() or "failed" in parsed["error"].lower()
+
+    def test_none_args_are_normalized_for_dict_only_handlers(self):
+        tool_name = "plugin_none_args_probe"
+
+        def dict_only_handler(args, **kw):
+            return json.dumps({"arg_type": type(args).__name__, "msg": args.get("msg")})
+
+        registry.register(
+            name=tool_name,
+            toolset="plugin-probe",
+            schema={
+                "name": tool_name,
+                "description": "Probe tool for None-args dispatch normalization.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+            handler=dict_only_handler,
+        )
+
+        try:
+            result = json.loads(handle_function_call(tool_name, None))
+        finally:
+            registry.deregister(tool_name)
+
+        assert result == {"arg_type": "dict", "msg": None}
 
     def test_tool_hooks_receive_session_and_tool_call_ids(self):
         with (
