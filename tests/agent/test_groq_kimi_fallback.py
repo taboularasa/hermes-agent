@@ -186,7 +186,11 @@ def test_stream_failure_after_first_token_does_not_fall_back(monkeypatch):
     deltas = []
     result = agent.run_conversation("hello", stream_callback=deltas.append)
 
-    assert result["final_response"] == "partial"
+    assert result["failed"] is True
+    assert result["partial"] is True
+    assert result["final_response"] is None
+    assert result["partial_response"] == "partial"
+    assert "socket closed" in result["error"]
     assert deltas == ["partial"]
     groq_client.chat.completions.create.assert_not_called()
 
