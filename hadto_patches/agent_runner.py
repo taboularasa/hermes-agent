@@ -94,6 +94,17 @@ from agent.context_compressor import ContextCompressor
 from agent.prompt_caching import apply_anthropic_cache_control
 from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, DEVELOPER_ROLE_MODELS
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
+from agent.llm_fallback import (
+    append_automatic_groq_fallback,
+    annotate_response_provider,
+    bad_input_error as _llm_bad_input_error,
+    fallback_reason_for_error,
+    is_groq_kimi_provider,
+    llm_provider_label,
+    primary_retry_limit,
+    record_groq_fallback,
+    translate_kimi_chat_params,
+)
 from agent.display import (
     KawaiiSpinner, build_tool_preview as _build_tool_preview,
     get_cute_tool_message as _get_cute_tool_message_impl,
@@ -1066,6 +1077,12 @@ class AIAgent:
             self._fallback_chain = [fallback_model]
         else:
             self._fallback_chain = []
+        self._fallback_chain = append_automatic_groq_fallback(
+            self._fallback_chain,
+            primary_provider=self.provider,
+            primary_base_url=self.base_url,
+            primary_api_mode=self.api_mode,
+        )
         self._fallback_index = 0
         self._fallback_activated = False
         # Legacy attribute kept for backward compat (tests, external callers)
@@ -4997,6 +5014,8 @@ class AIAgent:
                     pool=30.0,
                 ),
             }
+            if is_groq_kimi_provider(self.provider, self.base_url):
+                stream_kwargs = translate_kimi_chat_params(stream_kwargs)
             request_client_holder["client"] = self._create_request_openai_client(
                 reason="chat_completion_stream_request"
             )
@@ -5560,7 +5579,12 @@ class AIAgent:
         return None
 
 
-    def _try_activate_fallback(self) -> bool:
+    def _try_activate_fallback(
+        self,
+        *,
+        reason: Optional[str] = None,
+        error: Optional[BaseException] = None,
+    ) -> bool:
         """Switch to the next fallback model/provider in the chain.
 
         Called when the current model is failing after retries.  Swaps the
@@ -5580,7 +5604,7 @@ class AIAgent:
         fb_provider = (fb.get("provider") or "").strip().lower()
         fb_model = (fb.get("model") or "").strip()
         if not fb_provider or not fb_model:
-            return self._try_activate_fallback()  # skip invalid, try next
+            return self._try_activate_fallback(reason=reason, error=error)  # skip invalid, try next
 
         # Use centralized router for client construction.
         # raw_codex=True because the main agent needs direct responses.stream()
@@ -5606,7 +5630,7 @@ class AIAgent:
                 logging.warning(
                     "Fallback to %s failed: provider not configured",
                     fb_provider)
-                return self._try_activate_fallback()  # try next in chain
+                return self._try_activate_fallback(reason=reason, error=error)  # try next in chain
 
             try:
                 from hermes_cli.model_normalize import normalize_model_for_provider
@@ -5692,6 +5716,12 @@ class AIAgent:
                 f"🔄 Primary model failed — switching to fallback: "
                 f"{fb_model} via {fb_provider}"
             )
+            if is_groq_kimi_provider(fb_provider, fb_base_url):
+                record_groq_fallback(
+                    logger,
+                    reason=reason or fallback_reason_for_error(error) or "provider_error",
+                    error=error,
+                )
             logging.info(
                 "Fallback activated: %s → %s (%s)",
                 old_model, fb_model, fb_provider,
@@ -5699,7 +5729,7 @@ class AIAgent:
             return True
         except Exception as e:
             logging.error("Failed to activate fallback %s: %s", fb_model, e)
-            return self._try_activate_fallback()  # try next in chain
+            return self._try_activate_fallback(reason=reason, error=error)  # try next in chain
 
     # ── Per-turn primary restoration ─────────────────────────────────────
 
@@ -6224,6 +6254,9 @@ class AIAgent:
 
         if self.request_overrides:
             api_kwargs.update(self.request_overrides)
+
+        if is_groq_kimi_provider(self.provider, self.base_url):
+            api_kwargs = translate_kimi_chat_params(api_kwargs)
 
         return api_kwargs
 
@@ -7958,6 +7991,10 @@ class AIAgent:
                         )
                     else:
                         response = self._interruptible_api_call(api_kwargs)
+                    annotate_response_provider(
+                        response,
+                        llm_provider_label(self.provider, self.base_url),
+                    )
                     
                     api_duration = time.time() - api_start_time
                     
@@ -8032,7 +8069,7 @@ class AIAgent:
                         # rather than retrying with extended backoff.
                         if self._fallback_index < len(self._fallback_chain):
                             self._emit_status("⚠️ Empty/malformed response — switching to fallback...")
-                        if self._try_activate_fallback():
+                        if self._try_activate_fallback(reason="invalid_response"):
                             retry_count = 0
                             continue
 
@@ -8067,7 +8104,7 @@ class AIAgent:
                         if retry_count >= max_retries:
                             # Try fallback before giving up
                             self._emit_status(f"⚠️ Max retries ({max_retries}) for invalid responses — trying fallback...")
-                            if self._try_activate_fallback():
+                            if self._try_activate_fallback(reason="invalid_response"):
                                 retry_count = 0
                                 continue
                             self._emit_status(f"❌ Max retries ({max_retries}) exceeded for invalid responses. Giving up.")
@@ -8497,9 +8534,20 @@ class AIAgent:
                         or "usage limit" in error_msg
                         or "quota" in error_msg
                     )
-                    if is_rate_limited and self._fallback_index < len(self._fallback_chain):
-                        self._emit_status("⚠️ Rate limited — switching to fallback provider...")
-                        if self._try_activate_fallback():
+                    llm_fallback_reason = fallback_reason_for_error(api_error)
+                    is_overloaded = llm_fallback_reason == "overloaded"
+                    if (
+                        (is_rate_limited or is_overloaded)
+                        and self._fallback_index < len(self._fallback_chain)
+                    ):
+                        if is_overloaded:
+                            self._emit_status("⚠️ Primary provider overloaded — switching to fallback provider...")
+                        else:
+                            self._emit_status("⚠️ Rate limited — switching to fallback provider...")
+                        if self._try_activate_fallback(
+                            reason=llm_fallback_reason or "rate_limit",
+                            error=api_error,
+                        ):
                             retry_count = 0
                             continue
 
@@ -8691,6 +8739,19 @@ class AIAgent:
                                 "partial": True
                             }
 
+                    if (
+                        llm_fallback_reason == "network"
+                        and retry_count > primary_retry_limit()
+                        and self._fallback_index < len(self._fallback_chain)
+                    ):
+                        self._emit_status("⚠️ Primary provider network failure — switching to fallback provider...")
+                        if self._try_activate_fallback(
+                            reason=llm_fallback_reason,
+                            error=api_error,
+                        ):
+                            retry_count = 0
+                            continue
+
                     # Check for non-retryable client errors (4xx HTTP status codes).
                     # These indicate a problem with the request itself (bad model ID,
                     # invalid API key, forbidden, etc.) and will never succeed on retry.
@@ -8722,12 +8783,17 @@ class AIAgent:
                     ])) and not is_context_length_error
 
                     if is_client_error:
-                        # Try fallback before aborting — a different provider
-                        # may not have the same issue (rate limit, auth, etc.)
-                        self._emit_status(f"⚠️ Non-retryable error (HTTP {status_code}) — trying fallback...")
-                        if self._try_activate_fallback():
-                            retry_count = 0
-                            continue
+                        # Bad-input/auth/not-found errors should surface as-is:
+                        # retrying on Groq would hide request bugs or missing
+                        # credentials and could produce a misleading response.
+                        if not _llm_bad_input_error(api_error):
+                            self._emit_status(f"⚠️ Non-retryable error (HTTP {status_code}) — trying fallback...")
+                            if self._try_activate_fallback(
+                                reason=llm_fallback_reason or "client_error",
+                                error=api_error,
+                            ):
+                                retry_count = 0
+                                continue
                         self._dump_api_request_debug(
                             api_kwargs, reason="non_retryable_client_error", error=api_error,
                         )
@@ -8775,7 +8841,10 @@ class AIAgent:
                             continue
                         # Try fallback before giving up entirely
                         self._emit_status(f"⚠️ Max retries ({max_retries}) exhausted — trying fallback...")
-                        if self._try_activate_fallback():
+                        if self._try_activate_fallback(
+                            reason=llm_fallback_reason or "max_retries",
+                            error=api_error,
+                        ):
                             retry_count = 0
                             continue
                         _final_summary = self._summarize_api_error(api_error)
@@ -9558,6 +9627,10 @@ class AIAgent:
             "response_previewed": getattr(self, "_response_was_previewed", False),
             "model": self.model,
             "provider": self.provider,
+            "llm_provider": llm_provider_label(self.provider, self.base_url),
+            "response_metadata": {
+                "x-llm-provider": llm_provider_label(self.provider, self.base_url),
+            },
             "base_url": self.base_url,
             "input_tokens": self.session_input_tokens,
             "output_tokens": self.session_output_tokens,

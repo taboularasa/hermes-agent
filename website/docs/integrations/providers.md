@@ -950,7 +950,9 @@ provider_routing:
 
 ## Fallback Model
 
-Configure a backup provider:model that Hermes switches to automatically when your primary model fails (rate limits, server errors, auth failures):
+Hermes automatically adds an availability fallback for ChatGPT/OpenAI primaries: if the primary returns quota/rate-limit errors, overload errors, or repeated network timeouts, Hermes switches to Kimi K2 on Groq (`moonshotai/kimi-k2-instruct-0905` via `https://api.groq.com/openai/v1`). The Groq key is read from `GROQ_API_KEY`; in Doppler this secret is named `GROQ_API_KEY`. Disable this automatic fallback with `LLM_FALLBACK_ENABLED=false`.
+
+You can also configure a backup provider:model that Hermes switches to when your primary model fails (rate limits, server errors, auth failures):
 
 ```yaml
 fallback_model:
@@ -962,10 +964,10 @@ fallback_model:
 
 When activated, the fallback swaps the model and provider mid-session without losing your conversation. It fires **at most once** per session.
 
-Supported providers: `openrouter`, `nous`, `openai-codex`, `copilot`, `copilot-acp`, `anthropic`, `huggingface`, `zai`, `kimi-coding`, `kimi-coding-cn`, `minimax`, `minimax-cn`, `deepseek`, `ai-gateway`, `opencode-zen`, `opencode-go`, `kilocode`, `xiaomi`, `arcee`, `alibaba`, `custom`.
+Supported providers: `openrouter`, `nous`, `openai-codex`, `groq-kimi`, `copilot`, `copilot-acp`, `anthropic`, `huggingface`, `zai`, `kimi-coding`, `kimi-coding-cn`, `minimax`, `minimax-cn`, `deepseek`, `ai-gateway`, `opencode-zen`, `opencode-go`, `kilocode`, `xiaomi`, `arcee`, `alibaba`, `custom`.
 
 :::tip
-Fallback is configured exclusively through `config.yaml` — there are no environment variables for it. For full details on when it triggers, supported providers, and how it interacts with auxiliary tasks and delegation, see [Fallback Providers](/docs/user-guide/features/fallback-providers).
+Manual fallback is configured through `config.yaml`. The automatic ChatGPT/OpenAI to Groq/Kimi fallback is controlled by `LLM_FALLBACK_ENABLED` and requires `GROQ_API_KEY`. For full details on when fallback triggers, supported providers, and how it interacts with auxiliary tasks and delegation, see [Fallback Providers](/docs/user-guide/features/fallback-providers).
 :::
 
 ## Smart Model Routing

@@ -28,7 +28,7 @@ def test_loads_doppler_env_into_process(tmp_path, monkeypatch):
         env_loader.subprocess,
         "run",
         lambda *args, **kwargs: _doppler_result(
-            '{"OPENAI_BASE_URL":"https://doppler.example/v1","OPENAI_API_KEY":"doppler-key"}'
+            '{"OPENAI_BASE_URL":"https://doppler.example/v1","OPENAI_API_KEY":"doppler-key","GROQ_API_KEY":"gsk-test"}'
         ),
     )
 
@@ -95,7 +95,7 @@ def test_main_import_applies_doppler_env_over_existing_values(tmp_path, monkeypa
         env_loader.subprocess,
         "run",
         lambda *args, **kwargs: _doppler_result(
-            '{"OPENAI_BASE_URL":"https://doppler.example/v1","HERMES_INFERENCE_PROVIDER":"custom"}'
+            '{"OPENAI_BASE_URL":"https://doppler.example/v1","HERMES_INFERENCE_PROVIDER":"custom","GROQ_API_KEY":"gsk-test"}'
         ),
     )
     monkeypatch.setattr(env_loader, "_resolve_project_root", lambda _project_env: project_root)
@@ -105,3 +105,24 @@ def test_main_import_applies_doppler_env_over_existing_values(tmp_path, monkeypa
 
     assert os.getenv("OPENAI_BASE_URL") == "https://doppler.example/v1"
     assert os.getenv("HERMES_INFERENCE_PROVIDER") == "custom"
+
+
+def test_load_hermes_dotenv_fails_when_fallback_enabled_without_groq_key(tmp_path, monkeypatch):
+    project_root = tmp_path / "repo"
+    project_root.mkdir()
+
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("HERMES_ENV_SOURCE", raising=False)
+    monkeypatch.delenv("HERMES_DOPPLER_PROJECT_ROOT", raising=False)
+    monkeypatch.setenv("LLM_FALLBACK_ENABLED", "true")
+    monkeypatch.setattr(env_loader.shutil, "which", lambda _: "/usr/bin/doppler")
+    monkeypatch.setattr(
+        env_loader.subprocess,
+        "run",
+        lambda *args, **kwargs: _doppler_result(
+            '{"OPENAI_BASE_URL":"https://doppler.example/v1","OPENAI_API_KEY":"doppler-key"}'
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="GROQ_API_KEY"):
+        env_loader.load_hermes_dotenv(project_env=project_root / ".env", strict=True)

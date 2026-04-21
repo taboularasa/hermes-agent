@@ -67,6 +67,7 @@ _PROVIDER_ALIASES = {
     "zhipu": "zai",
     "kimi": "kimi-coding",
     "moonshot": "kimi-coding",
+    "kimi-groq": "groq-kimi",
     "kimi-cn": "kimi-coding-cn",
     "moonshot-cn": "kimi-coding-cn",
     "minimax-china": "minimax-cn",
@@ -99,6 +100,7 @@ _API_KEY_PROVIDER_AUX_MODELS: Dict[str, str] = {
     "gemini": "gemini-3-flash-preview",
     "zai": "glm-4.5-flash",
     "kimi-coding": "kimi-k2-turbo-preview",
+    "groq-kimi": "moonshotai/kimi-k2-instruct-0905",
     "kimi-coding-cn": "kimi-k2-turbo-preview",
     "minimax": "MiniMax-M2.7",
     "minimax-cn": "MiniMax-M2.7",
@@ -1421,6 +1423,23 @@ def resolve_provider_client(
                 "auxiliary provider (using %r instead)", model, resolved)
             model = None
         final_model = model or resolved
+        return (_to_async_client(client, final_model) if async_mode
+                else (client, final_model))
+
+    # ── Groq-hosted Kimi K2 fallback ─────────────────────────────────
+    if provider == "groq-kimi":
+        from agent.llm_fallback import (
+            GROQ_KIMI_BASE_URL,
+            GROQ_KIMI_MODEL,
+            groq_api_key,
+        )
+
+        api_key = groq_api_key()
+        if not api_key:
+            logger.warning("resolve_provider_client: groq-kimi requested but GROQ_API_KEY not set")
+            return None, None
+        final_model = _normalize_resolved_model(model or GROQ_KIMI_MODEL, provider)
+        client = OpenAI(api_key=api_key, base_url=GROQ_KIMI_BASE_URL)
         return (_to_async_client(client, final_model) if async_mode
                 else (client, final_model))
 

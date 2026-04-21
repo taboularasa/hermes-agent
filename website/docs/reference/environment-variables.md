@@ -59,6 +59,8 @@ All variables go in `~/.hermes/.env`. You can also set them with `hermes config 
 | `OPENCODE_GO_BASE_URL` | Override OpenCode Go base URL |
 | `CLAUDE_CODE_OAUTH_TOKEN` | Explicit Claude Code token override if you export one manually |
 | `HERMES_MODEL` | Override model name at process level (used by cron scheduler; prefer `config.yaml` for normal use) |
+| `LLM_FALLBACK_ENABLED` | Enable automatic ChatGPT/OpenAI -> Groq/Kimi fallback (`true` by default; set `false` to disable quickly) |
+| `LLM_PRIMARY_RETRIES` | Primary network/timeout retries before automatic fallback (default: `1`) |
 | `VOICE_TOOLS_OPENAI_KEY` | Preferred OpenAI key for OpenAI speech-to-text and text-to-speech providers |
 | `HERMES_LOCAL_STT_COMMAND` | Optional local speech-to-text command template. Supports `{input_path}`, `{output_dir}`, `{language}`, and `{model}` placeholders |
 | `HERMES_LOCAL_STT_LANGUAGE` | Default language passed to `HERMES_LOCAL_STT_COMMAND` or auto-detected local `whisper` CLI fallback (default: `en`) |
@@ -96,7 +98,7 @@ For native Anthropic auth, Hermes prefers Claude Code's own credential files whe
 | `CAMOFOX_URL` | Camofox local anti-detection browser URL (default: `http://localhost:9377`) |
 | `BROWSER_INACTIVITY_TIMEOUT` | Browser session inactivity timeout in seconds |
 | `FAL_KEY` | Image generation ([fal.ai](https://fal.ai/)) |
-| `GROQ_API_KEY` | Groq Whisper STT API key ([groq.com](https://groq.com/)) |
+| `GROQ_API_KEY` | Groq API key. Used for Groq Whisper STT and for the automatic ChatGPT/OpenAI fallback to Kimi K2 on Groq. Doppler secret name: `GROQ_API_KEY`. |
 | `ELEVENLABS_API_KEY` | ElevenLabs premium TTS voices ([elevenlabs.io](https://elevenlabs.io/)) |
 | `STT_GROQ_MODEL` | Override the Groq STT model (default: `whisper-large-v3-turbo`) |
 | `GROQ_BASE_URL` | Override the Groq OpenAI-compatible STT endpoint |
@@ -384,9 +386,11 @@ Older configs with `compression.summary_model`, `compression.summary_provider`, 
 
 For task-specific direct endpoints, Hermes uses the task's configured API key or `OPENAI_API_KEY`. It does not reuse `OPENROUTER_API_KEY` for those custom endpoints.
 
-## Fallback Model (config.yaml only)
+## Fallback Model
 
-The primary model fallback is configured exclusively through `config.yaml` — there are no environment variables for it. Add a `fallback_model` section with `provider` and `model` keys to enable automatic failover when your main model encounters errors.
+Hermes automatically falls back from ChatGPT/OpenAI primaries to Kimi K2 on Groq (`moonshotai/kimi-k2-instruct-0905`) for quota/rate-limit errors, overloaded responses, and repeated network timeouts. This requires `GROQ_API_KEY`; set `LLM_FALLBACK_ENABLED=false` to disable quickly.
+
+Manual fallback providers are configured through `config.yaml`. Add a `fallback_model` section with `provider` and `model` keys to enable explicit failover when your main model encounters errors.
 
 ```yaml
 fallback_model:

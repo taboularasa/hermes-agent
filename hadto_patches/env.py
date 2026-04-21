@@ -52,6 +52,13 @@ def _sanitize_loaded_credentials() -> None:
         os.environ[key] = _check_non_ascii_credential(key, value)
 
 
+def _validate_llm_fallback_env() -> None:
+    """Validate startup-only LLM fallback requirements after env loading."""
+    from agent.llm_fallback import validate_groq_fallback_startup
+
+    validate_groq_fallback_startup(os.environ)
+
+
 def _sanitize_env_file_if_needed(env_path: str | os.PathLike) -> int:
     """Best-effort compatibility sanitizer for local .env files in test mode."""
     path = Path(env_path)
@@ -200,6 +207,7 @@ def load_hermes_dotenv(
     for key, value in env_vars.items():
         os.environ[key] = value
     _sanitize_loaded_credentials()
+    _validate_llm_fallback_env()
 
     os.environ["HERMES_ENV_SOURCE"] = _SOURCE_LABEL
     os.environ["HERMES_DOPPLER_PROJECT_ROOT"] = str(project_root)

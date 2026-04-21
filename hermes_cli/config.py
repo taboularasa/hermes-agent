@@ -2716,12 +2716,16 @@ _SECURITY_COMMENT = """
 
 _FALLBACK_COMMENT = """
 # ── Fallback Model ────────────────────────────────────────────────────
-# Automatic provider failover when primary is unavailable.
-# Uncomment and configure to enable. Triggers on rate limits (429),
-# overload (529), service errors (503), or connection failures.
+# Automatic provider failover when primary is unavailable. ChatGPT/OpenAI
+# primaries automatically fall back to Kimi K2 on Groq when
+# LLM_FALLBACK_ENABLED=true (default) and GROQ_API_KEY is present.
+# Uncomment and configure fallback_model to add a manual fallback. Triggers
+# on rate limits (429), overload (529), service errors (503), or connection
+# failures.
 #
 # Supported providers:
 #   openrouter   (OPENROUTER_API_KEY)  — routes to any model
+#   groq-kimi    (GROQ_API_KEY)        — Kimi K2 on Groq
 #   openai-codex (OAuth — hermes auth) — OpenAI Codex
 #   nous         (OAuth — hermes auth) — Nous Portal
 #   zai          (ZAI_API_KEY)         — Z.AI / GLM
@@ -2760,12 +2764,16 @@ _COMMENTED_SECTIONS = """
 #   redact_secrets: false
 
 # ── Fallback Model ────────────────────────────────────────────────────
-# Automatic provider failover when primary is unavailable.
-# Uncomment and configure to enable. Triggers on rate limits (429),
-# overload (529), service errors (503), or connection failures.
+# Automatic provider failover when primary is unavailable. ChatGPT/OpenAI
+# primaries automatically fall back to Kimi K2 on Groq when
+# LLM_FALLBACK_ENABLED=true (default) and GROQ_API_KEY is present.
+# Uncomment and configure fallback_model to add a manual fallback. Triggers
+# on rate limits (429), overload (529), service errors (503), or connection
+# failures.
 #
 # Supported providers:
 #   openrouter   (OPENROUTER_API_KEY)  — routes to any model
+#   groq-kimi    (GROQ_API_KEY)        — Kimi K2 on Groq
 #   openai-codex (OAuth — hermes auth) — OpenAI Codex
 #   nous         (OAuth — hermes auth) — Nous Portal
 #   zai          (ZAI_API_KEY)         — Z.AI / GLM

@@ -601,7 +601,7 @@ Every model slot in Hermes — auxiliary tasks, compression, fallback — uses t
 
 When `base_url` is set, Hermes ignores the provider and calls that endpoint directly (using `api_key` or `OPENAI_API_KEY` for auth). When only `provider` is set, Hermes uses that provider's built-in auth and base URL.
 
-Available providers for auxiliary tasks: `auto`, `openrouter`, `nous`, `codex`, `copilot`, `anthropic`, `main`, `zai`, `kimi-coding`, `kimi-coding-cn`, `arcee`, `minimax`, any provider registered in the [provider registry](/docs/reference/environment-variables), or any named custom provider from your `custom_providers` list (e.g. `provider: "beans"`).
+Available providers for auxiliary tasks: `auto`, `openrouter`, `nous`, `codex`, `groq-kimi`, `copilot`, `anthropic`, `main`, `zai`, `kimi-coding`, `kimi-coding-cn`, `arcee`, `minimax`, any provider registered in the [provider registry](/docs/reference/environment-variables), or any named custom provider from your `custom_providers` list (e.g. `provider: "beans"`).
 
 :::warning `"main"` is for auxiliary tasks only
 The `"main"` provider option means "use whatever provider my main agent uses" — it's only valid inside `auxiliary:`, `compression:`, and `fallback_model:` configs. It is **not** a valid value for your top-level `model.provider` setting. If you use a custom OpenAI-compatible endpoint, set `provider: custom` in your `model:` section. See [AI Providers](/docs/integrations/providers) for all main model provider options.
@@ -679,6 +679,10 @@ Each auxiliary task has a configurable `timeout` (in seconds). Defaults: vision 
 
 :::info
 Context compression has its own `compression:` block for thresholds and an `auxiliary.compression:` block for model/provider settings — see [Context Compression](#context-compression) above. The fallback model uses a `fallback_model:` block — see [Fallback Model](/docs/integrations/providers#fallback-model). All three follow the same provider/model/base_url pattern.
+:::
+
+:::info
+When your primary provider is ChatGPT/OpenAI, Hermes also enables an automatic availability fallback to Kimi K2 on Groq (`moonshotai/kimi-k2-instruct-0905`). It requires `GROQ_API_KEY` (Doppler secret name: `GROQ_API_KEY`) and can be disabled with `LLM_FALLBACK_ENABLED=false`.
 :::
 
 ### Changing the Vision Model
