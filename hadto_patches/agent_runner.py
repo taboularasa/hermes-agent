@@ -5715,6 +5715,7 @@ class AIAgent:
                     logger,
                     reason=reason or fallback_reason_for_error(error) or "provider_error",
                     error=error,
+                    model=fb_model,
                 )
             logging.info(
                 "Fallback activated: %s → %s (%s)",
@@ -7987,7 +7988,7 @@ class AIAgent:
                         response = self._interruptible_api_call(api_kwargs)
                     annotate_response_provider(
                         response,
-                        llm_provider_label(self.provider, self.base_url),
+                        llm_provider_label(self.provider, self.base_url, self.model),
                     )
                     
                     api_duration = time.time() - api_start_time
@@ -8525,7 +8526,7 @@ class AIAgent:
                             "not retrying or switching fallback to avoid duplicate output."
                         )
                         self._persist_session(messages, conversation_history)
-                        provider_label = llm_provider_label(self.provider, self.base_url)
+                        provider_label = llm_provider_label(self.provider, self.base_url, self.model)
                         return {
                             "final_response": None,
                             "partial_response": partial_text,
@@ -9651,9 +9652,9 @@ class AIAgent:
             "response_previewed": getattr(self, "_response_was_previewed", False),
             "model": self.model,
             "provider": self.provider,
-            "llm_provider": llm_provider_label(self.provider, self.base_url),
+            "llm_provider": llm_provider_label(self.provider, self.base_url, self.model),
             "response_metadata": {
-                "x-llm-provider": llm_provider_label(self.provider, self.base_url),
+                "x-llm-provider": llm_provider_label(self.provider, self.base_url, self.model),
             },
             "base_url": self.base_url,
             "input_tokens": self.session_input_tokens,

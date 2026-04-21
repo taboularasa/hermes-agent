@@ -4,9 +4,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent.llm_fallback import (
+    GROQ_FALLBACK_DEFAULT_MODEL,
     GROQ_KIMI_BASE_URL,
     GROQ_KIMI_MODEL,
     fallback_metric_count,
+    groq_fallback_model,
     translate_kimi_chat_params,
     validate_groq_fallback_startup,
 )
@@ -16,7 +18,7 @@ from run_agent import AIAgent
 def _message_response(content: str = "ok"):
     return SimpleNamespace(
         id="chatcmpl-test",
-        model=GROQ_KIMI_MODEL,
+        model=GROQ_FALLBACK_DEFAULT_MODEL,
         choices=[
             SimpleNamespace(
                 index=0,
@@ -33,7 +35,7 @@ def _message_response(content: str = "ok"):
     )
 
 
-def _stream_chunk(content=None, finish_reason=None, model=GROQ_KIMI_MODEL):
+def _stream_chunk(content=None, finish_reason=None, model=GROQ_FALLBACK_DEFAULT_MODEL):
     return SimpleNamespace(
         model=model,
         choices=[
@@ -117,10 +119,10 @@ def test_openai_429_falls_back_to_groq_with_translated_params(monkeypatch):
     result = agent.run_conversation("hello")
 
     assert result["final_response"] == "fallback ok"
-    assert result["llm_provider"] == "groq/kimi-k2"
+    assert result["llm_provider"] == "groq/gpt-oss-120b"
     assert fallback_metric_count("rate_limit") == before + 1
     groq_kwargs = groq_client.chat.completions.create.call_args.kwargs
-    assert groq_kwargs["model"] == GROQ_KIMI_MODEL
+    assert groq_kwargs["model"] == GROQ_FALLBACK_DEFAULT_MODEL
     assert groq_kwargs["messages"][0]["role"] == "system"
     assert groq_kwargs["seed"] == 42
     assert groq_kwargs["top_p"] == 0.9
@@ -221,9 +223,20 @@ def test_kimi_param_translation_preserves_supported_fields():
 
     translated = translate_kimi_chat_params(params)
 
-    assert translated["model"] == GROQ_KIMI_MODEL
+    assert translated["model"] == GROQ_FALLBACK_DEFAULT_MODEL
     for key in ("messages", "tools", "tool_choice", "temperature", "max_tokens", "top_p", "stream", "seed"):
         assert translated[key] == params[key]
     assert "logprobs" not in translated
     assert "reasoning_effort" not in translated
     assert "response_format" not in translated
+
+
+def test_groq_fallback_model_can_be_overridden_to_kimi(monkeypatch):
+    monkeypatch.setenv("GROQ_FALLBACK_MODEL", GROQ_KIMI_MODEL)
+
+    assert groq_fallback_model() == GROQ_KIMI_MODEL
+    translated = translate_kimi_chat_params({
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    assert translated["model"] == GROQ_KIMI_MODEL

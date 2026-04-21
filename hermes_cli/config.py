@@ -929,6 +929,38 @@ OPTIONAL_ENV_VARS = {
         "category": "provider",
         "advanced": True,
     },
+    "GROQ_API_KEY": {
+        "description": "Groq API key for STT and automatic OpenAI fallback",
+        "prompt": "Groq API key",
+        "url": "https://console.groq.com/keys",
+        "password": True,
+        "category": "provider",
+        "advanced": True,
+    },
+    "GROQ_FALLBACK_MODEL": {
+        "description": "Override automatic Groq fallback model (default: openai/gpt-oss-120b)",
+        "prompt": "Groq fallback model",
+        "url": None,
+        "password": False,
+        "category": "provider",
+        "advanced": True,
+    },
+    "LLM_FALLBACK_ENABLED": {
+        "description": "Enable automatic ChatGPT/OpenAI -> Groq availability fallback",
+        "prompt": "Enable LLM fallback",
+        "url": None,
+        "password": False,
+        "category": "provider",
+        "advanced": True,
+    },
+    "LLM_PRIMARY_RETRIES": {
+        "description": "Primary network/timeout retries before automatic fallback",
+        "prompt": "LLM primary retries",
+        "url": None,
+        "password": False,
+        "category": "provider",
+        "advanced": True,
+    },
     "KIMI_CN_API_KEY": {
         "description": "Kimi / Moonshot China API key",
         "prompt": "Kimi (China) API key",
@@ -2717,15 +2749,16 @@ _SECURITY_COMMENT = """
 _FALLBACK_COMMENT = """
 # ── Fallback Model ────────────────────────────────────────────────────
 # Automatic provider failover when primary is unavailable. ChatGPT/OpenAI
-# primaries automatically fall back to Kimi K2 on Groq when
+# primaries automatically fall back to Groq openai/gpt-oss-120b when
 # LLM_FALLBACK_ENABLED=true (default) and GROQ_API_KEY is present.
+# Override with GROQ_FALLBACK_MODEL if needed.
 # Uncomment and configure fallback_model to add a manual fallback. Triggers
 # on rate limits (429), overload (529), service errors (503), or connection
 # failures.
 #
 # Supported providers:
 #   openrouter   (OPENROUTER_API_KEY)  — routes to any model
-#   groq-kimi    (GROQ_API_KEY)        — Kimi K2 on Groq
+#   groq-kimi    (GROQ_API_KEY)        — Groq fallback provider
 #   openai-codex (OAuth — hermes auth) — OpenAI Codex
 #   nous         (OAuth — hermes auth) — Nous Portal
 #   zai          (ZAI_API_KEY)         — Z.AI / GLM
@@ -2765,15 +2798,16 @@ _COMMENTED_SECTIONS = """
 
 # ── Fallback Model ────────────────────────────────────────────────────
 # Automatic provider failover when primary is unavailable. ChatGPT/OpenAI
-# primaries automatically fall back to Kimi K2 on Groq when
+# primaries automatically fall back to Groq openai/gpt-oss-120b when
 # LLM_FALLBACK_ENABLED=true (default) and GROQ_API_KEY is present.
+# Override with GROQ_FALLBACK_MODEL if needed.
 # Uncomment and configure fallback_model to add a manual fallback. Triggers
 # on rate limits (429), overload (529), service errors (503), or connection
 # failures.
 #
 # Supported providers:
 #   openrouter   (OPENROUTER_API_KEY)  — routes to any model
-#   groq-kimi    (GROQ_API_KEY)        — Kimi K2 on Groq
+#   groq-kimi    (GROQ_API_KEY)        — Groq fallback provider
 #   openai-codex (OAuth — hermes auth) — OpenAI Codex
 #   nous         (OAuth — hermes auth) — Nous Portal
 #   zai          (ZAI_API_KEY)         — Z.AI / GLM

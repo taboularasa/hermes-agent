@@ -10,7 +10,12 @@ from typing import Any, Mapping, Optional
 
 GROQ_KIMI_PROVIDER = "groq-kimi"
 GROQ_KIMI_BASE_URL = "https://api.groq.com/openai/v1"
+# Groq shut down Kimi K2 0905 on 2026-04-15 and recommends GPT-OSS 120B.
+# Keep the requested Kimi ID available as an override for accounts where it
+# returns, but default the automatic fallback to a model the live Groq API serves.
 GROQ_KIMI_MODEL = "moonshotai/kimi-k2-instruct-0905"
+GROQ_FALLBACK_DEFAULT_MODEL = "openai/gpt-oss-120b"
+GROQ_FALLBACK_MODEL_ENV = "GROQ_FALLBACK_MODEL"
 GROQ_API_KEY_ENV = "GROQ_API_KEY"
 LLM_FALLBACK_FLAG = "LLM_FALLBACK_ENABLED"
 LLM_PRIMARY_RETRIES_ENV = "LLM_PRIMARY_RETRIES"
@@ -44,13 +49,19 @@ def groq_api_key(env: Optional[Mapping[str, str]] = None) -> str:
     return str(env.get(GROQ_API_KEY_ENV, "")).strip()
 
 
+def groq_fallback_model(env: Optional[Mapping[str, str]] = None) -> str:
+    env = env or os.environ
+    configured = str(env.get(GROQ_FALLBACK_MODEL_ENV, "")).strip()
+    return configured or GROQ_FALLBACK_DEFAULT_MODEL
+
+
 def validate_groq_fallback_startup(env: Optional[Mapping[str, str]] = None) -> None:
     """Fail fast when the automatic Groq fallback is enabled but unconfigured."""
     env = env or os.environ
     if llm_fallback_enabled(env) and not groq_api_key(env):
         raise RuntimeError(
             f"{LLM_FALLBACK_FLAG}=true requires {GROQ_API_KEY_ENV} for the "
-            "Groq/Kimi fallback. Add GROQ_API_KEY to Doppler or set "
+            "Groq fallback. Add GROQ_API_KEY to Doppler or set "
             f"{LLM_FALLBACK_FLAG}=false to disable LLM fallback."
         )
 
@@ -72,16 +83,25 @@ def is_groq_kimi_provider(provider: str = "", base_url: str = "") -> bool:
     return provider_l in {GROQ_KIMI_PROVIDER, "kimi-groq"}
 
 
-def llm_provider_label(provider: str = "", base_url: str = "") -> str:
-    if is_groq_kimi_provider(provider, base_url):
+def groq_fallback_label(model: str = "") -> str:
+    model = (model or groq_fallback_model()).strip()
+    if "kimi-k2" in model.lower():
         return "groq/kimi-k2"
+    if model == GROQ_FALLBACK_DEFAULT_MODEL:
+        return "groq/gpt-oss-120b"
+    return f"groq/{model.replace('/', '-')}"
+
+
+def llm_provider_label(provider: str = "", base_url: str = "", model: str = "") -> str:
+    if is_groq_kimi_provider(provider, base_url):
+        return groq_fallback_label(model)
     return (provider or "unknown").strip().lower() or "unknown"
 
 
 def automatic_groq_fallback_entry() -> dict[str, Any]:
     return {
         "provider": GROQ_KIMI_PROVIDER,
-        "model": GROQ_KIMI_MODEL,
+        "model": groq_fallback_model(),
         "automatic": True,
     }
 
@@ -94,7 +114,7 @@ def append_automatic_groq_fallback(
     primary_api_mode: str,
     env: Optional[Mapping[str, str]] = None,
 ) -> list[dict[str, Any]]:
-    """Append the automatic Groq/Kimi fallback for ChatGPT/OpenAI primaries."""
+    """Append the automatic Groq fallback for ChatGPT/OpenAI primaries."""
     env = env or os.environ
     chain = list(fallback_chain or [])
     if not llm_fallback_enabled(env):
@@ -240,7 +260,7 @@ def should_fallback_for_error(exc: BaseException) -> bool:
 
 
 def translate_kimi_chat_params(params: Mapping[str, Any]) -> dict[str, Any]:
-    """Return OpenAI-compatible chat params trimmed for Groq-hosted Kimi K2."""
+    """Return OpenAI-compatible chat params trimmed for Groq fallback models."""
     allowed = {
         "model",
         "messages",
@@ -266,7 +286,7 @@ def translate_kimi_chat_params(params: Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(response_format, dict) and response_format.get("type") in {"json_object", "text"}:
         translated["response_format"] = response_format
 
-    translated["model"] = GROQ_KIMI_MODEL
+    translated["model"] = groq_fallback_model()
     return translated
 
 
@@ -290,7 +310,8 @@ def annotate_response_provider(response: Any, provider: str) -> Any:
     return response
 
 
-def emit_fallback_metric(reason: str, fallback: str = "groq/kimi-k2") -> None:
+def emit_fallback_metric(reason: str, fallback: str = "") -> None:
+    fallback = fallback or groq_fallback_label()
     _FALLBACK_METRICS[(reason, fallback)] += 1
     logging.getLogger(__name__).info(
         "metric llm.fallback.triggered reason=%s fallback=%s count=%s",
@@ -300,7 +321,8 @@ def emit_fallback_metric(reason: str, fallback: str = "groq/kimi-k2") -> None:
     )
 
 
-def fallback_metric_count(reason: str, fallback: str = "groq/kimi-k2") -> int:
+def fallback_metric_count(reason: str, fallback: str = "") -> int:
+    fallback = fallback or groq_fallback_label()
     return _FALLBACK_METRICS[(reason, fallback)]
 
 
@@ -309,10 +331,11 @@ def record_groq_fallback(
     *,
     reason: str,
     error: Optional[BaseException] = None,
+    model: str = "",
 ) -> None:
     payload = {
         "primary": "openai",
-        "fallback": "groq/kimi-k2",
+        "fallback": groq_fallback_label(model),
         "reason": reason,
         "error_code": error_code(error) if error else None,
         "request_id": request_id(error) if error else None,

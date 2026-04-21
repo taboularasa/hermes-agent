@@ -682,7 +682,7 @@ Context compression has its own `compression:` block for thresholds and an `auxi
 :::
 
 :::info
-When your primary provider is ChatGPT/OpenAI, Hermes also enables an automatic availability fallback to Kimi K2 on Groq (`moonshotai/kimi-k2-instruct-0905`). It requires `GROQ_API_KEY` (Doppler secret name: `GROQ_API_KEY`) and can be disabled with `LLM_FALLBACK_ENABLED=false`.
+When your primary provider is ChatGPT/OpenAI, Hermes also enables an automatic availability fallback to Groq (`openai/gpt-oss-120b` by default). It requires `GROQ_API_KEY` (Doppler secret name: `GROQ_API_KEY`), can be disabled with `LLM_FALLBACK_ENABLED=false`, and can override the model with `GROQ_FALLBACK_MODEL`.
 :::
 
 ### Changing the Vision Model
