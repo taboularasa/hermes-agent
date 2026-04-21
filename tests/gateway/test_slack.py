@@ -631,6 +631,14 @@ class TestFormatMessage:
         text = "Hey <@U123>, see <https://example.com|example> and <!here>"
         assert adapter.format_message(text) == text
 
+    def test_normalizes_raw_member_id_mentions(self, adapter):
+        result = adapter.format_message("Ping @U0APAQGJF7D and @W0APAQGJF7D")
+        assert result == "Ping <@U0APAQGJF7D> and <@W0APAQGJF7D>"
+
+    def test_raw_member_id_normalization_ignores_non_member_mentions(self, adapter):
+        result = adapter.format_message("Ping @channel and @user@example.com")
+        assert result == "Ping @channel and @user@example.com"
+
     def test_strikethrough(self, adapter):
         assert adapter.format_message("~~deleted~~") == "~deleted~"
 

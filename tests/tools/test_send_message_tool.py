@@ -71,7 +71,16 @@ class TestSendMessageTool:
             get_home_channel=lambda _platform: None,
         )
 
-        with patch("gateway.config.load_gateway_config", return_value=config), \
+        with patch.dict(
+            os.environ,
+            {
+                "HERMES_CRON_AUTO_DELIVER_PLATFORM": "",
+                "HERMES_CRON_AUTO_DELIVER_CHAT_ID": "",
+                "HERMES_CRON_AUTO_DELIVER_THREAD_ID": "",
+            },
+            clear=False,
+        ), \
+             patch("gateway.config.load_gateway_config", return_value=config), \
              patch("tools.interrupt.is_interrupted", return_value=False), \
              patch("model_tools._run_async", side_effect=_run_async_immediately), \
              patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
@@ -104,7 +113,16 @@ class TestSendMessageTool:
             get_home_channel=lambda _platform: None,
         )
 
-        with patch("gateway.config.load_gateway_config", return_value=config), \
+        with patch.dict(
+            os.environ,
+            {
+                "HERMES_CRON_AUTO_DELIVER_PLATFORM": "",
+                "HERMES_CRON_AUTO_DELIVER_CHAT_ID": "",
+                "HERMES_CRON_AUTO_DELIVER_THREAD_ID": "",
+            },
+            clear=False,
+        ), \
+             patch("gateway.config.load_gateway_config", return_value=config), \
              patch("tools.interrupt.is_interrupted", return_value=False), \
              patch("model_tools._run_async", side_effect=_run_async_immediately), \
              patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
@@ -633,6 +651,32 @@ class TestSendToPlatformChunking:
                     SimpleNamespace(enabled=True, token="***", extra={}),
                     "C123",
                     "Please check this <@U0APAQGJF7D>",
+                )
+            )
+
+        assert result["success"] is True
+        send.assert_awaited_once_with(
+            "***",
+            "C123",
+            "Please check this <@U0APAQGJF7D>",
+            thread_id=None,
+        )
+
+    def test_slack_messages_normalize_raw_member_id_mentions(self, monkeypatch):
+        _ensure_slack_mock(monkeypatch)
+
+        import gateway.platforms.slack as slack_mod
+
+        monkeypatch.setattr(slack_mod, "SLACK_AVAILABLE", True)
+        send = AsyncMock(return_value={"success": True, "message_id": "1"})
+
+        with patch("tools.send_message_tool._send_slack", send):
+            result = asyncio.run(
+                _send_to_platform(
+                    Platform.SLACK,
+                    SimpleNamespace(enabled=True, token="***", extra={}),
+                    "C123",
+                    "Please check this @U0APAQGJF7D",
                 )
             )
 

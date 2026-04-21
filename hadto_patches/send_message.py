@@ -117,7 +117,7 @@ SEND_MESSAGE_SCHEMA = {
             },
             "message": {
                 "type": "string",
-                "description": "The message text to send"
+                "description": "The message text to send. For Slack user mentions, use <@U123ABC456>; raw @U123ABC456 member IDs are normalized automatically."
             }
         },
         "required": []
