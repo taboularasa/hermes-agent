@@ -45,6 +45,17 @@ import fire
 from datetime import datetime
 from pathlib import Path
 
+
+class _PartialStreamDeliveryError(RuntimeError):
+    """Raised when a stream fails after visible text has already been sent."""
+
+    def __init__(self, original_error: BaseException, partial_text: Optional[str]) -> None:
+        self.original_error = original_error
+        self.partial_text = partial_text
+        super().__init__(
+            f"Streaming failed after partial response delivery: {original_error}"
+        )
+
 from hermes_constants import get_hermes_home
 
 # Load runtime secrets from Doppler before the agent boots.
@@ -5503,36 +5514,19 @@ class AIAgent:
         if result["error"] is not None:
             if deltas_were_sent["yes"]:
                 # Streaming failed AFTER some tokens were already delivered to
-                # the platform.  Re-raising would let the outer retry loop make
-                # a new API call, creating a duplicate message.  Return a
-                # partial "stop" response instead so the outer loop treats this
-                # turn as complete (no retry, no fallback).
-                # Recover whatever content was already streamed to the user.
-                # _current_streamed_assistant_text accumulates text fired
-                # through _fire_stream_delta, so it has exactly what the
-                # user saw before the connection died.
+                # the platform. Surface the failure, but mark it specially so
+                # the outer loop does not retry or switch providers and
+                # duplicate already-emitted text.
                 _partial_text = (
                     getattr(self, "_current_streamed_assistant_text", "") or ""
                 ).strip() or None
                 logger.warning(
-                    "Partial stream delivered before error; returning stub "
-                    "response with %s chars of recovered content to prevent "
-                    "duplicate messages: %s",
+                    "Partial stream delivered before error; surfacing failure "
+                    "without retry/fallback. partial_chars=%s error=%s",
                     len(_partial_text or ""),
                     result["error"],
                 )
-                _stub_msg = SimpleNamespace(
-                    role="assistant", content=_partial_text, tool_calls=None,
-                    reasoning_content=None,
-                )
-                return SimpleNamespace(
-                    id="partial-stream-stub",
-                    model=getattr(self, "model", "unknown"),
-                    choices=[SimpleNamespace(
-                        index=0, message=_stub_msg, finish_reason="stop",
-                    )],
-                    usage=None,
-                )
+                raise _PartialStreamDeliveryError(result["error"], _partial_text)
             raise result["error"]
         return result["response"]
 
@@ -8515,6 +8509,36 @@ class AIAgent:
                             "api_calls": api_call_count,
                             "completed": False,
                             "interrupted": True,
+                        }
+
+                    if isinstance(api_error, _PartialStreamDeliveryError):
+                        partial_text = api_error.partial_text
+                        logger.error(
+                            "Streaming failed after partial delivery; not retrying "
+                            "or activating fallback. provider=%s model=%s error=%s",
+                            _provider,
+                            _model,
+                            api_error.original_error,
+                        )
+                        self._emit_status(
+                            "❌ Streaming failed after a partial response; "
+                            "not retrying or switching fallback to avoid duplicate output."
+                        )
+                        self._persist_session(messages, conversation_history)
+                        provider_label = llm_provider_label(self.provider, self.base_url)
+                        return {
+                            "final_response": None,
+                            "partial_response": partial_text,
+                            "messages": messages,
+                            "api_calls": api_call_count,
+                            "completed": False,
+                            "partial": True,
+                            "failed": True,
+                            "error": str(api_error.original_error),
+                            "llm_provider": provider_label,
+                            "response_metadata": {
+                                "x-llm-provider": provider_label,
+                            },
                         }
                     
                     # Check for 413 payload-too-large BEFORE generic 4xx handler.
