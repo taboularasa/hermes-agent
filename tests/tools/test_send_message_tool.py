@@ -97,6 +97,45 @@ class TestSendMessageTool:
         )
         mirror_mock.assert_called_once_with("slack", "C0APDPNRGVB", "hello", source_label="cli", thread_id=None)
 
+    def test_sends_to_explicit_slack_thread_target(self):
+        slack_cfg = SimpleNamespace(enabled=True, token="***", extra={})
+        config = SimpleNamespace(
+            platforms={Platform.SLACK: slack_cfg},
+            get_home_channel=lambda _platform: None,
+        )
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "slack:C0APDPNRGVB:1775845722.761099",
+                        "message": "hello in thread",
+                    }
+                )
+            )
+
+        assert result["success"] is True
+        send_mock.assert_awaited_once_with(
+            Platform.SLACK,
+            slack_cfg,
+            "C0APDPNRGVB",
+            "hello in thread",
+            thread_id="1775845722.761099",
+            media_files=[],
+        )
+        mirror_mock.assert_called_once_with(
+            "slack",
+            "C0APDPNRGVB",
+            "hello in thread",
+            source_label="cli",
+            thread_id="1775845722.761099",
+        )
+
     def test_cron_duplicate_target_is_skipped_and_explained(self):
         home = SimpleNamespace(chat_id="-1001")
         config, _telegram_cfg = _make_config()
@@ -576,6 +615,33 @@ class TestSendToPlatformChunking:
             "***",
             "C123",
             "*hello* from <https://example.com|Hermes>",
+            thread_id=None,
+        )
+
+    def test_slack_messages_preserve_member_id_mentions(self, monkeypatch):
+        _ensure_slack_mock(monkeypatch)
+
+        import gateway.platforms.slack as slack_mod
+
+        monkeypatch.setattr(slack_mod, "SLACK_AVAILABLE", True)
+        send = AsyncMock(return_value={"success": True, "message_id": "1"})
+
+        with patch("tools.send_message_tool._send_slack", send):
+            result = asyncio.run(
+                _send_to_platform(
+                    Platform.SLACK,
+                    SimpleNamespace(enabled=True, token="***", extra={}),
+                    "C123",
+                    "Please check this <@U0APAQGJF7D>",
+                )
+            )
+
+        assert result["success"] is True
+        send.assert_awaited_once_with(
+            "***",
+            "C123",
+            "Please check this <@U0APAQGJF7D>",
+            thread_id=None,
         )
 
     def test_slack_bold_italic_formatted_before_send(self, monkeypatch):
