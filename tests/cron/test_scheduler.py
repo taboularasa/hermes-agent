@@ -729,11 +729,39 @@ class TestBuildJobPromptSilentHint:
         assert "classified as role=study" in result
         assert "execution loop, not a passive summary" in result
         assert "self_improvement_pipeline" in result
+        assert "OPERATOR_VALUE_SCORECARD" in result
+        assert "decision_readiness" in result
+        assert "throughput_diagnostic" in result
+
+    def test_global_coordinate_role_injects_operator_value_scorecard(self):
+        job = {
+            "prompt": "Select the next Hermes backlog item",
+            "role": "coordinate",
+            "scope": "global",
+        }
+        result = _build_job_prompt(job)
+        assert "classified as role=coordinate / scope=global" in result
+        assert "workspace-wide self-improvement control loop" in result
+        assert "OPERATOR_VALUE_SCORECARD" in result
+        assert "evidence_traceability" in result
+
+    def test_self_improve_role_injects_operator_value_scorecard(self):
+        job = {
+            "prompt": "Evaluate Hermes self-improvement work",
+            "role": "self-improve",
+            "scope": "hermes",
+        }
+        result = _build_job_prompt(job)
+        assert "classified as role=self-improve / scope=hermes" in result
+        assert "Hermes self-improvement benchmark/control loop" in result
+        assert "OPERATOR_VALUE_SCORECARD" in result
+        assert "follow_through_control" in result
 
     def test_non_study_role_does_not_inject_study_guidance(self):
         job = {"prompt": "Send report", "role": "report"}
         result = _build_job_prompt(job)
         assert "classified as role=study" not in result
+        assert "OPERATOR_VALUE_SCORECARD" not in result
 
 
 class TestBuildJobPromptMissingSkill:

@@ -75,18 +75,44 @@ def _resolve_hermes_home() -> Path:
 def _build_role_prompt_prefix(job: dict) -> str:
     """Return optional role-specific execution guidance for a cron job."""
     role = str(job.get("role") or "").strip().lower()
-    if role != "study":
-        return ""
+    scope = str(job.get("scope") or "").strip().lower()
+    if role == "study":
+        from hadto_patches.operator_value_metrics import format_operator_value_prompt_block
 
-    return (
-        "[SYSTEM: This cron job is classified as role=study. Treat it as an execution loop, not a passive summary. "
-        "When a run confirms a durable gap, convert that gap into explicit follow-through before you report: update the "
-        "owning backlog/control surface in the target repo, and if the gap is really Hermes's own capability "
-        "(planning, verification, delegation, evidence handling, candidate selection, or similar), also create or "
-        "update Hermes self-improvement work via self_improvement_pipeline or an equivalent backlog issue when those "
-        "tools are available. If you decide no action is warranted yet, say why in the report instead of silently "
-        "continuing.]"
-    )
+        return (
+            "[SYSTEM: This cron job is classified as role=study. Treat it as an execution loop, not a passive summary. "
+            "When a run confirms a durable gap, convert that gap into explicit follow-through before you report: update the "
+            "owning backlog/control surface in the target repo, and if the gap is really Hermes's own capability "
+            "(planning, verification, delegation, evidence handling, candidate selection, or similar), also create or "
+            "update Hermes self-improvement work via self_improvement_pipeline or an equivalent backlog issue when those "
+            "tools are available. If you decide no action is warranted yet, say why in the report instead of silently "
+            "continuing.]\n\n"
+            + format_operator_value_prompt_block("self-improvement study loop")
+        )
+
+    if role == "coordinate" and scope == "global":
+        from hadto_patches.operator_value_metrics import format_operator_value_prompt_block
+
+        return (
+            "[SYSTEM: This cron job is classified as role=coordinate / scope=global. Treat it as the "
+            "workspace-wide self-improvement control loop for backlog selection, WIP rescue, and operator handoff. "
+            "Select work by expected operator decision value, not by raw output volume, and make the recommended "
+            "next decision explicit before reporting.]\n\n"
+            + format_operator_value_prompt_block("workspace-wide self-improvement control loop")
+        )
+
+    if role in {"self-improve", "self_improve"}:
+        from hadto_patches.operator_value_metrics import format_operator_value_prompt_block
+
+        return (
+            "[SYSTEM: This cron job is classified as role=self-improve"
+            + (f" / scope={scope}" if scope else "")
+            + ". Treat it as the Hermes self-improvement benchmark/control loop. "
+            "Separate proof that the operator can make a better decision from proof that the loop produced more work.]\n\n"
+            + format_operator_value_prompt_block("Hermes self-improvement benchmark/control loop")
+        )
+
+    return ""
 
 def _resolve_origin(job: dict) -> Optional[dict]:
     """Extract origin info from a job, preserving any extra routing metadata."""

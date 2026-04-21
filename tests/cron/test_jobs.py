@@ -640,6 +640,19 @@ class TestInspectJobTopology:
         assert issue["severity"] == "error"
         assert snapshot["ok"] is False
 
+    def test_topology_exposes_operator_value_scorecard_contract(self, tmp_cron_dir):
+        create_job(prompt="A", schedule="every 1h", name="coord-global", role="coordinate", scope="global")
+
+        snapshot = inspect_job_topology(include_disabled=True)
+
+        metric_contract = snapshot["operator_value_metrics"]
+        metric_keys = {metric["key"] for metric in metric_contract}
+        assert "decision_readiness" in metric_keys
+        assert "evidence_traceability" in metric_keys
+        assert "risk_visibility" in metric_keys
+        assert "follow_through_control" in metric_keys
+        assert all(metric["evidence"] and metric["verification"] for metric in metric_contract)
+
 
 class TestSaveJobOutput:
     def test_creates_output_file(self, tmp_cron_dir):

@@ -1,6 +1,10 @@
 """Tests for hermes_cli.cron command handling."""
 
+import os
+import subprocess
+import sys
 from argparse import Namespace
+from pathlib import Path
 
 import pytest
 
@@ -13,6 +17,11 @@ def tmp_cron_dir(tmp_path, monkeypatch):
     monkeypatch.setattr("cron.jobs.CRON_DIR", tmp_path / "cron")
     monkeypatch.setattr("cron.jobs.JOBS_FILE", tmp_path / "cron" / "jobs.json")
     monkeypatch.setattr("cron.jobs.OUTPUT_DIR", tmp_path / "cron" / "output")
+    monkeypatch.delenv("HERMES_CRON_EXECUTION_CONTEXT", raising=False)
+    monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
+    monkeypatch.delenv("HERMES_CRON_AUTO_DELIVER_CHAT_ID", raising=False)
+    monkeypatch.delenv("HERMES_CRON_AUTO_DELIVER_PLATFORM", raising=False)
+    monkeypatch.delenv("HERMES_CRON_AUTO_DELIVER_THREAD_ID", raising=False)
     return tmp_path
 
 
@@ -118,3 +127,23 @@ class TestCronCommandLifecycle:
 
         assert exit_code == 0
         assert "no conflicts detected" in out.lower()
+
+    def test_main_parser_accepts_topology_and_doctor(self, tmp_path):
+        repo_root = Path(__file__).resolve().parents[2]
+        env = os.environ.copy()
+        env["HERMES_HOME"] = str(tmp_path / ".hermes")
+        env.pop("HERMES_CRON_EXECUTION_CONTEXT", None)
+        env.pop("HERMES_CRON_SESSION", None)
+        env.pop("HERMES_CRON_AUTO_DELIVER_CHAT_ID", None)
+        env.pop("HERMES_CRON_AUTO_DELIVER_PLATFORM", None)
+
+        for args in (["cron", "topology", "--all"], ["cron", "doctor"]):
+            result = subprocess.run(
+                [sys.executable, "-m", "hermes_cli.main", *args],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            assert result.returncode == 0, result.stderr
