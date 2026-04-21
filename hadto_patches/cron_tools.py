@@ -185,6 +185,7 @@ def _format_topology(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "ok": snapshot.get("ok", True),
         "summary": snapshot.get("summary", {}),
+        "operator_value_metrics": snapshot.get("operator_value_metrics", []),
         "groups": groups,
         "unclassified_active_jobs": [
             _format_job(job) for job in snapshot.get("unclassified_active_jobs", [])

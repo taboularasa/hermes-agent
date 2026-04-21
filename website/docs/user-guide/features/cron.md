@@ -186,6 +186,19 @@ Recommended invariants for autonomous implementations:
 - do not run an active `implement/global` job alongside scoped implementation jobs unless you explicitly want overlap
 - record a `--reason` when pausing or retiring a job
 
+### Operator-value scorecard
+
+Study jobs and the `role=coordinate` / `scope=global` coordinator are part of the self-improvement control loop. Their reports should include a compact operator-value scorecard so operators can see whether the run improved decision support, not just output volume.
+
+| Metric | Evidence | Verification |
+| --- | --- | --- |
+| `decision_readiness` | Recommended decision, rejected alternatives, and why each alternative lost. | A concrete `next_decision` plus pass/fail/partial status for the decision gate. |
+| `evidence_traceability` | Commands, tests, logs, PRs, issues, benchmarks, or files supporting key claims. | Every material claim has an artifact reference or is marked as inference/unknown. |
+| `risk_visibility` | Regressions, missing checks, stale assumptions, failed commands, or ambiguous ownership. | Each unresolved risk has a next check, owner, or reason it is acceptable. |
+| `follow_through_control` | Branch, commit, PR, CI/check status, and follow-up owner or scheduled action. | The handoff artifact exists and required checks are reported as passed, failed, partial, or not run. |
+
+Volume counters such as issues touched, lines changed, token count, elapsed time, or number of generated artifacts belong in `throughput_diagnostic`; they do not count as operator value.
+
 ## How it works
 
 **Cron execution is handled by the gateway daemon.** The gateway ticks the scheduler every 60 seconds, running any due jobs in isolated agent sessions.

@@ -626,6 +626,8 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
             }
         )
 
+    from hadto_patches.operator_value_metrics import operator_value_metric_dicts
+
     return {
         "ok": not any(issue["severity"] == "error" for issue in issues),
         "summary": {
@@ -640,6 +642,7 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
         "unclassified_active_jobs": unclassified_active,
         "grouped_active_jobs": grouped_active,
         "issues": issues,
+        "operator_value_metrics": list(operator_value_metric_dicts()),
     }
 
 
