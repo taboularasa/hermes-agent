@@ -23,6 +23,7 @@ from cron.jobs import (
     advance_next_run,
     get_due_jobs,
     inspect_job_topology,
+    inspect_persistence_ratchet,
     save_job_output,
 )
 
@@ -585,6 +586,15 @@ class TestGetDueJobs:
 
 
 class TestInspectJobTopology:
+    def _write_output(self, job_id: str, filename: str, response: str):
+        import cron.jobs as cron_jobs
+
+        output_dir = cron_jobs.OUTPUT_DIR / job_id
+        output_dir.mkdir(parents=True, exist_ok=True)
+        path = output_dir / filename
+        path.write_text(f"# Cron Job\n\n## Response\n\n{response}", encoding="utf-8")
+        return path
+
     def test_duplicate_names_are_flagged(self, tmp_cron_dir):
         first = create_job(prompt="A", schedule="every 1h", name="shared-name")
         second = create_job(prompt="B", schedule="every 2h", name="shared-name")
@@ -639,6 +649,89 @@ class TestInspectJobTopology:
         )
         assert issue["severity"] == "error"
         assert snapshot["ok"] is False
+
+    def test_persistence_ratchet_healthy_when_state_carries_forward(self, tmp_cron_dir):
+        job = create_job(
+            prompt="Coordinate backlog",
+            schedule="every 1h",
+            name="coord-global",
+            role="coordinate",
+            scope="global",
+        )
+        first = """Progress report.
+
+Persistence Ratchet:
+- Evidence: HAD-420 asks for preserved evidence/decisions/artifacts across runs
+- Decisions: keep one global coordinator as backlog owner
+- Artifacts: hadto_patches/cron_jobs.py topology check
+- Carry-forward: preserve HAD-420 evidence in the next report
+- Drift: none
+"""
+        second = """Follow-up report.
+
+Persistence Ratchet:
+- Evidence: HAD-420 asks for preserved evidence/decisions/artifacts across runs
+- Decisions: keep one global coordinator as backlog owner
+- Artifacts: hadto_patches/cron_jobs.py topology check
+- Carry-forward: keep HAD-420 evidence attached to the next action
+- Drift: none
+"""
+        self._write_output(job["id"], "2026-04-21_10-00-00.md", first)
+        self._write_output(job["id"], "2026-04-21_11-00-00.md", second)
+
+        ratchet = inspect_persistence_ratchet(get_job(job["id"]))
+        snapshot = inspect_job_topology(include_disabled=True)
+
+        assert ratchet["status"] == "healthy"
+        assert ratchet["compact_evidence"]["preserved_item_count"] >= 3
+        assert snapshot["summary"]["persistence_ratchet_checked"] == 1
+        assert snapshot["summary"]["persistence_ratchet_issue_count"] == 0
+        assert not [issue for issue in snapshot["issues"] if issue["code"].startswith("persistence_ratchet")]
+
+    def test_persistence_ratchet_missing_is_warning_after_repeated_reports(self, tmp_cron_dir):
+        job = create_job(
+            prompt="Coordinate backlog",
+            schedule="every 1h",
+            name="coord-global",
+            role="coordinate",
+            scope="global",
+        )
+        self._write_output(job["id"], "2026-04-21_10-00-00.md", "Checked the backlog and found work.")
+        self._write_output(job["id"], "2026-04-21_11-00-00.md", "Checked the backlog and found work again.")
+
+        snapshot = inspect_job_topology(include_disabled=True)
+
+        issue = next(issue for issue in snapshot["issues"] if issue["code"] == "persistence_ratchet_missing")
+        assert issue["severity"] == "warning"
+        assert issue["job_id"] == job["id"]
+        assert issue["surfaces"] == ["operator_value", "anti_make_work", "leading_indicator"]
+        assert snapshot["ok"] is True
+
+    def test_persistence_ratchet_surfaces_repeated_rediscovery_and_cleanup_drift(self, tmp_cron_dir):
+        job = create_job(
+            prompt="Coordinate backlog",
+            schedule="every 1h",
+            name="coord-global",
+            role="coordinate",
+            scope="global",
+        )
+        self._write_output(
+            job["id"],
+            "2026-04-21_10-00-00.md",
+            "Rediscovered the same backlog gap again and cleaned a dirty checkout.",
+        )
+        self._write_output(
+            job["id"],
+            "2026-04-21_11-00-00.md",
+            "Rediscovered the same backlog gap again; cleanup drift left untracked files.",
+        )
+
+        snapshot = inspect_job_topology(include_disabled=True)
+
+        issue = next(issue for issue in snapshot["issues"] if issue["code"] == "persistence_ratchet_drift")
+        evidence = issue["compact_evidence"]
+        assert issue["ratchet_status"] == "drift"
+        assert evidence["repeated_signals"] == ["cleanup_drift", "repeated_rediscovery"]
 
 
 class TestSaveJobOutput:

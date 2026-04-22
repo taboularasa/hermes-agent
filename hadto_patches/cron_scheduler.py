@@ -37,7 +37,14 @@ logger = logging.getLogger("cron.scheduler")
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run
+from cron.jobs import (
+    RATCHET_WINDOW_RUNS,
+    advance_next_run,
+    get_due_jobs,
+    mark_job_run,
+    save_job_output,
+    should_check_persistence_ratchet,
+)
 
 # Sentinel: when a cron agent has nothing new to report, it can start its
 # response with this marker to suppress delivery.  Output is still saved
@@ -84,8 +91,34 @@ def _build_role_prompt_prefix(job: dict) -> str:
         "owning backlog/control surface in the target repo, and if the gap is really Hermes's own capability "
         "(planning, verification, delegation, evidence handling, candidate selection, or similar), also create or "
         "update Hermes self-improvement work via self_improvement_pipeline or an equivalent backlog issue when those "
-        "tools are available. If you decide no action is warranted yet, say why in the report instead of silently "
-        "continuing.]"
+        "tools are available. For self-improvement reporting, carry forward the usable evidence, decision, and artifact "
+        "state that prevents rediscovering the same gap in the next run. If you decide no action is warranted yet, say "
+        "why in the report instead of silently continuing.]"
+    )
+
+
+def _build_persistence_ratchet_prompt_prefix(job: dict) -> str:
+    """Return recurring-loop guidance for preserving useful state across runs."""
+    if not should_check_persistence_ratchet(job):
+        return ""
+
+    try:
+        from hermes_constants import display_hermes_home
+
+        output_hint = f"{display_hermes_home()}/cron/output/{job.get('id', '<job-id>')}/"
+    except Exception:
+        output_hint = f"cron/output/{job.get('id', '<job-id>')}/"
+
+    return (
+        "[SYSTEM: This is a recurring control loop. Run a bounded persistence-ratchet check before reporting: "
+        f"inspect at most the last {RATCHET_WINDOW_RUNS} saved outputs in {output_hint} when prior run evidence is needed, "
+        "then distinguish durable carry-forward state from lucky repetition. A useful report should preserve compact, "
+        "usable evidence, decisions, or artifacts from prior runs and should surface repeated rediscovery or cleanup drift. "
+        "When you send a substantive final response, include a compact 'Persistence Ratchet' block with: "
+        "Evidence=<preserved log/file/issue/check facts>; Decisions=<still-valid decisions carried forward>; "
+        "Artifacts=<files/issues/PRs/checks updated or preserved>; Carry-forward=<one next durable state/action>; "
+        "Drift=<none or repeated rediscovery/cleanup drift>. Keep this tied to operator-value, anti-make-work, and "
+        "leading-indicator value. If there is genuinely nothing new and no operator action, respond exactly [SILENT].]"
     )
 
 def _resolve_origin(job: dict) -> Optional[dict]:
@@ -402,7 +435,13 @@ def _build_job_prompt(job: dict) -> str:
         "findings normally, or say [SILENT] and nothing more.]\n\n"
     )
     role_prefix = _build_role_prompt_prefix(job)
-    prompt = silent_hint + (role_prefix + "\n\n" if role_prefix else "") + prompt
+    ratchet_prefix = _build_persistence_ratchet_prompt_prefix(job)
+    prompt = (
+        silent_hint
+        + (role_prefix + "\n\n" if role_prefix else "")
+        + (ratchet_prefix + "\n\n" if ratchet_prefix else "")
+        + prompt
+    )
     if skills is None:
         legacy = job.get("skill")
         skills = [legacy] if legacy else []

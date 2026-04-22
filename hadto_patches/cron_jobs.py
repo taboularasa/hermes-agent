@@ -36,6 +36,20 @@ CRON_DIR = HERMES_DIR / "cron"
 JOBS_FILE = CRON_DIR / "jobs.json"
 OUTPUT_DIR = CRON_DIR / "output"
 ONESHOT_GRACE_SECONDS = 120
+RATCHET_WINDOW_RUNS = 4
+RATCHET_MAX_OUTPUT_BYTES = 64_000
+RATCHET_CONTROL_ROLES = {
+    "coordinate",
+    "implement",
+    "publish",
+    "report",
+    "study",
+}
+RATCHET_SURFACES = [
+    "operator_value",
+    "anti_make_work",
+    "leading_indicator",
+]
 
 
 def _normalize_skill_list(skill: Optional[str] = None, skills: Optional[Any] = None) -> List[str]:
@@ -74,6 +88,273 @@ def _apply_skill_fields(job: Dict[str, Any]) -> Dict[str, Any]:
     normalized["role"] = _normalize_taxonomy_value(normalized.get("role"))
     normalized["scope"] = _normalize_taxonomy_value(normalized.get("scope"))
     return normalized
+
+
+def should_check_persistence_ratchet(job: Dict[str, Any]) -> bool:
+    """Return True when a cron job is a recurring control loop worth ratchet-checking."""
+    schedule = job.get("schedule") or {}
+    if schedule.get("kind") not in {"cron", "interval"}:
+        return False
+
+    role = _normalize_taxonomy_value(job.get("role"))
+    scope = _normalize_taxonomy_value(job.get("scope"))
+    return bool(scope or role in RATCHET_CONTROL_ROLES)
+
+
+def _recent_output_files(job_id: str, *, limit: int = RATCHET_WINDOW_RUNS) -> List[Path]:
+    """Return the most recent saved output files for a job, bounded for cheap checks."""
+    output_dir = OUTPUT_DIR / job_id
+    if not output_dir.exists():
+        return []
+    try:
+        files = [path for path in output_dir.glob("*.md") if path.is_file()]
+        files.sort(key=lambda path: (path.stat().st_mtime, path.name))
+    except OSError:
+        return []
+    return files[-limit:]
+
+
+def _read_bounded_output(path: Path) -> str:
+    """Read a bounded tail of an output document; the response is at the end."""
+    try:
+        with open(path, "rb") as handle:
+            try:
+                handle.seek(-RATCHET_MAX_OUTPUT_BYTES, os.SEEK_END)
+            except OSError:
+                handle.seek(0)
+            return handle.read(RATCHET_MAX_OUTPUT_BYTES).decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _response_text(output_text: str) -> str:
+    marker = "\n## Response\n"
+    if marker in output_text:
+        return output_text.rsplit(marker, 1)[-1]
+    return output_text
+
+
+def _usable_ratchet_value(value: str) -> Optional[str]:
+    text = re.sub(r"\s+", " ", value or "").strip(" -*`_")
+    if not text:
+        return None
+    lowered = text.lower().strip(".")
+    if lowered in {"none", "n/a", "na", "not applicable", "no", "no change", "nothing"}:
+        return None
+    return text
+
+
+_RATCHET_INLINE_KEYS = {
+    "evidence": "evidence",
+    "decision": "decisions",
+    "decisions": "decisions",
+    "artifact": "artifacts",
+    "artifacts": "artifacts",
+    "carry-forward": "carry_forward",
+    "carry_forward": "carry_forward",
+    "carry forward": "carry_forward",
+    "next": "carry_forward",
+    "drift": "drift",
+}
+
+
+def _parse_ratchet_categories(text: str) -> Dict[str, List[str]]:
+    categories: Dict[str, List[str]] = {
+        "evidence": [],
+        "decisions": [],
+        "artifacts": [],
+        "carry_forward": [],
+        "drift": [],
+    }
+
+    def add(label: str, value: str) -> None:
+        category = _RATCHET_INLINE_KEYS.get(label.lower().replace("_", " "))
+        if not category:
+            category = _RATCHET_INLINE_KEYS.get(label.lower())
+        if not category:
+            return
+        usable = _usable_ratchet_value(value)
+        if usable and usable not in categories[category]:
+            categories[category].append(usable)
+
+    line_re = re.compile(
+        r"^\s*(?:[-*]\s*)?"
+        r"(evidence|decisions?|artifacts?|carry[-_ ]?forward|next|drift)"
+        r"\s*[:=-]\s*(.+?)\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    for match in line_re.finditer(text):
+        add(match.group(1), match.group(2))
+
+    ratchet_lines = [
+        line for line in text.splitlines()
+        if "ratchet" in line.lower() and any(key in line.lower() for key in ("evidence", "decision", "artifact", "carry", "next", "drift"))
+    ]
+    inline_re = re.compile(
+        r"\b(evidence|decisions?|artifacts?|carry[-_ ]?forward|next|drift)"
+        r"\s*=\s*([^;\n]+)",
+        re.IGNORECASE,
+    )
+    for line in ratchet_lines:
+        for match in inline_re.finditer(line):
+            add(match.group(1), match.group(2))
+
+    return categories
+
+
+def _ratchet_signal_labels(text: str) -> List[str]:
+    lowered = text.lower()
+    signals: List[str] = []
+    rediscovery_patterns = [
+        r"\brediscover(?:ed|ing|y)?\b",
+        r"\bre-discover(?:ed|ing|y)?\b",
+        r"\bfound again\b",
+        r"\bsame (?:gap|issue|failure|finding).*\bagain\b",
+        r"\brepeated rediscovery\b",
+    ]
+    cleanup_patterns = [
+        r"\bcleanup drift\b",
+        r"\brepeated cleanup\b",
+        r"\bdirty checkout\b",
+        r"\bstale (?:branch|checkout|worktree)\b",
+        r"\buntracked files\b",
+    ]
+    if any(re.search(pattern, lowered) for pattern in rediscovery_patterns):
+        signals.append("repeated_rediscovery")
+    if any(re.search(pattern, lowered) for pattern in cleanup_patterns):
+        signals.append("cleanup_drift")
+    return signals
+
+
+def _normalize_ratchet_item(item: str) -> str:
+    text = re.sub(r"[^a-z0-9#./:_-]+", " ", item.lower())
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _core_ratchet_items(run: Dict[str, Any]) -> Dict[str, set[str]]:
+    categories = run.get("categories", {})
+    return {
+        name: {_normalize_ratchet_item(item) for item in categories.get(name, [])}
+        for name in ("evidence", "decisions", "artifacts")
+    }
+
+
+def _preserved_ratchet_items(latest: Dict[str, Any], previous_runs: List[Dict[str, Any]]) -> Dict[str, List[str]]:
+    latest_items = _core_ratchet_items(latest)
+    previous_items: Dict[str, set[str]] = {"evidence": set(), "decisions": set(), "artifacts": set()}
+    for run in previous_runs:
+        for category, items in _core_ratchet_items(run).items():
+            previous_items[category].update(items)
+
+    preserved: Dict[str, List[str]] = {}
+    for category, items in latest_items.items():
+        overlap = sorted(item for item in items if item and item in previous_items[category])
+        if overlap:
+            preserved[category] = overlap[:3]
+    return preserved
+
+
+def _inspect_ratchet_output(path: Path) -> Dict[str, Any]:
+    text = _response_text(_read_bounded_output(path))
+    categories = _parse_ratchet_categories(text)
+    return {
+        "file": path.name,
+        "has_section": "persistence ratchet" in text.lower() or bool(categories["carry_forward"]),
+        "categories": categories,
+        "core_category_count": sum(1 for name in ("evidence", "decisions", "artifacts") if categories[name]),
+        "has_carry_forward": bool(categories["carry_forward"]),
+        "signals": _ratchet_signal_labels(text),
+    }
+
+
+def inspect_persistence_ratchet(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Inspect recent output for a recurring control-loop job's persistence ratchet."""
+    normalized_job = _apply_skill_fields(job)
+    result: Dict[str, Any] = {
+        "job_id": normalized_job.get("id"),
+        "name": normalized_job.get("name", normalized_job.get("id")),
+        "role": normalized_job.get("role"),
+        "scope": normalized_job.get("scope"),
+        "surfaces": list(RATCHET_SURFACES),
+        "window_runs": RATCHET_WINDOW_RUNS,
+        "checked_runs": 0,
+        "status": "not_applicable",
+        "compact_evidence": {},
+        "message": "Persistence ratchet check applies only to recurring classified control loops.",
+    }
+    if not should_check_persistence_ratchet(normalized_job):
+        return result
+
+    files = _recent_output_files(str(normalized_job.get("id", "")))
+    runs = [_inspect_ratchet_output(path) for path in files]
+    result["checked_runs"] = len(runs)
+    result["recent_outputs"] = [run["file"] for run in runs]
+
+    if len(runs) < 2:
+        result.update(
+            {
+                "status": "insufficient_history",
+                "message": "Need at least two saved runs before distinguishing durable carry-forward from lucky repetition.",
+            }
+        )
+        return result
+
+    signal_counts: Dict[str, int] = {}
+    for run in runs:
+        for signal in run["signals"]:
+            signal_counts[signal] = signal_counts.get(signal, 0) + 1
+    repeated_signals = sorted(signal for signal, count in signal_counts.items() if count >= 2)
+
+    latest = runs[-1]
+    preserved = _preserved_ratchet_items(latest, runs[:-1])
+    preserved_count = sum(len(items) for items in preserved.values())
+    compact_evidence = {
+        "latest_file": latest["file"],
+        "latest_core_categories": latest["core_category_count"],
+        "latest_has_carry_forward": latest["has_carry_forward"],
+        "preserved_items": preserved,
+        "preserved_item_count": preserved_count,
+        "repeated_signals": repeated_signals,
+    }
+    result["compact_evidence"] = compact_evidence
+
+    if repeated_signals:
+        result.update(
+            {
+                "status": "drift",
+                "message": (
+                    "Repeated rediscovery or cleanup drift appeared in recent runs: "
+                    + ", ".join(repeated_signals)
+                ),
+            }
+        )
+        return result
+
+    if not latest["has_section"] or latest["core_category_count"] < 2:
+        result.update(
+            {
+                "status": "missing",
+                "message": "Latest report lacks compact usable evidence, decisions, or artifacts for the persistence ratchet.",
+            }
+        )
+        return result
+
+    if not latest["has_carry_forward"] or preserved_count == 0:
+        result.update(
+            {
+                "status": "weak",
+                "message": "Latest report names ratchet state but does not preserve usable evidence, decisions, or artifacts from prior runs.",
+            }
+        )
+        return result
+
+    result.update(
+        {
+            "status": "healthy",
+            "message": "Latest report preserves usable evidence, decisions, or artifacts from prior runs.",
+        }
+    )
+    return result
 
 
 def _secure_dir(path: Path):
@@ -626,6 +907,36 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
             }
         )
 
+    persistence_ratchets: List[Dict[str, Any]] = []
+    for job in active_jobs:
+        if not should_check_persistence_ratchet(job):
+            continue
+        ratchet = inspect_persistence_ratchet(job)
+        persistence_ratchets.append(ratchet)
+        if ratchet["status"] in {"insufficient_history", "healthy"}:
+            continue
+        issue_code = {
+            "drift": "persistence_ratchet_drift",
+            "missing": "persistence_ratchet_missing",
+            "weak": "persistence_ratchet_weak",
+        }.get(ratchet["status"], "persistence_ratchet_issue")
+        issues.append(
+            {
+                "severity": "warning",
+                "code": issue_code,
+                "job_id": job["id"],
+                "job_name": job.get("name", job["id"]),
+                "ratchet_status": ratchet["status"],
+                "surfaces": list(RATCHET_SURFACES),
+                "compact_evidence": ratchet.get("compact_evidence", {}),
+                "message": (
+                    f"Persistence ratchet {ratchet['status']} for recurring control loop "
+                    f"'{job.get('name', job['id'])}' ({job['id']}): {ratchet['message']} "
+                    "This is an operator-value, anti-make-work, and leading-indicator warning."
+                ),
+            }
+        )
+
     return {
         "ok": not any(issue["severity"] == "error" for issue in issues),
         "summary": {
@@ -634,11 +945,17 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
             "inactive_jobs": len(inactive_jobs),
             "classified_active_jobs": len(active_jobs) - len(unclassified_active),
             "issue_count": len(issues),
+            "persistence_ratchet_checked": len(persistence_ratchets),
+            "persistence_ratchet_issue_count": sum(
+                1 for ratchet in persistence_ratchets
+                if ratchet["status"] not in {"insufficient_history", "healthy"}
+            ),
         },
         "active_jobs": active_jobs,
         "inactive_jobs": inactive_jobs,
         "unclassified_active_jobs": unclassified_active,
         "grouped_active_jobs": grouped_active,
+        "persistence_ratchets": persistence_ratchets,
         "issues": issues,
     }
 
