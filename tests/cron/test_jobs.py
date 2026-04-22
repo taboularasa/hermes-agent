@@ -24,6 +24,7 @@ from cron.jobs import (
     get_due_jobs,
     inspect_job_topology,
     inspect_persistence_ratchet,
+    inspect_first_proof_point,
     inspect_trust_contract,
     save_job_output,
 )
@@ -738,6 +739,58 @@ Persistence Ratchet:
         assert topology_contract["escalation_checkpoint"] == contract["escalation_checkpoint"]
         assert snapshot["summary"]["trust_contract_checked"] >= 1
         assert snapshot["summary"]["trust_contract_degraded_count"] >= 1
+
+    def test_first_proof_point_populates_bounded_seed_in_trust_contract(self, tmp_cron_dir):
+        job = create_job(
+            prompt="Coordinate backlog and keep the selected issue moving.",
+            schedule="every 10m",
+            name="coord-global",
+            role="coordinate",
+            scope="global",
+        )
+        self._write_output(
+            job["id"],
+            "2026-04-21_11-00-00.md",
+            """Backlog coordination moved HAD-437.
+
+First Proof Point:
+- Seed Surface: HAD-437 cron topology report in hadto_patches/cron_jobs.py and hermes cron topology
+- Protection Assumptions: limited to recurring classified cron control loops; warnings only, no job rewrites
+- Success Signal: topology output names the first seed, proof signal, and imitation dependency
+- Imitation Path: copy the same field set into other planning/self-improvement surfaces after topology reports stay populated
+- Why First: the global coordinator is the recurring bridge loop most likely to turn governance language into live work
+""",
+        )
+
+        proof_point = inspect_first_proof_point(get_job(job["id"]))
+        snapshot = inspect_job_topology(include_disabled=True)
+        contract = next(item for item in snapshot["trust_contracts"] if item["job_id"] == job["id"])
+
+        assert proof_point["status"] == "populated"
+        assert proof_point["fields"]["seed_surface"].startswith("HAD-437 cron topology report")
+        assert proof_point["fields"]["imitation_path"].startswith("copy the same field set")
+        assert contract["first_proof_point"]["status"] == "populated"
+        assert contract["first_proof_point"]["fields"]["success_signal"].startswith("topology output names")
+        assert snapshot["summary"]["first_proof_point_checked"] == 1
+        assert snapshot["summary"]["first_proof_point_issue_count"] == 0
+
+    def test_first_proof_point_missing_is_warning_after_report(self, tmp_cron_dir):
+        job = create_job(
+            prompt="Coordinate backlog",
+            schedule="every 1h",
+            name="coord-global",
+            role="coordinate",
+            scope="global",
+        )
+        self._write_output(job["id"], "2026-04-21_11-00-00.md", "Governance should improve everywhere.")
+
+        snapshot = inspect_job_topology(include_disabled=True)
+
+        issue = next(issue for issue in snapshot["issues"] if issue["code"] == "first_proof_point_missing")
+        assert issue["severity"] == "warning"
+        assert issue["job_id"] == job["id"]
+        assert "one protected seed surface" in issue["message"]
+        assert snapshot["summary"]["first_proof_point_issue_count"] == 1
 
     def test_persistence_ratchet_surfaces_repeated_rediscovery_and_cleanup_drift(self, tmp_cron_dir):
         job = create_job(

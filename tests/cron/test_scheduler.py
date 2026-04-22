@@ -755,6 +755,12 @@ class TestBuildJobPromptSilentHint:
         assert "Fast Loop=<what this run may change immediately>" in result
         assert "Slow Loop=<what requires slower governance or rule revision>" in result
         assert "Escalate When=<the concrete checkpoint" in result
+        assert "First Proof Point=<one bounded protected seed" in result
+        assert "Seed Surface=<one concrete issue/job/repo path/operator workflow" in result
+        assert "Protection Assumptions=<what keeps this seed bounded" in result
+        assert "Success Signal=<the observable result that proves the seed worked>" in result
+        assert "Imitation Path=<what another site would copy only after the signal holds>" in result
+        assert "Why First=<why this seed is the right first nucleation site>" in result
         assert "Coverage Completion" in result
         assert "Evidence Coverage=<what evidence or behavior is now covered by this run>" in result
         assert "Contradictions=<none or the exact conflict that still breaks confidence>" in result

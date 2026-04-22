@@ -213,6 +213,8 @@ def cron_topology(show_all: bool = False):
         for contract in trust_contracts:
             fast_loop = "; ".join(contract.get("fast_loop_surfaces", [])[:2]) or "-"
             slow_loop = "; ".join(contract.get("slow_loop_surfaces", [])[:2]) or "-"
+            proof_point = contract.get("first_proof_point") or {}
+            proof_fields = proof_point.get("fields") or {}
             print(
                 f"    - {contract.get('name', contract.get('job_id'))} "
                 f"({str(contract.get('job_id', '?'))[:8]}): "
@@ -221,6 +223,12 @@ def cron_topology(show_all: bool = False):
             print(f"      Fast: {fast_loop}")
             print(f"      Slow: {slow_loop}")
             print(f"      Escalate: {contract.get('escalation_checkpoint', '-')}")
+            if proof_fields:
+                print(f"      First seed: {proof_fields.get('seed_surface', '-')}")
+                print(f"      Proves: {proof_fields.get('success_signal', '-')}")
+                print(f"      Imitates by: {proof_fields.get('imitation_path', '-')}")
+            else:
+                print(f"      First seed: {proof_point.get('status', 'required')} - {proof_point.get('message', '-')}")
         print()
 
     if snapshot.get("issues"):

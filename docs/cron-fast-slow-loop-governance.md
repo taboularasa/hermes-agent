@@ -38,10 +38,25 @@ Examples:
 - An execution loop can block a rollout or fail verification in the fast loop, but changing rollout gates for all future runs is slow-loop work.
 - A discovery loop can report missing evidence in the fast loop, but changing study cadence or evidence requirements is slow-loop work.
 
+## First proof point
+
+Broad governance doctrine is not enough for a meaningful capability shift. Each recurring control-loop report must name one bounded first seed: the protected proof point where the new model is supposed to work before it expands.
+
+The `First Proof Point` block requires:
+
+- `Seed Surface`: one concrete issue, job, repo path, check, or operator workflow
+- `Protection Assumptions`: what keeps the seed bounded while tested
+- `Success Signal`: the observable result that proves the seed worked
+- `Imitation Path`: what another site would copy only after the signal holds
+- `Why First`: why this site is the right first nucleation point
+
+This separates broad doctrine from a testable seed system. A report that says "roll this out globally" without naming the protected first site should stay visible as incomplete governance.
+
 ## Repo-visible surfaces
 
 The contract is exposed in three places:
 
 1. `hadto_patches/cron_jobs.py` trust-contract snapshots now include `fast_loop_surfaces`, `slow_loop_surfaces`, and `escalation_checkpoint`
-2. `hadto_patches/cron_scheduler.py` prompts recurring jobs to report those fields in the saved Trust Contract block
-3. `hadto_patches/cron_cli.py` prints the fast-loop, slow-loop, and escalation checkpoint in `hermes cron topology`
+2. `hadto_patches/cron_jobs.py` also parses recent outputs for the `First Proof Point` field set and attaches it to trust-contract snapshots
+3. `hadto_patches/cron_scheduler.py` prompts recurring jobs to report those fields in the saved Trust Contract and First Proof Point blocks
+4. `hadto_patches/cron_cli.py` prints the fast-loop, slow-loop, escalation checkpoint, first seed, success signal, and imitation path in `hermes cron topology`
