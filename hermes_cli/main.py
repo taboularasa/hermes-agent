@@ -5249,6 +5249,11 @@ For more help on a command:
     # cron status
     cron_subparsers.add_parser("status", help="Check if cron scheduler is running")
 
+    # cron topology / doctor
+    cron_topology = cron_subparsers.add_parser("topology", help="Show cron topology, trust contracts, and overlap issues")
+    cron_topology.add_argument("--all", action="store_true", help="Include disabled jobs")
+    cron_subparsers.add_parser("doctor", help="Lint cron topology for conflicts")
+
     # cron tick (mostly for debugging)
     cron_subparsers.add_parser("tick", help="Run due jobs once and exit")
 

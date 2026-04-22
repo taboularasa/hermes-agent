@@ -156,6 +156,66 @@ def _discovery_execution_mode(job: Dict[str, Any]) -> str:
     return "unclassified"
 
 
+def _fast_slow_loop_contract(job: Dict[str, Any]) -> Dict[str, Any]:
+    mode = _discovery_execution_mode(job)
+    shared_slow = [
+        "change trust contracts, verification targets, or benchmark criteria",
+        "rewrite cron/job governance, topology, or durable policy docs",
+        "change delegate, assignee, or approval rules beyond the current work item",
+    ]
+    contracts = {
+        "discovery": {
+            "fast_loop_surfaces": [
+                "collect fresh evidence and refresh durable artifacts",
+                "update machine-readable status and visible failure state",
+                "flag evidence gaps without rewriting the governing contract",
+            ],
+            "slow_loop_surfaces": shared_slow + [
+                "change study/report scope, cadence, or evidence requirements",
+            ],
+            "escalation_checkpoint": (
+                "Escalate when the run needs to change evidence requirements, job cadence, or the trust contract instead of only refreshing this cycle's artifact."
+            ),
+        },
+        "execution": {
+            "fast_loop_surfaces": [
+                "advance the current issue, PR, deployment, or verification step",
+                "record concrete blockers and pause unsafe execution",
+                "update issue state or status comments for the current work item",
+            ],
+            "slow_loop_surfaces": shared_slow + [
+                "change rollout gates, deployment policy, or execution-wide acceptance criteria",
+            ],
+            "escalation_checkpoint": (
+                "Escalate when the run must redefine merge, rollout, or verification policy rather than finishing or safely blocking the current execution step."
+            ),
+        },
+        "bridge": {
+            "fast_loop_surfaces": [
+                "reacquire backlog and move the currently selected work item",
+                "resume, merge, or comment on existing owned work with live evidence",
+                "formalize a concrete blocker when no safe execution step remains",
+            ],
+            "slow_loop_surfaces": shared_slow + [
+                "change backlog selection policy, preemption rules, or recurring loop contracts",
+            ],
+            "escalation_checkpoint": (
+                "Escalate when the run must change backlog policy, recurring-loop governance, or trust-contract rules instead of only moving the selected item."
+            ),
+        },
+        "unclassified": {
+            "fast_loop_surfaces": [
+                "update the current artifact or status without changing global rules",
+            ],
+            "slow_loop_surfaces": shared_slow,
+            "escalation_checkpoint": (
+                "Escalate when the run needs new governance or policy, not just a fresh execution pass."
+            ),
+        },
+    }
+    return contracts.get(mode, contracts["unclassified"])
+
+
 def inspect_trust_contract(
     job: Dict[str, Any],
     persistence_ratchet: Optional[Dict[str, Any]] = None,
@@ -187,6 +247,8 @@ def inspect_trust_contract(
         elif normalized_job.get("last_error") or normalized_job.get("last_delivery_error"):
             visible_outcome_state = f"{last_status}+error"
 
+    fast_slow = _fast_slow_loop_contract(normalized_job)
+
     contract = {
         "job_id": normalized_job.get("id"),
         "name": normalized_job.get("name", normalized_job.get("id")),
@@ -198,6 +260,9 @@ def inspect_trust_contract(
         "discovery_execution_mode": _discovery_execution_mode(normalized_job),
         "trust_posture": trust_posture,
         "failed_commitment_visible": degraded,
+        "fast_loop_surfaces": fast_slow["fast_loop_surfaces"],
+        "slow_loop_surfaces": fast_slow["slow_loop_surfaces"],
+        "escalation_checkpoint": fast_slow["escalation_checkpoint"],
     }
     if ratchet_status:
         contract["persistence_ratchet_status"] = ratchet_status
