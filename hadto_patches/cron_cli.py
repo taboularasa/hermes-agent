@@ -207,6 +207,22 @@ def cron_topology(show_all: bool = False):
             )
         print()
 
+    trust_contracts = snapshot.get("trust_contracts", [])
+    if trust_contracts:
+        print(color("  Trust Contracts", Colors.YELLOW))
+        for contract in trust_contracts:
+            fast_loop = "; ".join(contract.get("fast_loop_surfaces", [])[:2]) or "-"
+            slow_loop = "; ".join(contract.get("slow_loop_surfaces", [])[:2]) or "-"
+            print(
+                f"    - {contract.get('name', contract.get('job_id'))} "
+                f"({str(contract.get('job_id', '?'))[:8]}): "
+                f"{contract.get('trust_posture')} / {contract.get('discovery_execution_mode')}"
+            )
+            print(f"      Fast: {fast_loop}")
+            print(f"      Slow: {slow_loop}")
+            print(f"      Escalate: {contract.get('escalation_checkpoint', '-')}")
+        print()
+
     if snapshot.get("issues"):
         print(color("  Issues", Colors.RED))
         for issue in snapshot["issues"]:

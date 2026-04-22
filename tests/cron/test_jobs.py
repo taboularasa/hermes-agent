@@ -730,7 +730,12 @@ Persistence Ratchet:
         assert contract["shared_artifact_path"].endswith(job["id"])
         assert contract["verification_target"].startswith("saved output in")
         assert contract["trust_posture"] == "repeated_trust_bearing_degraded"
+        assert contract["fast_loop_surfaces"][0].startswith("reacquire backlog")
+        assert contract["slow_loop_surfaces"][-1] == "change backlog selection policy, preemption rules, or recurring loop contracts"
+        assert "backlog policy" in contract["escalation_checkpoint"]
         assert topology_contract["trust_posture"] == contract["trust_posture"]
+        assert topology_contract["fast_loop_surfaces"] == contract["fast_loop_surfaces"]
+        assert topology_contract["escalation_checkpoint"] == contract["escalation_checkpoint"]
         assert snapshot["summary"]["trust_contract_checked"] >= 1
         assert snapshot["summary"]["trust_contract_degraded_count"] >= 1
 

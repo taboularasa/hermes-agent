@@ -141,7 +141,10 @@ def _build_trust_contract_prompt_prefix(job: dict) -> str:
         f"Artifact=<{artifact_hint} or another durable shared artifact surface>; "
         "Verification=<the exact check proving whether the commitment held>; "
         "Outcome=<kept|missed|blocked plus concrete evidence>; "
-        "Trust Posture=<one_shot_disconnected|repeated_trust_bearing plus discovery|execution|bridge mode>. "
+        "Trust Posture=<one_shot_disconnected|repeated_trust_bearing plus discovery|execution|bridge mode>; "
+        "Fast Loop=<what this run may change immediately>; "
+        "Slow Loop=<what requires slower governance or rule revision>; "
+        "Escalate When=<the concrete checkpoint where this run must stop changing the current game and instead request governance revision>. "
         "If the commitment was missed, name the miss plainly so broken cooperation stays visible in saved output.]"
     )
 

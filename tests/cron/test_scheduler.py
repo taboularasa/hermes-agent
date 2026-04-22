@@ -752,6 +752,9 @@ class TestBuildJobPromptSilentHint:
         assert "Trust Contract" in result
         assert "one_shot_disconnected|repeated_trust_bearing" in result
         assert "discovery|execution|bridge" in result
+        assert "Fast Loop=<what this run may change immediately>" in result
+        assert "Slow Loop=<what requires slower governance or rule revision>" in result
+        assert "Escalate When=<the concrete checkpoint" in result
 
     def test_one_shot_job_does_not_inject_persistence_ratchet_guidance(self):
         job = {
