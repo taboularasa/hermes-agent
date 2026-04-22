@@ -749,6 +749,9 @@ class TestBuildJobPromptSilentHint:
         assert "Persistence Ratchet" in result
         assert "operator-value, anti-make-work, and leading-indicator" in result
         assert "cron/output/coord123" in result
+        assert "Trust Contract" in result
+        assert "one_shot_disconnected|repeated_trust_bearing" in result
+        assert "discovery|execution|bridge" in result
 
     def test_one_shot_job_does_not_inject_persistence_ratchet_guidance(self):
         job = {
@@ -760,6 +763,7 @@ class TestBuildJobPromptSilentHint:
         }
         result = _build_job_prompt(job)
         assert "bounded persistence-ratchet check" not in result
+        assert "Trust Contract" not in result
 
 
 class TestBuildJobPromptMissingSkill:

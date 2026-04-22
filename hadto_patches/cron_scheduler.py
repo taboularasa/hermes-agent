@@ -121,6 +121,31 @@ def _build_persistence_ratchet_prompt_prefix(job: dict) -> str:
         "leading-indicator value. If there is genuinely nothing new and no operator action, respond exactly [SILENT].]"
     )
 
+
+def _build_trust_contract_prompt_prefix(job: dict) -> str:
+    """Return compact trust-contract guidance for recurring classified loops."""
+    if not should_check_persistence_ratchet(job):
+        return ""
+
+    try:
+        from hermes_constants import display_hermes_home
+
+        artifact_hint = f"{display_hermes_home()}/cron/output/{job.get('id', '<job-id>')}/"
+    except Exception:
+        artifact_hint = f"cron/output/{job.get('id', '<job-id>')}/"
+
+    return (
+        "[SYSTEM: This loop is operating under a computational trust contract, not a one-shot prompt. "
+        "Before reporting, include a compact 'Trust Contract' block with: "
+        "Commitment=<the concrete promise this run was meant to keep>; "
+        f"Artifact=<{artifact_hint} or another durable shared artifact surface>; "
+        "Verification=<the exact check proving whether the commitment held>; "
+        "Outcome=<kept|missed|blocked plus concrete evidence>; "
+        "Trust Posture=<one_shot_disconnected|repeated_trust_bearing plus discovery|execution|bridge mode>. "
+        "If the commitment was missed, name the miss plainly so broken cooperation stays visible in saved output.]"
+    )
+
+
 def _resolve_origin(job: dict) -> Optional[dict]:
     """Extract origin info from a job, preserving any extra routing metadata."""
     origin = job.get("origin")
@@ -436,10 +461,12 @@ def _build_job_prompt(job: dict) -> str:
     )
     role_prefix = _build_role_prompt_prefix(job)
     ratchet_prefix = _build_persistence_ratchet_prompt_prefix(job)
+    trust_prefix = _build_trust_contract_prompt_prefix(job)
     prompt = (
         silent_hint
         + (role_prefix + "\n\n" if role_prefix else "")
         + (ratchet_prefix + "\n\n" if ratchet_prefix else "")
+        + (trust_prefix + "\n\n" if trust_prefix else "")
         + prompt
     )
     if skills is None:

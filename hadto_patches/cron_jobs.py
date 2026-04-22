@@ -50,6 +50,9 @@ RATCHET_SURFACES = [
     "anti_make_work",
     "leading_indicator",
 ]
+DISCOVERY_ROLES = {"report", "study"}
+EXECUTION_ROLES = {"implement", "publish"}
+BRIDGE_ROLES = {"coordinate", "self-improve"}
 
 
 def _normalize_skill_list(skill: Optional[str] = None, skills: Optional[Any] = None) -> List[str]:
@@ -125,6 +128,85 @@ def _read_bounded_output(path: Path) -> str:
             return handle.read(RATCHET_MAX_OUTPUT_BYTES).decode("utf-8", errors="replace")
     except OSError:
         return ""
+
+
+def _job_artifact_path(job: Dict[str, Any]) -> str:
+    job_id = str(job.get("id") or "<job-id>")
+    return str(OUTPUT_DIR / job_id)
+
+
+def _job_commitment(job: Dict[str, Any]) -> str:
+    prompt = str(job.get("prompt") or "").strip()
+    for line in prompt.splitlines():
+        text = re.sub(r"\s+", " ", line).strip(" -*`_")
+        if text:
+            return text[:160]
+    name = str(job.get("name") or job.get("id") or "cron job").strip()
+    return name[:160]
+
+
+def _discovery_execution_mode(job: Dict[str, Any]) -> str:
+    role = _normalize_taxonomy_value(job.get("role"))
+    if role in DISCOVERY_ROLES:
+        return "discovery"
+    if role in EXECUTION_ROLES:
+        return "execution"
+    if role in BRIDGE_ROLES:
+        return "bridge"
+    return "unclassified"
+
+
+def inspect_trust_contract(
+    job: Dict[str, Any],
+    persistence_ratchet: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Return a compact trust contract for a recurring or one-shot cron loop."""
+    normalized_job = _apply_skill_fields(job)
+    recurring = should_check_persistence_ratchet(normalized_job)
+    ratchet_status = (persistence_ratchet or {}).get("status")
+    last_status = str(normalized_job.get("last_status") or normalized_job.get("state") or "unknown")
+    degraded = bool(
+        last_status in {"error", "failed"}
+        or ratchet_status in {"missing", "weak", "drift"}
+        or normalized_job.get("last_error")
+        or normalized_job.get("last_delivery_error")
+    )
+    trust_posture = "repeated_trust_bearing" if recurring and not degraded else "one_shot_disconnected"
+    if recurring and degraded:
+        trust_posture = "repeated_trust_bearing_degraded"
+
+    verification_target = (
+        f"saved output in {_job_artifact_path(normalized_job)} and persistence ratchet status"
+        if recurring
+        else f"saved output in {_job_artifact_path(normalized_job)}"
+    )
+    visible_outcome_state = last_status
+    if degraded and last_status not in {"error", "failed"}:
+        if ratchet_status in {"missing", "weak", "drift"}:
+            visible_outcome_state = f"{last_status}+{ratchet_status}"
+        elif normalized_job.get("last_error") or normalized_job.get("last_delivery_error"):
+            visible_outcome_state = f"{last_status}+error"
+
+    contract = {
+        "job_id": normalized_job.get("id"),
+        "name": normalized_job.get("name", normalized_job.get("id")),
+        "declared_commitment": _job_commitment(normalized_job),
+        "shared_artifact_path": _job_artifact_path(normalized_job),
+        "verification_target": verification_target,
+        "visible_outcome_state": visible_outcome_state,
+        "interaction_mode": "repeated" if recurring else "one_shot",
+        "discovery_execution_mode": _discovery_execution_mode(normalized_job),
+        "trust_posture": trust_posture,
+        "failed_commitment_visible": degraded,
+    }
+    if ratchet_status:
+        contract["persistence_ratchet_status"] = ratchet_status
+    if persistence_ratchet and persistence_ratchet.get("compact_evidence"):
+        contract["compact_evidence"] = persistence_ratchet["compact_evidence"]
+    error_text = normalized_job.get("last_error") or normalized_job.get("last_delivery_error")
+    if error_text:
+        contract["visible_failure"] = str(error_text)
+    return contract
 
 
 def _response_text(output_text: str) -> str:
@@ -908,11 +990,14 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
         )
 
     persistence_ratchets: List[Dict[str, Any]] = []
+    trust_contracts: List[Dict[str, Any]] = []
     for job in active_jobs:
         if not should_check_persistence_ratchet(job):
+            trust_contracts.append(inspect_trust_contract(job))
             continue
         ratchet = inspect_persistence_ratchet(job)
         persistence_ratchets.append(ratchet)
+        trust_contracts.append(inspect_trust_contract(job, ratchet))
         if ratchet["status"] in {"insufficient_history", "healthy"}:
             continue
         issue_code = {
@@ -937,6 +1022,9 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
             }
         )
 
+    for job in inactive_jobs:
+        trust_contracts.append(inspect_trust_contract(job))
+
     return {
         "ok": not any(issue["severity"] == "error" for issue in issues),
         "summary": {
@@ -950,12 +1038,17 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
                 1 for ratchet in persistence_ratchets
                 if ratchet["status"] not in {"insufficient_history", "healthy"}
             ),
+            "trust_contract_checked": len(trust_contracts),
+            "trust_contract_degraded_count": sum(
+                1 for contract in trust_contracts if contract.get("failed_commitment_visible")
+            ),
         },
         "active_jobs": active_jobs,
         "inactive_jobs": inactive_jobs,
         "unclassified_active_jobs": unclassified_active,
         "grouped_active_jobs": grouped_active,
         "persistence_ratchets": persistence_ratchets,
+        "trust_contracts": trust_contracts,
         "issues": issues,
     }
 
