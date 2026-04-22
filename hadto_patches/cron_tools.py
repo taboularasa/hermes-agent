@@ -166,6 +166,8 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
     }
     if job.get("script"):
         result["script"] = job["script"]
+    if job.get("trust_contract"):
+        result["trust_contract"] = job["trust_contract"]
     return result
 
 
@@ -191,6 +193,7 @@ def _format_topology(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         ],
         "inactive_jobs": [_format_job(job) for job in snapshot.get("inactive_jobs", [])],
         "persistence_ratchets": snapshot.get("persistence_ratchets", []),
+        "trust_contracts": snapshot.get("trust_contracts", []),
         "issues": snapshot.get("issues", []),
     }
 

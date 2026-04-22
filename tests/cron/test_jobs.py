@@ -24,6 +24,7 @@ from cron.jobs import (
     get_due_jobs,
     inspect_job_topology,
     inspect_persistence_ratchet,
+    inspect_trust_contract,
     save_job_output,
 )
 
@@ -706,6 +707,32 @@ Persistence Ratchet:
         assert issue["job_id"] == job["id"]
         assert issue["surfaces"] == ["operator_value", "anti_make_work", "leading_indicator"]
         assert snapshot["ok"] is True
+
+    def test_trust_contract_surfaces_repeated_loop_posture_and_artifact(self, tmp_cron_dir):
+        job = create_job(
+            prompt="Coordinate backlog and keep the selected issue moving.",
+            schedule="every 10m",
+            name="coord-global",
+            role="coordinate",
+            scope="global",
+        )
+        self._write_output(job["id"], "2026-04-21_10-00-00.md", "Checked the backlog and found work.")
+        self._write_output(job["id"], "2026-04-21_11-00-00.md", "Checked the backlog and found work again.")
+
+        ratchet = inspect_persistence_ratchet(get_job(job["id"]))
+        contract = inspect_trust_contract(get_job(job["id"]), ratchet)
+        snapshot = inspect_job_topology(include_disabled=True)
+        topology_contract = next(item for item in snapshot["trust_contracts"] if item["job_id"] == job["id"])
+
+        assert contract["declared_commitment"].startswith("Coordinate backlog")
+        assert contract["interaction_mode"] == "repeated"
+        assert contract["discovery_execution_mode"] == "bridge"
+        assert contract["shared_artifact_path"].endswith(job["id"])
+        assert contract["verification_target"].startswith("saved output in")
+        assert contract["trust_posture"] == "repeated_trust_bearing_degraded"
+        assert topology_contract["trust_posture"] == contract["trust_posture"]
+        assert snapshot["summary"]["trust_contract_checked"] >= 1
+        assert snapshot["summary"]["trust_contract_degraded_count"] >= 1
 
     def test_persistence_ratchet_surfaces_repeated_rediscovery_and_cleanup_drift(self, tmp_cron_dir):
         job = create_job(
