@@ -149,6 +149,23 @@ def _build_trust_contract_prompt_prefix(job: dict) -> str:
     )
 
 
+def _build_coverage_completion_prompt_prefix(job: dict) -> str:
+    """Return compact coverage-completion guidance for recurring classified loops."""
+    if not should_check_persistence_ratchet(job):
+        return ""
+
+    return (
+        "[SYSTEM: Treat recurring-loop completion as coverage completion, not activity narration alone. "
+        "Before reporting, include a compact 'Coverage Completion' block with: "
+        "Evidence Coverage=<what evidence or behavior is now covered by this run>; "
+        "Contradictions=<none or the exact conflict that still breaks confidence>; "
+        "Uncovered Region=<the next behavior, claim, or surface that still lacks enough coverage>; "
+        "Closure Basis=<why this run counts as real progress rather than a status restatement>. "
+        "Prefer structural claims that survive translation across logs, issues, checks, and operator summaries. "
+        "If the run only produced activity with no new coverage, say so plainly.]"
+    )
+
+
 def _resolve_origin(job: dict) -> Optional[dict]:
     """Extract origin info from a job, preserving any extra routing metadata."""
     origin = job.get("origin")
@@ -465,11 +482,13 @@ def _build_job_prompt(job: dict) -> str:
     role_prefix = _build_role_prompt_prefix(job)
     ratchet_prefix = _build_persistence_ratchet_prompt_prefix(job)
     trust_prefix = _build_trust_contract_prompt_prefix(job)
+    coverage_prefix = _build_coverage_completion_prompt_prefix(job)
     prompt = (
         silent_hint
         + (role_prefix + "\n\n" if role_prefix else "")
         + (ratchet_prefix + "\n\n" if ratchet_prefix else "")
         + (trust_prefix + "\n\n" if trust_prefix else "")
+        + (coverage_prefix + "\n\n" if coverage_prefix else "")
         + prompt
     )
     if skills is None:

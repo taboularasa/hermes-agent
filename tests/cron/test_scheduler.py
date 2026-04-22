@@ -755,6 +755,11 @@ class TestBuildJobPromptSilentHint:
         assert "Fast Loop=<what this run may change immediately>" in result
         assert "Slow Loop=<what requires slower governance or rule revision>" in result
         assert "Escalate When=<the concrete checkpoint" in result
+        assert "Coverage Completion" in result
+        assert "Evidence Coverage=<what evidence or behavior is now covered by this run>" in result
+        assert "Contradictions=<none or the exact conflict that still breaks confidence>" in result
+        assert "Uncovered Region=<the next behavior, claim, or surface that still lacks enough coverage>" in result
+        assert "Closure Basis=<why this run counts as real progress rather than a status restatement>" in result
 
     def test_one_shot_job_does_not_inject_persistence_ratchet_guidance(self):
         job = {
@@ -767,6 +772,7 @@ class TestBuildJobPromptSilentHint:
         result = _build_job_prompt(job)
         assert "bounded persistence-ratchet check" not in result
         assert "Trust Contract" not in result
+        assert "Coverage Completion" not in result
 
 
 class TestBuildJobPromptMissingSkill:
