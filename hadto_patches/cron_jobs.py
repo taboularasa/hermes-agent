@@ -163,6 +163,33 @@ def _discovery_execution_mode(job: Dict[str, Any]) -> str:
     return "unclassified"
 
 
+def _operator_contract_checks(job: Dict[str, Any]) -> Dict[str, str]:
+    mode = _discovery_execution_mode(job)
+    checks = {
+        "discovery": {
+            "dignity_check": "Preserve operator agency by naming evidence gaps plainly, keeping misses visible in shared artifacts, and escalating before a study or review loop asks the operator to surrender judgment for basic access.",
+            "capability_check": "Compound operator capability by turning fresh evidence into durable notes, status, or backlog inputs that make the next decision easier instead of replacing operator reasoning with an opaque summary.",
+            "viability_check": "Keep the loop stable and inspectable with durable artifacts, bounded evidence refresh, and an explicit escalation checkpoint before evidence requirements or review rules are rewritten.",
+        },
+        "execution": {
+            "dignity_check": "Preserve operator agency by keeping concrete blockers, rollback points, and approval boundaries visible before delegated execution asks the operator to trust an opaque change.",
+            "capability_check": "Compound operator capability by leaving branch, PR, verification, and status evidence that helps the operator steer the next execution step instead of hiding the work behind automation.",
+            "viability_check": "Keep execution stable and inspectable with bounded acceptance criteria, visible failure state, and a stop point before rollout or merge policy is rewritten for future runs.",
+        },
+        "bridge": {
+            "dignity_check": "Preserve operator agency by keeping backlog selection, ownership, and blocker evidence explicit so the operator can see why a delegated run or coordination pass moved this item now.",
+            "capability_check": "Compound operator capability by turning each coordination pass into durable issue state, comments, or repo evidence that sharpens the next human or delegated decision.",
+            "viability_check": "Keep the coordination surface stable and inspectable with machine-readable status, bounded preemption, and an escalation checkpoint before backlog policy or recurring-loop rules are changed.",
+        },
+        "unclassified": {
+            "dignity_check": "Preserve operator agency by making the current commitment and any miss plainly visible before automation expands its scope.",
+            "capability_check": "Compound operator capability by leaving durable evidence that improves the next decision instead of only producing a transient answer.",
+            "viability_check": "Keep the surface stable and inspectable with explicit verification and a stop point before global rules are revised.",
+        },
+    }
+    return checks.get(mode, checks["unclassified"])
+
+
 def _fast_slow_loop_contract(job: Dict[str, Any]) -> Dict[str, Any]:
     mode = _discovery_execution_mode(job)
     shared_slow = [
@@ -256,6 +283,7 @@ def inspect_trust_contract(
             visible_outcome_state = f"{last_status}+error"
 
     fast_slow = _fast_slow_loop_contract(normalized_job)
+    operator_checks = _operator_contract_checks(normalized_job)
 
     contract = {
         "job_id": normalized_job.get("id"),
@@ -268,6 +296,9 @@ def inspect_trust_contract(
         "discovery_execution_mode": _discovery_execution_mode(normalized_job),
         "trust_posture": trust_posture,
         "failed_commitment_visible": degraded,
+        "dignity_check": operator_checks["dignity_check"],
+        "capability_check": operator_checks["capability_check"],
+        "viability_check": operator_checks["viability_check"],
         "fast_loop_surfaces": fast_slow["fast_loop_surfaces"],
         "slow_loop_surfaces": fast_slow["slow_loop_surfaces"],
         "escalation_checkpoint": fast_slow["escalation_checkpoint"],

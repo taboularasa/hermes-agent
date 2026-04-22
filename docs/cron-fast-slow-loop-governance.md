@@ -52,11 +52,21 @@ The `First Proof Point` block requires:
 
 This separates broad doctrine from a testable seed system. A report that says "roll this out globally" without naming the protected first site should stay visible as incomplete governance.
 
+## Operator checks
+
+Every trust contract now carries three operator checks before a recurring automation pattern is treated as normal:
+
+- `Dignity`: does the run preserve operator agency, ownership, and visible misses instead of forcing surrender for basic access?
+- `Capability`: does the run compound operator capability with durable evidence and steerable context instead of replacing judgment with opaque automation?
+- `Viability`: does the run keep the surrounding system stable, bounded, and inspectable enough to rely on over time?
+
+These checks are phrased for recurring loops, delegated execution, and self-improvement review surfaces.
+
 ## Repo-visible surfaces
 
 The contract is exposed in three places:
 
-1. `hadto_patches/cron_jobs.py` trust-contract snapshots now include `fast_loop_surfaces`, `slow_loop_surfaces`, and `escalation_checkpoint`
+1. `hadto_patches/cron_jobs.py` trust-contract snapshots now include `dignity_check`, `capability_check`, `viability_check`, `fast_loop_surfaces`, `slow_loop_surfaces`, and `escalation_checkpoint`
 2. `hadto_patches/cron_jobs.py` also parses recent outputs for the `First Proof Point` field set and attaches it to trust-contract snapshots
 3. `hadto_patches/cron_scheduler.py` prompts recurring jobs to report those fields in the saved Trust Contract and First Proof Point blocks
 4. `hadto_patches/cron_cli.py` prints the fast-loop, slow-loop, escalation checkpoint, first seed, success signal, and imitation path in `hermes cron topology`
