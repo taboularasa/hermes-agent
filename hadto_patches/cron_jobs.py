@@ -50,6 +50,7 @@ RATCHET_SURFACES = [
     "anti_make_work",
     "leading_indicator",
 ]
+TRUST_REPEATED_SCHEDULE_KINDS = {"cron", "interval"}
 
 
 def _normalize_skill_list(skill: Optional[str] = None, skills: Optional[Any] = None) -> List[str]:
@@ -355,6 +356,66 @@ def inspect_persistence_ratchet(job: Dict[str, Any]) -> Dict[str, Any]:
         }
     )
     return result
+
+
+def _interaction_mode(job: Dict[str, Any]) -> str:
+    """Classify whether a job is one-shot, repeated-observable, or repeated trust-bearing."""
+    schedule = job.get("schedule") or {}
+    schedule_kind = str(schedule.get("kind") or "").strip().lower()
+    if schedule_kind not in TRUST_REPEATED_SCHEDULE_KINDS:
+        return "disconnected_one_shot"
+    if should_check_persistence_ratchet(job):
+        return "repeated_trust_bearing"
+    return "repeated_observable"
+
+
+def inspect_trust_posture(job: Dict[str, Any], *, ratchet: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Summarize the computational-trust contract for a recurring or delegated loop surface."""
+    normalized_job = _apply_skill_fields(job)
+    interaction_mode = _interaction_mode(normalized_job)
+    commitment_parts = [normalized_job.get("name", normalized_job.get("id"))]
+    if normalized_job.get("role"):
+        commitment_parts.append(f"role={normalized_job['role']}")
+    if normalized_job.get("scope"):
+        commitment_parts.append(f"scope={normalized_job['scope']}")
+    declared_commitment = "; ".join(str(part) for part in commitment_parts if part)
+    shared_artifact_path = str(OUTPUT_DIR / str(normalized_job.get("id", "")))
+    verification_target = "persistence_ratchet" if should_check_persistence_ratchet(normalized_job) else "job_output"
+    outcome_state = normalized_job.get("last_status") or "not_run_yet"
+    contract_status = "declared" if interaction_mode != "disconnected_one_shot" else "thin"
+    missing_surfaces: List[str] = []
+
+    if not declared_commitment:
+        missing_surfaces.append("declared_commitment")
+    if not shared_artifact_path:
+        missing_surfaces.append("shared_artifact_path")
+    if not verification_target:
+        missing_surfaces.append("verification_target")
+
+    if verification_target == "persistence_ratchet":
+        ratchet = ratchet or inspect_persistence_ratchet(normalized_job)
+        outcome_state = ratchet.get("status") or outcome_state
+        contract_status = {
+            "healthy": "healthy",
+            "insufficient_history": "provisional",
+            "weak": "broken",
+            "missing": "broken",
+            "drift": "broken",
+        }.get(str(ratchet.get("status") or "").strip().lower(), "declared")
+    elif normalized_job.get("last_status") is None:
+        missing_surfaces.append("outcome_state")
+
+    return {
+        "job_id": normalized_job.get("id"),
+        "name": normalized_job.get("name", normalized_job.get("id")),
+        "interaction_mode": interaction_mode,
+        "contract_status": contract_status,
+        "declared_commitment": declared_commitment,
+        "shared_artifact_path": shared_artifact_path,
+        "verification_target": verification_target,
+        "outcome_state": outcome_state,
+        "missing_surfaces": missing_surfaces,
+    }
 
 
 def _secure_dir(path: Path):
@@ -908,11 +969,13 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
         )
 
     persistence_ratchets: List[Dict[str, Any]] = []
+    ratchets_by_job_id: Dict[str, Dict[str, Any]] = {}
     for job in active_jobs:
         if not should_check_persistence_ratchet(job):
             continue
         ratchet = inspect_persistence_ratchet(job)
         persistence_ratchets.append(ratchet)
+        ratchets_by_job_id[job["id"]] = ratchet
         if ratchet["status"] in {"insufficient_history", "healthy"}:
             continue
         issue_code = {
@@ -937,6 +1000,11 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
             }
         )
 
+    trust_postures = [
+        inspect_trust_posture(job, ratchet=ratchets_by_job_id.get(job["id"]))
+        for job in active_jobs
+    ]
+
     return {
         "ok": not any(issue["severity"] == "error" for issue in issues),
         "summary": {
@@ -950,12 +1018,17 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
                 1 for ratchet in persistence_ratchets
                 if ratchet["status"] not in {"insufficient_history", "healthy"}
             ),
+            "trust_posture_checked": len(trust_postures),
+            "trust_posture_broken_count": sum(
+                1 for posture in trust_postures if posture["contract_status"] == "broken"
+            ),
         },
         "active_jobs": active_jobs,
         "inactive_jobs": inactive_jobs,
         "unclassified_active_jobs": unclassified_active,
         "grouped_active_jobs": grouped_active,
         "persistence_ratchets": persistence_ratchets,
+        "trust_postures": trust_postures,
         "issues": issues,
     }
 
