@@ -186,6 +186,37 @@ Delegation has a **depth limit of 2** — a parent (depth 0) can spawn children 
 - Only the final summary enters the parent's context, keeping token usage efficient
 - Subagents inherit the parent's **API key, provider configuration, and credential pool** (enabling key rotation on rate limits)
 
+## Fast-loop boundary for delegated runs
+
+Delegated workers are **fast loops**. They execute the currently selected task inside the current acceptance criteria. They do **not** get to silently broaden scope, rewrite governance, or change what future workers are allowed to do.
+
+Fast-loop delegated work may:
+
+- implement the selected issue or task
+- run existing verification and report evidence
+- update the current branch, PR, or issue thread
+- stop and surface a blocker when the task needs a policy decision
+
+Slow-loop governance is required to:
+
+- change delegation ownership rules or approval policy
+- redefine the acceptance criteria after execution has started
+- alter benchmark, reward-policy, or routing rules for future runs
+- expand the task into a new policy surface that was not already authorized
+
+When a worker discovers it needs a rule change instead of more implementation, the parent run should record an operator-visible checkpoint such as:
+
+```text
+Fast/slow checkpoint:
+- loop: delegation
+- mode: slow
+- reason: Execution found a governance gap that changes future approval behavior.
+- governance surfaces touched: delegation policy; acceptance criteria
+- escalation target: <issue or PR>
+```
+
+See [Fast loops and slow governance](../../developer-guide/fast-slow-governance.md) for the shared contract that also applies to cron and self-improvement work.
+
 ## Delegation vs execute_code
 
 | Factor | delegate_task | execute_code |

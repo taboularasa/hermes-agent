@@ -174,6 +174,21 @@ These tools modify agent state directly and return synthetic tool results withou
 | `tool_gen_callback` | When tool call is parsed from stream | CLI tool preview in spinner |
 | `status_callback` | State changes (thinking, executing, etc.) | ACP status updates |
 
+## Fast loops and slow governance
+
+The runtime loop described here is an execution engine, not a blank check to rewrite its own rules under pressure.
+
+Treat the main agent loop, cron-triggered runs, self-improvement passes, and delegated workers as **fast loops** unless the change is already authorized by an existing governing artifact. Fast loops may choose among current prompts, tools, issues, and verification rules. They must escalate instead of mutating the rules that future runs will inherit.
+
+Slow-loop governance is required when a run proposes or applies changes to:
+
+- prompt or policy layers that shape future sessions
+- benchmark or reward-policy criteria
+- backlog-selection or approval rules
+- delegation ownership or trust-contract boundaries
+
+The operator-visible checkpoint for that boundary is documented in [Fast loops and slow governance](./fast-slow-governance.md).
+
 ## Budget and Fallback Behavior
 
 ### Iteration Budget

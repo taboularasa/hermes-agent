@@ -186,6 +186,37 @@ Recommended invariants for autonomous implementations:
 - do not run an active `implement/global` job alongside scoped implementation jobs unless you explicitly want overlap
 - record a `--reason` when pausing or retiring a job
 
+## Fast-loop boundary for recurring jobs
+
+Cron jobs are **fast loops** by default. They execute the current prompt, schedule, delivery target, and attached skills. They do **not** get to silently rewrite the recurring policy that governs future runs.
+
+Fast-loop cron work may:
+
+- run the current prompt to completion
+- deliver output to the already-configured target
+- pause or fail under existing scheduler guardrails
+- open a follow-up issue or PR when the run discovers a policy problem
+
+Slow-loop governance is required to:
+
+- change cron topology or overlap policy
+- loosen scheduler safety rules
+- redefine what a recurring job is allowed to create, pause, or own
+- rewrite the rubric that future cron runs use to judge success
+
+When a cron run finds that it needs a rule change rather than better execution, record an operator-visible checkpoint instead of changing policy inline:
+
+```text
+Fast/slow checkpoint:
+- loop: cron
+- mode: slow
+- reason: The run needs a policy or topology change, not a one-off execution fix.
+- governance surfaces touched: cron topology; recurring-job policy
+- escalation target: <issue or PR>
+```
+
+See [Fast loops and slow governance](../../developer-guide/fast-slow-governance.md) for the full contract shared with delegation and self-improvement work.
+
 ## How it works
 
 **Cron execution is handled by the gateway daemon.** The gateway ticks the scheduler every 60 seconds, running any due jobs in isolated agent sessions.
