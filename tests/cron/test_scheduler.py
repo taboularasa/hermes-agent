@@ -750,6 +750,22 @@ class TestBuildJobPromptSilentHint:
         assert "operator-value, anti-make-work, and leading-indicator" in result
         assert "cron/output/coord123" in result
 
+    def test_recurring_control_loop_injects_mode_split_guidance(self):
+        job = {
+            "id": "coord123",
+            "prompt": "Coordinate backlog",
+            "role": "coordinate",
+            "scope": "global",
+            "schedule": {"kind": "interval", "minutes": 60},
+        }
+        result = _build_job_prompt(job)
+        assert "discovery mode" in result.lower()
+        assert "execution mode" in result.lower()
+        assert "bridge conditions" in result.lower()
+        assert "Mode Split" in result
+        assert "Explored=" in result
+        assert "Chosen=" in result
+
     def test_one_shot_job_does_not_inject_persistence_ratchet_guidance(self):
         job = {
             "id": "oneshot123",
