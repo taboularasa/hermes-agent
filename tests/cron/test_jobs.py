@@ -24,6 +24,7 @@ from cron.jobs import (
     get_due_jobs,
     inspect_job_topology,
     inspect_persistence_ratchet,
+    inspect_trust_posture,
     save_job_output,
 )
 
@@ -732,6 +733,57 @@ Persistence Ratchet:
         evidence = issue["compact_evidence"]
         assert issue["ratchet_status"] == "drift"
         assert evidence["repeated_signals"] == ["cleanup_drift", "repeated_rediscovery"]
+
+    def test_trust_posture_marks_recurring_control_loops_as_repeated_trust_bearing(self, tmp_cron_dir):
+        job = create_job(
+            prompt="Coordinate backlog",
+            schedule="every 1h",
+            name="coord-global",
+            role="coordinate",
+            scope="global",
+        )
+        first = """Progress report.
+
+Persistence Ratchet:
+- Evidence: preserve issue evidence
+- Decisions: keep one coordinator
+- Artifacts: ~/.hermes/cron/output/<job>
+- Carry-forward: keep evidence attached
+- Drift: none
+"""
+        second = """Follow-up report.
+
+Persistence Ratchet:
+- Evidence: preserve issue evidence
+- Decisions: keep one coordinator
+- Artifacts: ~/.hermes/cron/output/<job>
+- Carry-forward: keep evidence attached
+- Drift: none
+"""
+        self._write_output(job["id"], "2026-04-21_10-00-00.md", first)
+        self._write_output(job["id"], "2026-04-21_11-00-00.md", second)
+
+        posture = inspect_trust_posture(get_job(job["id"]))
+        snapshot = inspect_job_topology(include_disabled=True)
+        topology_posture = next(item for item in snapshot["trust_postures"] if item["job_id"] == job["id"])
+
+        assert posture["interaction_mode"] == "repeated_trust_bearing"
+        assert posture["contract_status"] == "healthy"
+        assert posture["verification_target"] == "persistence_ratchet"
+        assert posture["shared_artifact_path"].endswith(job["id"])
+        assert topology_posture["contract_status"] == "healthy"
+        assert snapshot["summary"]["trust_posture_checked"] == 1
+        assert snapshot["summary"]["trust_posture_broken_count"] == 0
+
+    def test_trust_posture_marks_one_shots_as_disconnected(self, tmp_cron_dir):
+        job = create_job(prompt="Ship one report", schedule="10m", name="one-shot-report")
+
+        posture = inspect_trust_posture(get_job(job["id"]))
+
+        assert posture["interaction_mode"] == "disconnected_one_shot"
+        assert posture["contract_status"] == "thin"
+        assert posture["verification_target"] == "job_output"
+        assert "outcome_state" in posture["missing_surfaces"]
 
 
 class TestSaveJobOutput:

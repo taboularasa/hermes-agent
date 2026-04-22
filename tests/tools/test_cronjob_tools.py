@@ -356,6 +356,8 @@ class TestUnifiedCronjobTool:
         assert topology["success"] is True
         assert topology["topology"]["groups"][0]["role"] == "implement"
         assert topology["topology"]["groups"][0]["scope"] == "ontology"
+        assert topology["topology"]["trust_postures"][0]["interaction_mode"] == "repeated_trust_bearing"
+        assert topology["topology"]["trust_postures"][0]["verification_target"] == "persistence_ratchet"
 
         doctor = json.loads(cronjob(action="doctor"))
         assert doctor["success"] is True
