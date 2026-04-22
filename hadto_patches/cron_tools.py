@@ -153,6 +153,8 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         "base_url": job.get("base_url"),
         "role": job.get("role"),
         "scope": job.get("scope"),
+        "control_mode": job.get("control_mode"),
+        "bridge_conditions": job.get("bridge_conditions", []),
         "schedule": job.get("schedule_display"),
         "repeat": _repeat_display(job),
         "deliver": job.get("deliver", "local"),
@@ -212,6 +214,8 @@ def cronjob(
     script: Optional[str] = None,
     role: Optional[str] = None,
     scope: Optional[str] = None,
+    control_mode: Optional[str] = None,
+    bridge_conditions: Optional[List[str]] = None,
     reason: Optional[str] = None,
     task_id: str = None,
 ) -> str:
@@ -256,6 +260,8 @@ def cronjob(
                 script=_normalize_optional_job_value(script),
                 role=_normalize_optional_job_value(role),
                 scope=_normalize_optional_job_value(scope),
+                control_mode=_normalize_optional_job_value(control_mode),
+                bridge_conditions=bridge_conditions,
             )
             return json.dumps(
                 {
@@ -365,6 +371,10 @@ def cronjob(
                 updates["role"] = _normalize_optional_job_value(role)
             if scope is not None:
                 updates["scope"] = _normalize_optional_job_value(scope)
+            if control_mode is not None:
+                updates["control_mode"] = _normalize_optional_job_value(control_mode)
+            if bridge_conditions is not None:
+                updates["bridge_conditions"] = bridge_conditions
             if repeat is not None:
                 # Normalize: treat 0 or negative as None (infinite)
                 normalized_repeat = None if repeat <= 0 else repeat
@@ -499,6 +509,15 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
                 "type": "string",
                 "description": "Optional machine-readable job scope such as global, ontology, pipeline, workbench, or hermes"
             },
+            "control_mode": {
+                "type": "string",
+                "description": "Optional recurring-loop control mode: discovery, bridge, or execution"
+            },
+            "bridge_conditions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional ordered list of explicit bridge conditions for promoting a recurring loop from discovery into execution"
+            },
             "include_disabled": {
                 "type": "boolean",
                 "description": "For list/topology: include paused/completed jobs"
@@ -565,6 +584,8 @@ registry.register(
         base_url=args.get("base_url"),
         role=args.get("role"),
         scope=args.get("scope"),
+        control_mode=args.get("control_mode"),
+        bridge_conditions=args.get("bridge_conditions"),
         reason=args.get("reason"),
         task_id=kw.get("task_id"),
     ),

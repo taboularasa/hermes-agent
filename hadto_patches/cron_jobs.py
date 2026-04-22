@@ -45,6 +45,7 @@ RATCHET_CONTROL_ROLES = {
     "report",
     "study",
 }
+CONTROL_MODES = {"discovery", "bridge", "execution"}
 RATCHET_SURFACES = [
     "operator_value",
     "anti_make_work",
@@ -79,6 +80,35 @@ def _normalize_taxonomy_value(value: Optional[Any]) -> Optional[str]:
     return re.sub(r"\s+", "-", text)
 
 
+def _normalize_control_mode(value: Optional[Any]) -> Optional[str]:
+    """Normalize recurring-loop control mode values."""
+    text = _normalize_taxonomy_value(value)
+    if text is None:
+        return None
+    if text not in CONTROL_MODES:
+        raise ValueError(
+            f"Unsupported control_mode '{value}'. Expected one of: discovery, bridge, execution."
+        )
+    return text
+
+
+def _normalize_bridge_conditions(value: Optional[Any]) -> List[str]:
+    """Normalize bridge conditions into a compact ordered string list."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_items = [value]
+    else:
+        raw_items = list(value)
+
+    normalized: List[str] = []
+    for item in raw_items:
+        text = str(item or "").strip()
+        if text and text not in normalized:
+            normalized.append(text)
+    return normalized
+
+
 def _apply_skill_fields(job: Dict[str, Any]) -> Dict[str, Any]:
     """Return a job dict with canonical skills and optional topology fields aligned."""
     normalized = dict(job)
@@ -87,6 +117,8 @@ def _apply_skill_fields(job: Dict[str, Any]) -> Dict[str, Any]:
     normalized["skill"] = skills[0] if skills else None
     normalized["role"] = _normalize_taxonomy_value(normalized.get("role"))
     normalized["scope"] = _normalize_taxonomy_value(normalized.get("scope"))
+    normalized["control_mode"] = _normalize_control_mode(normalized.get("control_mode"))
+    normalized["bridge_conditions"] = _normalize_bridge_conditions(normalized.get("bridge_conditions"))
     return normalized
 
 
@@ -671,6 +703,8 @@ def create_job(
     script: Optional[str] = None,
     role: Optional[str] = None,
     scope: Optional[str] = None,
+    control_mode: Optional[str] = None,
+    bridge_conditions: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -721,6 +755,8 @@ def create_job(
     normalized_script = normalized_script or None
     normalized_role = _normalize_taxonomy_value(role)
     normalized_scope = _normalize_taxonomy_value(scope)
+    normalized_control_mode = _normalize_control_mode(control_mode)
+    normalized_bridge_conditions = _normalize_bridge_conditions(bridge_conditions)
 
     label_source = (prompt or (normalized_skills[0] if normalized_skills else None)) or "cron job"
     job = {
@@ -735,6 +771,8 @@ def create_job(
         "script": normalized_script,
         "role": normalized_role,
         "scope": normalized_scope,
+        "control_mode": normalized_control_mode,
+        "bridge_conditions": normalized_bridge_conditions,
         "schedule": parsed_schedule,
         "schedule_display": parsed_schedule.get("display", schedule),
         "repeat": {
