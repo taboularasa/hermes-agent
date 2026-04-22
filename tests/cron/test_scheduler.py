@@ -729,11 +729,37 @@ class TestBuildJobPromptSilentHint:
         assert "classified as role=study" in result
         assert "execution loop, not a passive summary" in result
         assert "self_improvement_pipeline" in result
+        assert "prevents rediscovering the same gap" in result
 
     def test_non_study_role_does_not_inject_study_guidance(self):
         job = {"prompt": "Send report", "role": "report"}
         result = _build_job_prompt(job)
         assert "classified as role=study" not in result
+
+    def test_recurring_control_loop_injects_persistence_ratchet_guidance(self):
+        job = {
+            "id": "coord123",
+            "prompt": "Coordinate backlog",
+            "role": "coordinate",
+            "scope": "global",
+            "schedule": {"kind": "interval", "minutes": 60},
+        }
+        result = _build_job_prompt(job)
+        assert "bounded persistence-ratchet check" in result
+        assert "Persistence Ratchet" in result
+        assert "operator-value, anti-make-work, and leading-indicator" in result
+        assert "cron/output/coord123" in result
+
+    def test_one_shot_job_does_not_inject_persistence_ratchet_guidance(self):
+        job = {
+            "id": "oneshot123",
+            "prompt": "Send report",
+            "role": "coordinate",
+            "scope": "global",
+            "schedule": {"kind": "once", "run_at": "2030-01-01T00:00:00+00:00"},
+        }
+        result = _build_job_prompt(job)
+        assert "bounded persistence-ratchet check" not in result
 
 
 class TestBuildJobPromptMissingSkill:

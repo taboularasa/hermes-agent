@@ -193,6 +193,20 @@ def cron_topology(show_all: bool = False):
                 print(f"    - {job['name']} ({job['id'][:8]}){suffix}")
             print()
 
+    ratchets = snapshot.get("persistence_ratchets", [])
+    if ratchets:
+        print(color("  Persistence Ratchet", Colors.YELLOW))
+        for ratchet in ratchets:
+            compact = ratchet.get("compact_evidence") or {}
+            preserved = compact.get("preserved_item_count", 0)
+            print(
+                f"    - {ratchet.get('name', ratchet.get('job_id'))} "
+                f"({str(ratchet.get('job_id', '?'))[:8]}): "
+                f"{ratchet.get('status')}  preserved={preserved} "
+                f"runs={ratchet.get('checked_runs', 0)}"
+            )
+        print()
+
     if snapshot.get("issues"):
         print(color("  Issues", Colors.RED))
         for issue in snapshot["issues"]:
