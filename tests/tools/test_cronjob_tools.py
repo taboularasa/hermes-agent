@@ -356,11 +356,14 @@ class TestUnifiedCronjobTool:
         assert topology["success"] is True
         assert topology["topology"]["groups"][0]["role"] == "implement"
         assert topology["topology"]["groups"][0]["scope"] == "ontology"
+        assert topology["topology"]["summary"]["topology_dependence_checked"] == 1
+        assert topology["topology"]["topology_dependence"][0]["classification"] == "hub_bound"
 
         doctor = json.loads(cronjob(action="doctor"))
         assert doctor["success"] is True
         assert doctor["ok"] is True
-        assert doctor["issue_count"] == 0
+        assert doctor["issue_count"] == 1
+        assert doctor["issues"][0]["code"] == "topology_hub_dependency"
 
     def test_update_runtime_overrides_can_set_and_clear(self):
         created = json.loads(

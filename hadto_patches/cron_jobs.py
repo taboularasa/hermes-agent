@@ -50,6 +50,17 @@ RATCHET_SURFACES = [
     "anti_make_work",
     "leading_indicator",
 ]
+TOPOLOGY_SURFACES = [
+    "operator_value",
+    "leading_indicator",
+    "persistence",
+]
+TOPOLOGY_EVIDENCE_KEYS = (
+    "alternate_path_exists",
+    "failure_observable",
+    "failover_documented",
+    "operator_routing_control",
+)
 
 
 def _normalize_skill_list(skill: Optional[str] = None, skills: Optional[Any] = None) -> List[str]:
@@ -99,6 +110,139 @@ def should_check_persistence_ratchet(job: Dict[str, Any]) -> bool:
     role = _normalize_taxonomy_value(job.get("role"))
     scope = _normalize_taxonomy_value(job.get("scope"))
     return bool(scope or role in RATCHET_CONTROL_ROLES)
+
+
+def should_check_topology_dependence(job: Dict[str, Any]) -> bool:
+    """Return True when a recurring classified control loop should get a topology scorecard."""
+    return should_check_persistence_ratchet(job)
+
+
+def _topology_surface_report(
+    surface: str,
+    *,
+    alternate_path_exists: bool,
+    failure_observable: bool,
+    failover_documented: bool,
+    operator_routing_control: bool,
+    reason: str,
+) -> Dict[str, Any]:
+    evidence = {
+        "alternate_path_exists": bool(alternate_path_exists),
+        "failure_observable": bool(failure_observable),
+        "failover_documented": bool(failover_documented),
+        "operator_routing_control": bool(operator_routing_control),
+    }
+    healthy_evidence_count = sum(1 for key in TOPOLOGY_EVIDENCE_KEYS if evidence[key])
+    return {
+        "surface": surface,
+        "classification": (
+            "fallback_capable"
+            if all(evidence[key] for key in TOPOLOGY_EVIDENCE_KEYS)
+            else "hub_bound"
+        ),
+        "healthy_evidence_count": healthy_evidence_count,
+        "total_evidence_checks": len(TOPOLOGY_EVIDENCE_KEYS),
+        "evidence": evidence,
+        "reason": reason,
+    }
+
+
+def inspect_topology_dependence(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Inspect whether a recurring control loop is hub-bound or fallback-capable."""
+    normalized_job = _apply_skill_fields(job)
+    result: Dict[str, Any] = {
+        "job_id": normalized_job.get("id"),
+        "name": normalized_job.get("name", normalized_job.get("id")),
+        "role": normalized_job.get("role"),
+        "scope": normalized_job.get("scope"),
+        "surfaces": [],
+        "classification": "not_applicable",
+        "healthy_evidence_count": 0,
+        "total_evidence_checks": 0,
+        "hub_surfaces": [],
+        "fallback_surfaces": [],
+        "summary": "Topology dependence check applies only to recurring classified control loops.",
+    }
+    if not should_check_topology_dependence(normalized_job):
+        return result
+
+    scheduler_surface = _topology_surface_report(
+        "scheduler",
+        alternate_path_exists=False,
+        failure_observable=bool(
+            normalized_job.get("next_run_at")
+            or normalized_job.get("last_run_at")
+            or normalized_job.get("last_status")
+            or normalized_job.get("last_error")
+        ),
+        failover_documented=False,
+        operator_routing_control=True,
+        reason=(
+            "This workflow runs on the local Hermes scheduler. Operators can inspect and edit the "
+            "schedule, but no alternate scheduler path is documented here."
+        ),
+    )
+    provider_surface = _topology_surface_report(
+        "provider_route",
+        alternate_path_exists=False,
+        failure_observable=bool(normalized_job.get("last_status") or normalized_job.get("last_error")),
+        failover_documented=bool(normalized_job.get("provider") or normalized_job.get("base_url")),
+        operator_routing_control=bool(
+            normalized_job.get("provider") or normalized_job.get("base_url") or normalized_job.get("model")
+        ),
+        reason=(
+            "This workflow inherits one effective model/provider path at runtime. Explicit overrides make "
+            "the route visible, but this scorecard does not see a documented alternate provider path."
+        ),
+    )
+    delivery_mode = normalized_job.get("deliver") or "local"
+    delivery_surface = _topology_surface_report(
+        "delivery_channel",
+        alternate_path_exists=delivery_mode != "local",
+        failure_observable=True,
+        failover_documented=delivery_mode != "local",
+        operator_routing_control=True,
+        reason=(
+            "Configured origin delivery keeps a local output artifact as a fallback path."
+            if delivery_mode != "local"
+            else "This workflow delivers only to the local cron output channel."
+        ),
+    )
+    recovery_surface = _topology_surface_report(
+        "recovery_surface",
+        alternate_path_exists=True,
+        failure_observable=True,
+        failover_documented=True,
+        operator_routing_control=True,
+        reason=(
+            "Cron output is persisted under ~/.hermes/cron/output/<job_id>/..., which gives the operator "
+            "a durable recovery surface even when a delivery path fails."
+        ),
+    )
+    surfaces = [scheduler_surface, provider_surface, delivery_surface, recovery_surface]
+    healthy_evidence_count = sum(surface["healthy_evidence_count"] for surface in surfaces)
+    total_evidence_checks = sum(surface["total_evidence_checks"] for surface in surfaces)
+    hub_surfaces = [surface["surface"] for surface in surfaces if surface["classification"] == "hub_bound"]
+    fallback_surfaces = [
+        surface["surface"] for surface in surfaces if surface["classification"] == "fallback_capable"
+    ]
+    classification = "hub_bound" if hub_surfaces else "fallback_capable"
+    result.update(
+        {
+            "surfaces": surfaces,
+            "classification": classification,
+            "healthy_evidence_count": healthy_evidence_count,
+            "total_evidence_checks": total_evidence_checks,
+            "hub_surfaces": hub_surfaces,
+            "fallback_surfaces": fallback_surfaces,
+            "summary": (
+                "Hub-bound on " + ", ".join(hub_surfaces)
+                if hub_surfaces
+                else "Fallback-capable across scheduler, provider, delivery, and recovery surfaces."
+            ),
+        }
+    )
+    return result
 
 
 def _recent_output_files(job_id: str, *, limit: int = RATCHET_WINDOW_RUNS) -> List[Path]:
@@ -908,7 +1052,34 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
         )
 
     persistence_ratchets: List[Dict[str, Any]] = []
+    topology_dependence: List[Dict[str, Any]] = []
     for job in active_jobs:
+        if should_check_topology_dependence(job):
+            topology_report = inspect_topology_dependence(job)
+            topology_dependence.append(topology_report)
+            if topology_report["classification"] == "hub_bound":
+                issues.append(
+                    {
+                        "severity": "warning",
+                        "code": "topology_hub_dependency",
+                        "job_id": job["id"],
+                        "job_name": job.get("name", job["id"]),
+                        "topology_classification": topology_report["classification"],
+                        "hub_surfaces": topology_report.get("hub_surfaces", []),
+                        "surfaces": list(TOPOLOGY_SURFACES),
+                        "compact_evidence": {
+                            "healthy_evidence_count": topology_report.get("healthy_evidence_count", 0),
+                            "total_evidence_checks": topology_report.get("total_evidence_checks", 0),
+                            "hub_surfaces": topology_report.get("hub_surfaces", []),
+                            "fallback_surfaces": topology_report.get("fallback_surfaces", []),
+                        },
+                        "message": (
+                            f"Topology dependence warning for recurring control loop '{job.get('name', job['id'])}' "
+                            f"({job['id']}): {topology_report['summary']}. "
+                            "This is an operator-value, leading-indicator, and persistence warning."
+                        ),
+                    }
+                )
         if not should_check_persistence_ratchet(job):
             continue
         ratchet = inspect_persistence_ratchet(job)
@@ -950,12 +1121,20 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
                 1 for ratchet in persistence_ratchets
                 if ratchet["status"] not in {"insufficient_history", "healthy"}
             ),
+            "topology_dependence_checked": len(topology_dependence),
+            "topology_hub_bound_count": sum(
+                1 for report in topology_dependence if report["classification"] == "hub_bound"
+            ),
+            "topology_fallback_capable_count": sum(
+                1 for report in topology_dependence if report["classification"] == "fallback_capable"
+            ),
         },
         "active_jobs": active_jobs,
         "inactive_jobs": inactive_jobs,
         "unclassified_active_jobs": unclassified_active,
         "grouped_active_jobs": grouped_active,
         "persistence_ratchets": persistence_ratchets,
+        "topology_dependence": topology_dependence,
         "issues": issues,
     }
 

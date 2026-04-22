@@ -733,6 +733,31 @@ Persistence Ratchet:
         assert issue["ratchet_status"] == "drift"
         assert evidence["repeated_signals"] == ["cleanup_drift", "repeated_rediscovery"]
 
+    def test_topology_dependence_reports_hub_bound_control_loop(self, tmp_cron_dir):
+        job = create_job(
+            prompt="Coordinate backlog",
+            schedule="every 1h",
+            name="coord-global",
+            role="coordinate",
+            scope="global",
+        )
+
+        snapshot = inspect_job_topology(include_disabled=True)
+
+        assert snapshot["summary"]["topology_dependence_checked"] == 1
+        assert snapshot["summary"]["topology_hub_bound_count"] == 1
+        report = snapshot["topology_dependence"][0]
+        assert report["job_id"] == job["id"]
+        assert report["classification"] == "hub_bound"
+        assert report["healthy_evidence_count"] < report["total_evidence_checks"]
+        scheduler = next(surface for surface in report["surfaces"] if surface["surface"] == "scheduler")
+        assert scheduler["classification"] == "hub_bound"
+        assert scheduler["evidence"]["alternate_path_exists"] is False
+        assert scheduler["evidence"]["operator_routing_control"] is True
+        issue = next(issue for issue in snapshot["issues"] if issue["code"] == "topology_hub_dependency")
+        assert issue["severity"] == "warning"
+        assert issue["job_id"] == job["id"]
+
 
 class TestSaveJobOutput:
     def test_creates_output_file(self, tmp_cron_dir):
