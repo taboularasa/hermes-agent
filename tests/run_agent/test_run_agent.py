@@ -642,6 +642,28 @@ class TestBuildSystemPrompt:
         # Should contain current date info like "Conversation started:"
         assert "Conversation started:" in prompt
 
+    def test_cron_platform_hint_includes_mode_split_guidance(self):
+        with (
+            patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("terminal", "web_search")),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            cron_agent = AIAgent(
+                api_key="test-key-1234567890",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+                platform="cron",
+            )
+
+        cron_agent.client = MagicMock()
+        prompt = cron_agent._build_system_prompt()
+        assert "scheduled cron job" in prompt
+        assert "discovery mode" in prompt.lower()
+        assert "execution mode" in prompt.lower()
+        assert "bridge conditions" in prompt.lower()
+        assert "what was explored versus what was chosen" in prompt.lower()
+
     def test_skills_prompt_derives_available_toolsets_from_loaded_tools(self):
         tools = _make_tool_defs("web_search", "skills_list", "skill_view", "skill_manage")
         toolset_map = {

@@ -121,6 +121,24 @@ def _build_persistence_ratchet_prompt_prefix(job: dict) -> str:
         "leading-indicator value. If there is genuinely nothing new and no operator action, respond exactly [SILENT].]"
     )
 
+
+def _build_mode_split_prompt_prefix(job: dict) -> str:
+    """Return recurring-loop guidance that separates discovery from execution."""
+    if not should_check_persistence_ratchet(job):
+        return ""
+
+    return (
+        "[SYSTEM: This recurring loop must keep discovery mode separate from execution mode. "
+        "Discovery mode: scan evidence, compare alternatives, preserve multiple candidate paths, and name contradictions "
+        "without collapsing to one answer too early. Bridge conditions: state the evidence, threshold, or contradiction "
+        "resolution that justifies promotion from discovery to execution. Execution mode: choose one path, commit the run "
+        "to it, verify the outcome, and report the chosen path explicitly. When you send a substantive final response, "
+        "include a compact 'Mode Split' block with: Discovery=<what was explored>; Bridge=<promotion evidence or threshold>; "
+        "Execution=<what was chosen and done>; Explored=<candidate paths preserved or compared>; Chosen=<final selected path>. "
+        "If the run stayed in discovery, say that explicitly instead of pretending execution happened.]"
+    )
+
+
 def _resolve_origin(job: dict) -> Optional[dict]:
     """Extract origin info from a job, preserving any extra routing metadata."""
     origin = job.get("origin")
@@ -436,10 +454,12 @@ def _build_job_prompt(job: dict) -> str:
     )
     role_prefix = _build_role_prompt_prefix(job)
     ratchet_prefix = _build_persistence_ratchet_prompt_prefix(job)
+    mode_split_prefix = _build_mode_split_prompt_prefix(job)
     prompt = (
         silent_hint
         + (role_prefix + "\n\n" if role_prefix else "")
         + (ratchet_prefix + "\n\n" if ratchet_prefix else "")
+        + (mode_split_prefix + "\n\n" if mode_split_prefix else "")
         + prompt
     )
     if skills is None:

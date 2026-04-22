@@ -340,7 +340,11 @@ PLATFORM_HINTS = {
         "cannot ask questions, request clarification, or wait for follow-up. Execute "
         "the task fully and autonomously, making reasonable decisions where needed. "
         "Your final response is automatically delivered to the job's configured "
-        "destination — put the primary content directly in your response."
+        "destination — put the primary content directly in your response. "
+        "For recurring loops, keep discovery mode separate from execution mode: "
+        "discovery mode gathers evidence, compares alternatives, and preserves multiple candidate paths; "
+        "bridge conditions state what evidence justifies promotion; execution mode chooses one path, commits, verifies, "
+        "and reports what was explored versus what was chosen."
     ),
     "cli": (
         "You are a CLI AI Agent. Try not to use markdown but simple text "
