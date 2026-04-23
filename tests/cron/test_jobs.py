@@ -25,6 +25,7 @@ from cron.jobs import (
     inspect_job_topology,
     inspect_persistence_ratchet,
     inspect_first_proof_point,
+    inspect_geometry_shaping,
     inspect_trust_contract,
     save_job_output,
 )
@@ -743,6 +744,14 @@ Persistence Ratchet:
         assert topology_contract["viability_check"] == contract["viability_check"]
         assert topology_contract["fast_loop_surfaces"] == contract["fast_loop_surfaces"]
         assert topology_contract["escalation_checkpoint"] == contract["escalation_checkpoint"]
+        assert contract["geometry_shaping"]["status"] == "required"
+        assert contract["geometry_shaping"]["required_fields"] == [
+            "default_changed",
+            "channel_opened",
+            "friction_changed",
+            "stale_path_pruned",
+            "policy_vs_path",
+        ]
         assert snapshot["summary"]["trust_contract_checked"] >= 1
         assert snapshot["summary"]["trust_contract_degraded_count"] >= 1
 
@@ -779,6 +788,57 @@ First Proof Point:
         assert contract["first_proof_point"]["fields"]["success_signal"].startswith("topology output names")
         assert snapshot["summary"]["first_proof_point_checked"] == 1
         assert snapshot["summary"]["first_proof_point_issue_count"] == 0
+
+    def test_geometry_shaping_populates_trust_contract_and_topology(self, tmp_cron_dir):
+        job = create_job(
+            prompt="Coordinate backlog and keep the selected issue moving.",
+            schedule="every 10m",
+            name="coord-global",
+            role="coordinate",
+            scope="global",
+        )
+        self._write_output(
+            job["id"],
+            "2026-04-21_11-00-00.md",
+            """Backlog coordination moved HAD-439.
+
+Geometry Shaping:
+- Default Changed: backlog coordination now starts with workspace_backlog_orchestrator before any repo-local prioritization.
+- Channel Opened: the canonical workspace-orchestrator Linear comment is updated in place for the selected issue.
+- Friction Changed: duplicate scoped implementers are treated as a warning surface instead of silent parallel drift.
+- Stale Path Pruned: stale git-hygiene rediscovery is pruned by recording blocker state in the selected issue instead of reopening cleanup loops.
+- Policy-vs-Path: this changed the actual selection path and status-write path, not only the doctrine about ownership.
+""",
+        )
+
+        geometry = inspect_geometry_shaping(get_job(job["id"]))
+        snapshot = inspect_job_topology(include_disabled=True)
+        contract = next(item for item in snapshot["trust_contracts"] if item["job_id"] == job["id"])
+
+        assert geometry["status"] == "populated"
+        assert geometry["fields"]["default_changed"].startswith("backlog coordination now starts")
+        assert contract["geometry_shaping"]["status"] == "populated"
+        assert contract["geometry_shaping"]["fields"]["policy_vs_path"].startswith("this changed the actual selection path")
+        assert snapshot["summary"]["geometry_shaping_checked"] == 1
+        assert snapshot["summary"]["geometry_shaping_issue_count"] == 0
+
+    def test_geometry_shaping_missing_is_warning_after_report(self, tmp_cron_dir):
+        job = create_job(
+            prompt="Coordinate backlog",
+            schedule="every 1h",
+            name="coord-global",
+            role="coordinate",
+            scope="global",
+        )
+        self._write_output(job["id"], "2026-04-21_11-00-00.md", "Governance should improve the path for everyone.")
+
+        snapshot = inspect_job_topology(include_disabled=True)
+
+        issue = next(issue for issue in snapshot["issues"] if issue["code"] == "geometry_shaping_missing")
+        assert issue["severity"] == "warning"
+        assert issue["job_id"] == job["id"]
+        assert "changed defaults, channels, friction, pruning" in issue["message"]
+        assert snapshot["summary"]["geometry_shaping_issue_count"] == 1
 
     def test_first_proof_point_missing_is_warning_after_report(self, tmp_cron_dir):
         job = create_job(

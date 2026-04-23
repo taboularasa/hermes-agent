@@ -764,6 +764,12 @@ class TestBuildJobPromptSilentHint:
         assert "Success Signal=<the observable result that proves the seed worked>" in result
         assert "Imitation Path=<what another site would copy only after the signal holds>" in result
         assert "Why First=<why this seed is the right first nucleation site>" in result
+        assert "Geometry Shaping=<the concrete path-shaping moves this run made" in result
+        assert "Default Changed=<which default or default path changed>" in result
+        assert "Channel Opened=<which channel, route, or evidence surface opened>" in result
+        assert "Friction Changed=<which friction was added or removed>" in result
+        assert "Stale Path Pruned=<which stale branch, route, or behavior was pruned>" in result
+        assert "Policy-vs-Path=<how this changed the path itself rather than only restating doctrine>" in result
         assert "Coverage Completion" in result
         assert "Evidence Coverage=<what evidence or behavior is now covered by this run>" in result
         assert "Contradictions=<none or the exact conflict that still breaks confidence>" in result
