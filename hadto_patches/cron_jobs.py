@@ -69,6 +69,14 @@ VALUE_SURFACE_FIELDS = [
     "circulation",
     "closure_rule",
 ]
+AGGREGATE_STEWARDSHIP_FIELDS = [
+    "shared_provider_concentration",
+    "dependency_choke_points",
+    "verification_debt",
+    "synchronized_failure_risk",
+    "portfolio_state",
+    "shared_artifact",
+]
 DISCOVERY_ROLES = {"report", "study"}
 EXECUTION_ROLES = {"implement", "publish"}
 BRIDGE_ROLES = {"coordinate", "self-improve"}
@@ -268,6 +276,7 @@ def inspect_trust_contract(
     first_proof_point: Optional[Dict[str, Any]] = None,
     geometry_shaping: Optional[Dict[str, Any]] = None,
     value_surfaces: Optional[Dict[str, Any]] = None,
+    aggregate_stewardship: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Return a compact trust contract for a recurring or one-shot cron loop."""
     normalized_job = _apply_skill_fields(job)
@@ -339,6 +348,15 @@ def inspect_trust_contract(
             "message": (
                 "Recurring control loops must name the durable store of value, the cheap "
                 "circulation outputs, and why circulation-only output cannot count as closure."
+            ),
+        },
+        "aggregate_stewardship": aggregate_stewardship or {
+            "status": "required",
+            "required_fields": list(AGGREGATE_STEWARDSHIP_FIELDS),
+            "message": (
+                "Recurring control loops must name the shared-provider concentration, dependency choke points, "
+                "verification debt, synchronized failure risk, portfolio state, and the shared artifact that carries "
+                "the ecosystem view across jobs."
             ),
         },
     }
@@ -548,6 +566,29 @@ _VALUE_SURFACE_INLINE_KEYS = {
     "closure rule": "closure_rule",
     "closure_rule": "closure_rule",
     "closure": "closure_rule",
+}
+
+_AGGREGATE_STEWARDSHIP_INLINE_KEYS = {
+    "shared provider concentration": "shared_provider_concentration",
+    "shared_provider_concentration": "shared_provider_concentration",
+    "provider concentration": "shared_provider_concentration",
+    "providers": "shared_provider_concentration",
+    "dependency choke points": "dependency_choke_points",
+    "dependency_choke_points": "dependency_choke_points",
+    "choke points": "dependency_choke_points",
+    "dependencies": "dependency_choke_points",
+    "verification debt": "verification_debt",
+    "verification_debt": "verification_debt",
+    "debt": "verification_debt",
+    "synchronized failure risk": "synchronized_failure_risk",
+    "synchronized_failure_risk": "synchronized_failure_risk",
+    "sync risk": "synchronized_failure_risk",
+    "portfolio state": "portfolio_state",
+    "portfolio_state": "portfolio_state",
+    "portfolio": "portfolio_state",
+    "shared artifact": "shared_artifact",
+    "shared_artifact": "shared_artifact",
+    "artifact": "shared_artifact",
 }
 
 
@@ -837,6 +878,147 @@ def _inspect_value_surfaces_output(path: Path) -> Dict[str, Any]:
         "missing_fields": missing,
         "circulation_only": circulation_only,
     }
+
+
+def _parse_aggregate_stewardship_fields(text: str) -> Dict[str, str]:
+    fields: Dict[str, str] = {}
+
+    def add(label: str, value: str) -> None:
+        key = _AGGREGATE_STEWARDSHIP_INLINE_KEYS.get(label.lower().replace("_", " "))
+        if not key:
+            key = _AGGREGATE_STEWARDSHIP_INLINE_KEYS.get(label.lower())
+        if not key:
+            return
+        usable = _usable_ratchet_value(value)
+        if usable:
+            fields[key] = usable
+
+    line_re = re.compile(
+        r"^\s*(?:[-*]\s*)?"
+        r"(shared provider concentration|shared_provider_concentration|provider concentration|dependency choke points|dependency_choke_points|verification debt|verification_debt|synchronized failure risk|synchronized_failure_risk|portfolio state|portfolio_state|shared artifact|shared_artifact|providers|choke points|dependencies|debt|sync risk|portfolio|artifact)"
+        r"\s*[:=-]\s*(.+?)\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    for match in line_re.finditer(text):
+        add(match.group(1), match.group(2))
+
+    stewardship_lines = [
+        line for line in text.splitlines()
+        if "aggregate stewardship" in line.lower() or "portfolio state" in line.lower()
+    ]
+    inline_re = re.compile(
+        r"\b(shared provider concentration|shared_provider_concentration|provider concentration|dependency choke points|dependency_choke_points|verification debt|verification_debt|synchronized failure risk|synchronized_failure_risk|portfolio state|portfolio_state|shared artifact|shared_artifact|providers|choke points|dependencies|debt|sync risk|portfolio|artifact)"
+        r"\s*=\s*([^;\n]+)",
+        re.IGNORECASE,
+    )
+    for line in stewardship_lines:
+        for match in inline_re.finditer(line):
+            add(match.group(1), match.group(2))
+
+    return fields
+
+
+def _aggregate_stewardship_stale_fields(fields: Dict[str, str]) -> List[str]:
+    stale_markers = [
+        r"\bsame as last run\b",
+        r"\bunchanged\b",
+        r"\bcarry forward\b",
+        r"\bstill healthy\b",
+        r"\bstill fine\b",
+        r"\bno change\b",
+    ]
+    artifact_markers = [r"/", r"\.md\b", r"\.json\b", r"topology\b", r"inspect_job_topology\b", r"issue\b", r"comment\b", r"pr\b"]
+    stale: List[str] = []
+    for key, value in fields.items():
+        lowered = value.lower()
+        if any(re.search(pattern, lowered) for pattern in stale_markers):
+            stale.append(key)
+    shared_artifact = fields.get("shared_artifact", "")
+    if shared_artifact and not any(re.search(pattern, shared_artifact.lower()) for pattern in artifact_markers):
+        stale.append("shared_artifact")
+    return sorted(set(stale))
+
+
+def _inspect_aggregate_stewardship_output(path: Path) -> Dict[str, Any]:
+    text = _response_text(_read_bounded_output(path))
+    fields = _parse_aggregate_stewardship_fields(text)
+    missing = [field for field in AGGREGATE_STEWARDSHIP_FIELDS if field not in fields]
+    stale_fields = _aggregate_stewardship_stale_fields(fields)
+    return {
+        "file": path.name,
+        "has_section": "aggregate stewardship" in text.lower() or bool(fields),
+        "fields": fields,
+        "missing_fields": missing,
+        "stale_fields": stale_fields,
+    }
+
+
+def inspect_aggregate_stewardship(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Inspect the latest recurring-loop output for aggregate stewardship fields."""
+    normalized_job = _apply_skill_fields(job)
+    result: Dict[str, Any] = {
+        "job_id": normalized_job.get("id"),
+        "name": normalized_job.get("name", normalized_job.get("id")),
+        "role": normalized_job.get("role"),
+        "scope": normalized_job.get("scope"),
+        "required_fields": list(AGGREGATE_STEWARDSHIP_FIELDS),
+        "status": "not_applicable",
+        "message": "Aggregate stewardship checks apply only to recurring classified control loops.",
+        "fields": {},
+    }
+    if not should_check_persistence_ratchet(normalized_job):
+        return result
+
+    files = _recent_output_files(str(normalized_job.get("id", "")), limit=1)
+    if not files:
+        result.update(
+            {
+                "status": "insufficient_history",
+                "message": "Need a saved output before checking aggregate stewardship fields.",
+            }
+        )
+        return result
+
+    latest = _inspect_aggregate_stewardship_output(files[-1])
+    result["latest_file"] = latest["file"]
+    result["fields"] = latest["fields"]
+    result["missing_fields"] = latest["missing_fields"]
+    result["stale_fields"] = latest["stale_fields"]
+
+    if not latest["has_section"] or not latest["fields"]:
+        result.update(
+            {
+                "status": "missing",
+                "message": "Latest report lacks an Aggregate Stewardship block for the wider recurring-job economy.",
+            }
+        )
+        return result
+
+    if latest["missing_fields"]:
+        result.update(
+            {
+                "status": "incomplete",
+                "message": "Latest Aggregate Stewardship block is missing: " + ", ".join(latest["missing_fields"]),
+            }
+        )
+        return result
+
+    if latest["stale_fields"]:
+        result.update(
+            {
+                "status": "stale",
+                "message": "Latest Aggregate Stewardship block has stale or non-durable fields: " + ", ".join(latest["stale_fields"]),
+            }
+        )
+        return result
+
+    result.update(
+        {
+            "status": "populated",
+            "message": "Latest report names the portfolio-level provider concentration, choke points, verification debt, synchronized risk, portfolio state, and shared artifact.",
+        }
+    )
+    return result
 
 
 def inspect_value_surfaces(job: Dict[str, Any]) -> Dict[str, Any]:
@@ -1656,6 +1838,7 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
     first_proof_points: List[Dict[str, Any]] = []
     geometry_shaping_checks: List[Dict[str, Any]] = []
     value_surface_checks: List[Dict[str, Any]] = []
+    aggregate_stewardship_checks: List[Dict[str, Any]] = []
     trust_contracts: List[Dict[str, Any]] = []
     for job in active_jobs:
         if not should_check_persistence_ratchet(job):
@@ -1665,11 +1848,13 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
         proof_point = inspect_first_proof_point(job)
         geometry = inspect_geometry_shaping(job)
         value_surfaces = inspect_value_surfaces(job)
+        aggregate_stewardship = inspect_aggregate_stewardship(job)
         persistence_ratchets.append(ratchet)
         first_proof_points.append(proof_point)
         geometry_shaping_checks.append(geometry)
         value_surface_checks.append(value_surfaces)
-        trust_contracts.append(inspect_trust_contract(job, ratchet, proof_point, geometry, value_surfaces))
+        aggregate_stewardship_checks.append(aggregate_stewardship)
+        trust_contracts.append(inspect_trust_contract(job, ratchet, proof_point, geometry, value_surfaces, aggregate_stewardship))
         if ratchet["status"] not in {"insufficient_history", "healthy"}:
             issue_code = {
                 "drift": "persistence_ratchet_drift",
@@ -1749,8 +1934,29 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
                 }
             )
 
+        if aggregate_stewardship["status"] not in {"insufficient_history", "populated"}:
+            issues.append(
+                {
+                    "severity": "warning",
+                    "code": f"aggregate_stewardship_{aggregate_stewardship['status']}",
+                    "job_id": job["id"],
+                    "job_name": job.get("name", job["id"]),
+                    "aggregate_stewardship_status": aggregate_stewardship["status"],
+                    "fields": aggregate_stewardship.get("fields", {}),
+                    "missing_fields": aggregate_stewardship.get("missing_fields", []),
+                    "stale_fields": aggregate_stewardship.get("stale_fields", []),
+                    "message": (
+                        f"Aggregate stewardship {aggregate_stewardship['status']} for recurring control loop "
+                        f"'{job.get('name', job['id'])}' ({job['id']}): {aggregate_stewardship['message']} "
+                        "Keep the portfolio view visible above single-loop wins."
+                    ),
+                }
+            )
+
     for job in inactive_jobs:
         trust_contracts.append(inspect_trust_contract(job))
+
+    aggregate_stewardship_summary = _summarize_aggregate_stewardship(active_jobs, aggregate_stewardship_checks, trust_contracts)
 
     return {
         "ok": not any(issue["severity"] == "error" for issue in issues),
@@ -1780,6 +1986,11 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
                 1 for value_surfaces in value_surface_checks
                 if value_surfaces["status"] not in {"insufficient_history", "populated"}
             ),
+            "aggregate_stewardship_checked": len(aggregate_stewardship_checks),
+            "aggregate_stewardship_issue_count": sum(
+                1 for stewardship in aggregate_stewardship_checks
+                if stewardship["status"] not in {"insufficient_history", "populated"}
+            ),
             "trust_contract_checked": len(trust_contracts),
             "trust_contract_degraded_count": sum(
                 1 for contract in trust_contracts if contract.get("failed_commitment_visible")
@@ -1793,8 +2004,51 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
         "first_proof_points": first_proof_points,
         "geometry_shaping": geometry_shaping_checks,
         "value_surfaces": value_surface_checks,
+        "aggregate_stewardship": aggregate_stewardship_checks,
+        "aggregate_stewardship_summary": aggregate_stewardship_summary,
         "trust_contracts": trust_contracts,
         "issues": issues,
+    }
+
+
+def _summarize_aggregate_stewardship(active_jobs: List[Dict[str, Any]], aggregate_checks: List[Dict[str, Any]], trust_contracts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    provider_counts: Dict[str, int] = {}
+    for job in active_jobs:
+        if not should_check_persistence_ratchet(job):
+            continue
+        provider = str(job.get("provider") or "default").strip() or "default"
+        provider_counts[provider] = provider_counts.get(provider, 0) + 1
+
+    repeated_providers = [f"{provider}={count}" for provider, count in sorted(provider_counts.items()) if count > 1]
+    degraded_contracts = [contract for contract in trust_contracts if contract.get("failed_commitment_visible")]
+    incomplete_checks = [check for check in aggregate_checks if check.get("status") not in {"insufficient_history", "populated"}]
+    field_sets = [check.get("fields", {}) for check in aggregate_checks if check.get("status") == "populated"]
+
+    choke_points = [fields.get("dependency_choke_points") for fields in field_sets if fields.get("dependency_choke_points")]
+    verification_debt = [fields.get("verification_debt") for fields in field_sets if fields.get("verification_debt")]
+    sync_risks = [fields.get("synchronized_failure_risk") for fields in field_sets if fields.get("synchronized_failure_risk")]
+    portfolio_states = [fields.get("portfolio_state") for fields in field_sets if fields.get("portfolio_state")]
+
+    fragility = "healthy"
+    if degraded_contracts or incomplete_checks:
+        fragility = "fragile"
+    if repeated_providers and (degraded_contracts or incomplete_checks):
+        fragility = "concentrated_and_fragile"
+
+    return {
+        "shared_artifact": "inspect_job_topology()/hermes cron topology aggregate stewardship summary",
+        "shared_provider_concentration": ", ".join(repeated_providers) or "no repeated configured provider concentration detected",
+        "dependency_choke_points": choke_points[:3],
+        "verification_debt": verification_debt[:3] or [
+            f"{len(incomplete_checks)} recurring jobs missing/incomplete/stale aggregate stewardship blocks",
+            f"{len(degraded_contracts)} degraded trust contracts visible in topology",
+        ],
+        "synchronized_failure_risk": sync_risks[:3] or [
+            f"{len(degraded_contracts)} degraded recurring jobs across {len(provider_counts) or 1} provider buckets"
+        ],
+        "portfolio_state": portfolio_states[:3] or [fragility],
+        "checked_jobs": len(aggregate_checks),
+        "issue_count": len(incomplete_checks),
     }
 
 

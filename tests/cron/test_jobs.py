@@ -27,6 +27,7 @@ from cron.jobs import (
     inspect_first_proof_point,
     inspect_geometry_shaping,
     inspect_value_surfaces,
+    inspect_aggregate_stewardship,
     inspect_trust_contract,
     save_job_output,
 )
@@ -826,6 +827,95 @@ Value Surfaces:
         assert contract["value_surfaces"]["status"] == "populated"
         assert contract["value_surfaces"]["fields"]["closure_rule"].startswith("circulation-only output does not count")
         assert not [issue for issue in snapshot["issues"] if issue["code"].startswith("value_surfaces_")]
+
+    def test_aggregate_stewardship_missing_is_warning_after_report(self, tmp_cron_dir):
+        job = create_job(
+            prompt="Coordinate backlog",
+            schedule="every 1h",
+            name="coord-global",
+            role="coordinate",
+            scope="global",
+        )
+        self._write_output(job["id"], "2026-04-21_10-00-00.md", "Progress report with only loop-local evidence.")
+
+        snapshot = inspect_job_topology(include_disabled=True)
+
+        issue = next(issue for issue in snapshot["issues"] if issue["code"] == "aggregate_stewardship_missing")
+        contract = next(item for item in snapshot["trust_contracts"] if item["job_id"] == job["id"])
+        assert issue["severity"] == "warning"
+        assert issue["job_id"] == job["id"]
+        assert contract["aggregate_stewardship"]["status"] == "missing"
+        assert snapshot["summary"]["aggregate_stewardship_issue_count"] == 1
+
+    def test_aggregate_stewardship_populates_topology_summary(self, tmp_cron_dir):
+        create_job(
+            prompt="Coordinate backlog",
+            schedule="every 1h",
+            name="coord-global",
+            role="coordinate",
+            scope="global",
+            provider="openai",
+        )
+        job2 = create_job(
+            prompt="Review self-improvement health",
+            schedule="every 2h",
+            name="self-improve",
+            role="coordinate",
+            scope="global",
+            provider="openai",
+        )
+        output = """Progress report.
+
+Aggregate Stewardship:
+- Shared Provider Concentration: openai auth and default ChatGPT-backed Codex login are shared by the recurring coordinator and self-improvement loops.
+- Dependency Choke Points: Linear writeback and ~/.hermes/cron/output remain shared operator surfaces for both loops.
+- Verification Debt: topology warnings must stay visible until both loops publish aggregate stewardship fields.
+- Synchronized Failure Risk: a shared OpenAI auth outage would stall both loops in the same cycle.
+- Portfolio State: locally healthy loop reports still leave the portfolio fragile until both recurring loops publish the macro block.
+- Shared Artifact: hermes cron topology and inspect_job_topology aggregate stewardship summary.
+"""
+        self._write_output(job2["id"], "2026-04-21_10-00-00.md", output)
+
+        stewardship = inspect_aggregate_stewardship(get_job(job2["id"]))
+        snapshot = inspect_job_topology(include_disabled=True)
+        contract = next(item for item in snapshot["trust_contracts"] if item["job_id"] == job2["id"])
+        summary = snapshot["aggregate_stewardship_summary"]
+
+        assert stewardship["status"] == "populated"
+        assert contract["aggregate_stewardship"]["status"] == "populated"
+        assert summary["shared_provider_concentration"] == "openai=2"
+        assert summary["shared_artifact"].startswith("inspect_job_topology()")
+        assert snapshot["summary"]["aggregate_stewardship_checked"] == 2
+        assert snapshot["summary"]["aggregate_stewardship_issue_count"] == 0
+
+    def test_aggregate_stewardship_stale_fields_stay_visible(self, tmp_cron_dir):
+        job = create_job(
+            prompt="Coordinate backlog",
+            schedule="every 1h",
+            name="coord-global",
+            role="coordinate",
+            scope="global",
+        )
+        output = """Progress report.
+
+Aggregate Stewardship:
+- Shared Provider Concentration: same as last run
+- Dependency Choke Points: unchanged
+- Verification Debt: carry forward
+- Synchronized Failure Risk: still healthy
+- Portfolio State: same as last run
+- Shared Artifact: dashboard
+"""
+        self._write_output(job["id"], "2026-04-21_10-00-00.md", output)
+
+        stewardship = inspect_aggregate_stewardship(get_job(job["id"]))
+        snapshot = inspect_job_topology(include_disabled=True)
+        issue = next(issue for issue in snapshot["issues"] if issue["code"] == "aggregate_stewardship_stale")
+
+        assert stewardship["status"] == "stale"
+        assert "shared_artifact" in stewardship["stale_fields"]
+        assert issue["severity"] == "warning"
+        assert snapshot["summary"]["aggregate_stewardship_issue_count"] == 1
 
     def test_first_proof_point_populates_bounded_seed_in_trust_contract(self, tmp_cron_dir):
         job = create_job(

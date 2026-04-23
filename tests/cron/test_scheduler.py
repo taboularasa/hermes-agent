@@ -779,6 +779,13 @@ class TestBuildJobPromptSilentHint:
         assert "Durable Store=<the durable artifact" in result
         assert "Circulation=<the cheap coordination outputs" in result
         assert "Closure Rule=<why circulation-only output cannot count as closure>" in result
+        assert "Aggregate Stewardship" in result
+        assert "Shared Provider Concentration=<which providers/models/base URLs or auth surfaces concentrate risk across jobs>" in result
+        assert "Dependency Choke Points=<which shared artifacts, routes, queues, repos, or operator surfaces many jobs depend on>" in result
+        assert "Verification Debt=<which jobs or claims still lack enough verification and how much of the portfolio that debt touches>" in result
+        assert "Synchronized Failure Risk=<what could fail many loops at once>" in result
+        assert "Portfolio State=<whether the portfolio is locally green but globally fragile, or why it is healthy>" in result
+        assert "Shared Artifact=<the durable shared artifact that carries this portfolio view across runs" in result
 
     def test_one_shot_job_does_not_inject_persistence_ratchet_guidance(self):
         job = {

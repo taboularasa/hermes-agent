@@ -199,6 +199,24 @@ def _build_value_surfaces_prompt_prefix(job: dict) -> str:
     )
 
 
+def _build_aggregate_stewardship_prompt_prefix(job: dict) -> str:
+    """Return guidance for surfacing aggregate stewardship across the wider job economy."""
+    if not should_check_persistence_ratchet(job):
+        return ""
+
+    return (
+        "[SYSTEM: Treat recurring and delegated loops as one agent economy, not isolated wins. "
+        "Before reporting, include a compact 'Aggregate Stewardship' block with: "
+        "Shared Provider Concentration=<which providers/models/base URLs or auth surfaces concentrate risk across jobs>; "
+        "Dependency Choke Points=<which shared artifacts, routes, queues, repos, or operator surfaces many jobs depend on>; "
+        "Verification Debt=<which jobs or claims still lack enough verification and how much of the portfolio that debt touches>; "
+        "Synchronized Failure Risk=<what could fail many loops at once>; "
+        "Portfolio State=<whether the portfolio is locally green but globally fragile, or why it is healthy>; "
+        "Shared Artifact=<the durable shared artifact that carries this portfolio view across runs, such as hermes cron topology or inspect_job_topology output>. "
+        "Do not report only loop-local success. Name the whole portfolio condition in concrete terms.]"
+    )
+
+
 def _resolve_origin(job: dict) -> Optional[dict]:
     """Extract origin info from a job, preserving any extra routing metadata."""
     origin = job.get("origin")
@@ -517,6 +535,7 @@ def _build_job_prompt(job: dict) -> str:
     trust_prefix = _build_trust_contract_prompt_prefix(job)
     coverage_prefix = _build_coverage_completion_prompt_prefix(job)
     value_surfaces_prefix = _build_value_surfaces_prompt_prefix(job)
+    aggregate_stewardship_prefix = _build_aggregate_stewardship_prompt_prefix(job)
     prompt = (
         silent_hint
         + (role_prefix + "\n\n" if role_prefix else "")
@@ -524,6 +543,7 @@ def _build_job_prompt(job: dict) -> str:
         + (trust_prefix + "\n\n" if trust_prefix else "")
         + (coverage_prefix + "\n\n" if coverage_prefix else "")
         + (value_surfaces_prefix + "\n\n" if value_surfaces_prefix else "")
+        + (aggregate_stewardship_prefix + "\n\n" if aggregate_stewardship_prefix else "")
         + prompt
     )
     if skills is None:

@@ -207,6 +207,19 @@ def cron_topology(show_all: bool = False):
             )
         print()
 
+    aggregate_summary = snapshot.get("aggregate_stewardship_summary") or {}
+    if aggregate_summary:
+        print(color("  Aggregate Stewardship", Colors.YELLOW))
+        print(f"    Shared artifact: {aggregate_summary.get('shared_artifact', '-')}")
+        print(f"    Providers: {aggregate_summary.get('shared_provider_concentration', '-')}")
+        debt = "; ".join(aggregate_summary.get('verification_debt', [])[:2]) or '-'
+        sync_risk = "; ".join(aggregate_summary.get('synchronized_failure_risk', [])[:2]) or '-'
+        portfolio = "; ".join(aggregate_summary.get('portfolio_state', [])[:2]) or '-'
+        print(f"    Verification debt: {debt}")
+        print(f"    Sync risk: {sync_risk}")
+        print(f"    Portfolio: {portfolio}")
+        print()
+
     trust_contracts = snapshot.get("trust_contracts", [])
     if trust_contracts:
         print(color("  Trust Contracts", Colors.YELLOW))
