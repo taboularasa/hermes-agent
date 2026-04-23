@@ -183,6 +183,22 @@ def _build_coverage_completion_prompt_prefix(job: dict) -> str:
     )
 
 
+def _build_value_surfaces_prompt_prefix(job: dict) -> str:
+    """Return guidance for separating durable value stores from circulation-only outputs."""
+    if not should_check_persistence_ratchet(job):
+        return ""
+
+    return (
+        "[SYSTEM: Distinguish durable value stores from circulation signals in recurring loops. "
+        "Before reporting, include a compact 'Value Surfaces' block with: "
+        "Durable Store=<the durable artifact, file, issue/comment state, benchmark, or verified note that compounds across runs>; "
+        "Circulation=<the cheap coordination outputs such as Slack heartbeats, transient traces, or status pings>; "
+        "Closure Rule=<why circulation-only output cannot count as closure>. "
+        "Do not treat closure as satisfied unless a durable artifact updated. "
+        "If the run emitted only circulation signals and did not update a durable artifact, say that plainly so the loop cannot price chatter as retained value.]"
+    )
+
+
 def _resolve_origin(job: dict) -> Optional[dict]:
     """Extract origin info from a job, preserving any extra routing metadata."""
     origin = job.get("origin")
@@ -500,12 +516,14 @@ def _build_job_prompt(job: dict) -> str:
     ratchet_prefix = _build_persistence_ratchet_prompt_prefix(job)
     trust_prefix = _build_trust_contract_prompt_prefix(job)
     coverage_prefix = _build_coverage_completion_prompt_prefix(job)
+    value_surfaces_prefix = _build_value_surfaces_prompt_prefix(job)
     prompt = (
         silent_hint
         + (role_prefix + "\n\n" if role_prefix else "")
         + (ratchet_prefix + "\n\n" if ratchet_prefix else "")
         + (trust_prefix + "\n\n" if trust_prefix else "")
         + (coverage_prefix + "\n\n" if coverage_prefix else "")
+        + (value_surfaces_prefix + "\n\n" if value_surfaces_prefix else "")
         + prompt
     )
     if skills is None:

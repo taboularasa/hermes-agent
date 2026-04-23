@@ -775,6 +775,10 @@ class TestBuildJobPromptSilentHint:
         assert "Contradictions=<none or the exact conflict that still breaks confidence>" in result
         assert "Uncovered Region=<the next behavior, claim, or surface that still lacks enough coverage>" in result
         assert "Closure Basis=<why this run counts as real progress rather than a status restatement>" in result
+        assert "Value Surfaces" in result
+        assert "Durable Store=<the durable artifact" in result
+        assert "Circulation=<the cheap coordination outputs" in result
+        assert "Closure Rule=<why circulation-only output cannot count as closure>" in result
 
     def test_one_shot_job_does_not_inject_persistence_ratchet_guidance(self):
         job = {

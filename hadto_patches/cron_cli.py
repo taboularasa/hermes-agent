@@ -215,6 +215,8 @@ def cron_topology(show_all: bool = False):
             slow_loop = "; ".join(contract.get("slow_loop_surfaces", [])[:2]) or "-"
             proof_point = contract.get("first_proof_point") or {}
             proof_fields = proof_point.get("fields") or {}
+            value_surfaces = contract.get("value_surfaces") or {}
+            value_fields = value_surfaces.get("fields") or {}
             print(
                 f"    - {contract.get('name', contract.get('job_id'))} "
                 f"({str(contract.get('job_id', '?'))[:8]}): "
@@ -223,6 +225,11 @@ def cron_topology(show_all: bool = False):
             print(f"      Fast: {fast_loop}")
             print(f"      Slow: {slow_loop}")
             print(f"      Escalate: {contract.get('escalation_checkpoint', '-')}")
+            if value_fields:
+                print(f"      Durable: {value_fields.get('durable_store', '-')}")
+                print(f"      Circulation: {value_fields.get('circulation', '-')}")
+            else:
+                print(f"      Durable: {value_surfaces.get('status', 'required')} - {value_surfaces.get('message', '-')}")
             if proof_fields:
                 print(f"      First seed: {proof_fields.get('seed_surface', '-')}")
                 print(f"      Proves: {proof_fields.get('success_signal', '-')}")

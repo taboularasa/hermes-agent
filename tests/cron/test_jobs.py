@@ -26,6 +26,7 @@ from cron.jobs import (
     inspect_persistence_ratchet,
     inspect_first_proof_point,
     inspect_geometry_shaping,
+    inspect_value_surfaces,
     inspect_trust_contract,
     save_job_output,
 )
@@ -754,6 +755,77 @@ Persistence Ratchet:
         ]
         assert snapshot["summary"]["trust_contract_checked"] >= 1
         assert snapshot["summary"]["trust_contract_degraded_count"] >= 1
+
+    def test_value_surfaces_warn_when_only_circulation_output_is_reported(self, tmp_cron_dir):
+        job = create_job(
+            prompt="Coordinate backlog and keep the selected issue moving.",
+            schedule="every 10m",
+            name="coord-global",
+            role="coordinate",
+            scope="global",
+        )
+        output = """Progress report.
+
+Persistence Ratchet:
+- Evidence: backlog still exists
+- Decisions: keep the selected issue moving
+- Artifacts: none
+- Carry-forward: check again next run
+- Drift: none
+
+Value Surfaces:
+- Durable Store: Slack heartbeat only
+- Circulation: Slack heartbeat, status ping
+- Closure Rule: do not count until a durable artifact updates
+"""
+        self._write_output(job["id"], "2026-04-21_10-00-00.md", output)
+
+        value_surfaces = inspect_value_surfaces(get_job(job["id"]))
+        snapshot = inspect_job_topology(include_disabled=True)
+        issue = next(issue for issue in snapshot["issues"] if issue["code"] == "value_surfaces_circulation_only")
+        contract = next(item for item in snapshot["trust_contracts"] if item["job_id"] == job["id"])
+
+        assert value_surfaces["status"] == "circulation_only"
+        assert issue["severity"] == "warning"
+        assert contract["value_surfaces"]["status"] == "circulation_only"
+        assert contract["value_surfaces"]["fields"]["durable_store"] == "Slack heartbeat only"
+        assert snapshot["summary"]["value_surfaces_checked"] >= 1
+        assert snapshot["summary"]["value_surfaces_issue_count"] >= 1
+
+    def test_value_surfaces_populate_durable_and_circulation_fields(self, tmp_cron_dir):
+        job = create_job(
+            prompt="Coordinate backlog and keep the selected issue moving.",
+            schedule="every 10m",
+            name="coord-global",
+            role="coordinate",
+            scope="global",
+        )
+        output = """Progress report.
+
+Persistence Ratchet:
+- Evidence: workspace-orchestrator:HAD-440 comment preserved the auth blocker evidence
+- Decisions: keep HAD-440 selected until native fallback or auth repair
+- Artifacts: ~/.hermes/cron/output/coord-global/2026-04-21_10-00-00.md, Linear comment workspace-orchestrator:HAD-440
+- Carry-forward: preserve the same blocker evidence in the next run
+- Drift: none
+
+Value Surfaces:
+- Durable Store: Linear issue comment workspace-orchestrator:HAD-440 and the saved cron output file
+- Circulation: Slack heartbeat and transient status summary
+- Closure Rule: circulation-only output does not count unless the issue comment or saved output updates durable evidence
+"""
+        self._write_output(job["id"], "2026-04-21_10-00-00.md", output)
+
+        value_surfaces = inspect_value_surfaces(get_job(job["id"]))
+        snapshot = inspect_job_topology(include_disabled=True)
+        contract = next(item for item in snapshot["trust_contracts"] if item["job_id"] == job["id"])
+
+        assert value_surfaces["status"] == "populated"
+        assert value_surfaces["fields"]["durable_store"].startswith("Linear issue comment")
+        assert value_surfaces["fields"]["circulation"].startswith("Slack heartbeat")
+        assert contract["value_surfaces"]["status"] == "populated"
+        assert contract["value_surfaces"]["fields"]["closure_rule"].startswith("circulation-only output does not count")
+        assert not [issue for issue in snapshot["issues"] if issue["code"].startswith("value_surfaces_")]
 
     def test_first_proof_point_populates_bounded_seed_in_trust_contract(self, tmp_cron_dir):
         job = create_job(
