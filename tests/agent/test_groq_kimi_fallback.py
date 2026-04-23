@@ -231,6 +231,45 @@ def test_kimi_param_translation_preserves_supported_fields():
     assert "response_format" not in translated
 
 
+def test_kimi_param_translation_strips_provider_specific_message_fields():
+    params = {
+        "model": "gpt-4o",
+        "messages": [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "hi", "cache_control": {"type": "ephemeral"}},
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning": "internal trace",
+                "reasoning_content": "provider-only reasoning",
+                "reasoning_details": [{"type": "text", "text": "detail"}],
+                "finish_reason": "tool_calls",
+                "codex_reasoning_items": [{"id": "rs_1"}],
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "x", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "ok", "name": "tool-name"},
+        ],
+    }
+
+    translated = translate_kimi_chat_params(params)
+
+    assistant_msg = translated["messages"][2]
+    assert assistant_msg == {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": params["messages"][2]["tool_calls"],
+    }
+    assert translated["messages"][1] == {"role": "user", "content": "hi"}
+    assert translated["messages"][3] == {"role": "tool", "tool_call_id": "call_1", "content": "ok"}
+    assert "reasoning_content" in params["messages"][2]
+
+
 def test_groq_fallback_model_can_be_overridden_to_kimi(monkeypatch):
     monkeypatch.setenv("GROQ_FALLBACK_MODEL", GROQ_KIMI_MODEL)
 
