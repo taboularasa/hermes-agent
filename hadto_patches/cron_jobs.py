@@ -69,6 +69,11 @@ VALUE_SURFACE_FIELDS = [
     "circulation",
     "closure_rule",
 ]
+ATTENTION_BUDGET_FIELDS = [
+    "attention_cost",
+    "decision_value",
+    "focus_effect",
+]
 AGGREGATE_STEWARDSHIP_FIELDS = [
     "shared_provider_concentration",
     "dependency_choke_points",
@@ -276,6 +281,7 @@ def inspect_trust_contract(
     first_proof_point: Optional[Dict[str, Any]] = None,
     geometry_shaping: Optional[Dict[str, Any]] = None,
     value_surfaces: Optional[Dict[str, Any]] = None,
+    attention_budget: Optional[Dict[str, Any]] = None,
     aggregate_stewardship: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Return a compact trust contract for a recurring or one-shot cron loop."""
@@ -348,6 +354,13 @@ def inspect_trust_contract(
             "message": (
                 "Recurring control loops must name the durable store of value, the cheap "
                 "circulation outputs, and why circulation-only output cannot count as closure."
+            ),
+        },
+        "attention_budget": attention_budget or {
+            "status": "required",
+            "required_fields": list(ATTENTION_BUDGET_FIELDS),
+            "message": (
+                "Recurring control loops must price operator attention against decision value and say whether the run shaped useful focus or low-yield alerting."
             ),
         },
         "aggregate_stewardship": aggregate_stewardship or {
@@ -566,6 +579,21 @@ _VALUE_SURFACE_INLINE_KEYS = {
     "closure rule": "closure_rule",
     "closure_rule": "closure_rule",
     "closure": "closure_rule",
+}
+
+_ATTENTION_BUDGET_INLINE_KEYS = {
+    "attention cost": "attention_cost",
+    "attention_cost": "attention_cost",
+    "attention": "attention_cost",
+    "attention budget": "attention_cost",
+    "decision value": "decision_value",
+    "decision_value": "decision_value",
+    "judgment value": "decision_value",
+    "value": "decision_value",
+    "focus effect": "focus_effect",
+    "focus_effect": "focus_effect",
+    "focus shaping": "focus_effect",
+    "focus": "focus_effect",
 }
 
 _AGGREGATE_STEWARDSHIP_INLINE_KEYS = {
@@ -833,6 +861,45 @@ def _parse_value_surface_fields(text: str) -> Dict[str, str]:
     return fields
 
 
+def _parse_attention_budget_fields(text: str) -> Dict[str, str]:
+    fields: Dict[str, str] = {}
+
+    def add(label: str, value: str) -> None:
+        key = _ATTENTION_BUDGET_INLINE_KEYS.get(label.lower().replace("_", " "))
+        if not key:
+            key = _ATTENTION_BUDGET_INLINE_KEYS.get(label.lower())
+        if not key:
+            return
+        usable = _usable_ratchet_value(value)
+        if usable:
+            fields[key] = usable
+
+    line_re = re.compile(
+        r"^\s*(?:[-*]\s*)?"
+        r"(attention cost|attention_cost|decision value|decision_value|judgment value|focus effect|focus_effect|focus shaping)"
+        r"\s*[:=-]\s*(.+?)\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    for match in line_re.finditer(text):
+        add(match.group(1), match.group(2))
+
+    budget_lines = [
+        line for line in text.splitlines()
+        if ("attention budget" in line.lower() or "attention cost" in line.lower())
+        and any(key in line.lower() for key in ("attention", "decision", "focus", "value"))
+    ]
+    inline_re = re.compile(
+        r"\b(attention cost|attention_cost|decision value|decision_value|judgment value|focus effect|focus_effect|focus shaping)"
+        r"\s*=\s*([^;\n]+)",
+        re.IGNORECASE,
+    )
+    for line in budget_lines:
+        for match in inline_re.finditer(line):
+            add(match.group(1), match.group(2))
+
+    return fields
+
+
 def _is_circulation_like(value: str) -> bool:
     lowered = value.lower()
     circulation_patterns = [
@@ -865,6 +932,55 @@ def _is_circulation_like(value: str) -> bool:
     )
 
 
+def _is_attention_heavy(value: str) -> bool:
+    lowered = value.lower()
+    patterns = [
+        r"\bhigh\b",
+        r"\bheavy\b",
+        r"\bexpensive\b",
+        r"\binterrupt",
+        r"\bspam\b",
+        r"\balert flood\b",
+        r"\bnoisy\b",
+        r"\blong\b",
+        r"\bmulti-block\b",
+        r"\btoo much\b",
+    ]
+    return any(re.search(pattern, lowered) for pattern in patterns)
+
+
+def _is_low_decision_value(value: str) -> bool:
+    lowered = value.lower()
+    patterns = [
+        r"\bnone\b",
+        r"\blow\b",
+        r"\bunchanged\b",
+        r"\bno durable state\b",
+        r"\bno decision\b",
+        r"\bno judgment\b",
+        r"\bno change\b",
+        r"\bstatus only\b",
+        r"\bheartbeat only\b",
+        r"\bsummary only\b",
+    ]
+    return any(re.search(pattern, lowered) for pattern in patterns)
+
+
+def _is_low_yield_focus_effect(value: str) -> bool:
+    lowered = value.lower()
+    patterns = [
+        r"\blow-yield\b",
+        r"\bspam\b",
+        r"\balert flood\b",
+        r"\bnoise\b",
+        r"\bdrift\b",
+        r"\bscatter\b",
+        r"\binterrupt\b",
+        r"\bno focus\b",
+    ]
+    return any(re.search(pattern, lowered) for pattern in patterns)
+
+
 def _inspect_value_surfaces_output(path: Path) -> Dict[str, Any]:
     text = _response_text(_read_bounded_output(path))
     fields = _parse_value_surface_fields(text)
@@ -877,6 +993,23 @@ def _inspect_value_surfaces_output(path: Path) -> Dict[str, Any]:
         "fields": fields,
         "missing_fields": missing,
         "circulation_only": circulation_only,
+    }
+
+
+def _inspect_attention_budget_output(path: Path) -> Dict[str, Any]:
+    text = _response_text(_read_bounded_output(path))
+    fields = _parse_attention_budget_fields(text)
+    missing = [field for field in ATTENTION_BUDGET_FIELDS if field not in fields]
+    attention_cost = fields.get("attention_cost", "")
+    decision_value = fields.get("decision_value", "")
+    focus_effect = fields.get("focus_effect", "")
+    low_yield = ((_is_attention_heavy(attention_cost) and _is_low_decision_value(decision_value)) or _is_low_yield_focus_effect(focus_effect))
+    return {
+        "file": path.name,
+        "has_section": "attention budget" in text.lower() or bool(fields),
+        "fields": fields,
+        "missing_fields": missing,
+        "low_yield": low_yield,
     }
 
 
@@ -1083,6 +1216,73 @@ def inspect_value_surfaces(job: Dict[str, Any]) -> Dict[str, Any]:
         {
             "status": "populated",
             "message": "Latest report distinguishes the durable store of value from circulation outputs and keeps closure tied to durable updates.",
+        }
+    )
+    return result
+
+
+def inspect_attention_budget(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Inspect the latest recurring-loop output for operator attention budget fields."""
+    normalized_job = _apply_skill_fields(job)
+    result: Dict[str, Any] = {
+        "job_id": normalized_job.get("id"),
+        "name": normalized_job.get("name", normalized_job.get("id")),
+        "role": normalized_job.get("role"),
+        "scope": normalized_job.get("scope"),
+        "required_fields": list(ATTENTION_BUDGET_FIELDS),
+        "status": "not_applicable",
+        "message": "Attention-budget checks apply only to recurring classified control loops.",
+        "fields": {},
+    }
+    if not should_check_persistence_ratchet(normalized_job):
+        return result
+
+    files = _recent_output_files(str(normalized_job.get("id", "")), limit=1)
+    if not files:
+        result.update(
+            {
+                "status": "insufficient_history",
+                "message": "Need a saved output before checking operator attention budget fields.",
+            }
+        )
+        return result
+
+    latest = _inspect_attention_budget_output(files[-1])
+    result["latest_file"] = latest["file"]
+    result["fields"] = latest["fields"]
+    result["missing_fields"] = latest["missing_fields"]
+
+    if not latest["has_section"] or not latest["fields"]:
+        result.update(
+            {
+                "status": "missing",
+                "message": "Latest report lacks an Attention Budget block naming attention cost, decision value, and focus effect.",
+            }
+        )
+        return result
+
+    if latest["missing_fields"]:
+        result.update(
+            {
+                "status": "incomplete",
+                "message": "Latest Attention Budget block is missing: " + ", ".join(latest["missing_fields"]),
+            }
+        )
+        return result
+
+    if latest["low_yield"]:
+        result.update(
+            {
+                "status": "low_yield",
+                "message": "Latest Attention Budget block shows attention-heavy or spam-shaped output with too little decision value to count as healthy closure.",
+            }
+        )
+        return result
+
+    result.update(
+        {
+            "status": "populated",
+            "message": "Latest report prices operator attention against decision value and says whether the run sharpened focus or drifted into low-yield alerting.",
         }
     )
     return result
@@ -1838,6 +2038,7 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
     first_proof_points: List[Dict[str, Any]] = []
     geometry_shaping_checks: List[Dict[str, Any]] = []
     value_surface_checks: List[Dict[str, Any]] = []
+    attention_budget_checks: List[Dict[str, Any]] = []
     aggregate_stewardship_checks: List[Dict[str, Any]] = []
     trust_contracts: List[Dict[str, Any]] = []
     for job in active_jobs:
@@ -1848,13 +2049,15 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
         proof_point = inspect_first_proof_point(job)
         geometry = inspect_geometry_shaping(job)
         value_surfaces = inspect_value_surfaces(job)
+        attention_budget = inspect_attention_budget(job)
         aggregate_stewardship = inspect_aggregate_stewardship(job)
         persistence_ratchets.append(ratchet)
         first_proof_points.append(proof_point)
         geometry_shaping_checks.append(geometry)
         value_surface_checks.append(value_surfaces)
+        attention_budget_checks.append(attention_budget)
         aggregate_stewardship_checks.append(aggregate_stewardship)
-        trust_contracts.append(inspect_trust_contract(job, ratchet, proof_point, geometry, value_surfaces, aggregate_stewardship))
+        trust_contracts.append(inspect_trust_contract(job, ratchet, proof_point, geometry, value_surfaces, attention_budget, aggregate_stewardship))
         if ratchet["status"] not in {"insufficient_history", "healthy"}:
             issue_code = {
                 "drift": "persistence_ratchet_drift",
@@ -1934,6 +2137,24 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
                 }
             )
 
+        if attention_budget["status"] not in {"insufficient_history", "populated"}:
+            issues.append(
+                {
+                    "severity": "warning",
+                    "code": f"attention_budget_{attention_budget['status']}",
+                    "job_id": job["id"],
+                    "job_name": job.get("name", job["id"]),
+                    "attention_budget_status": attention_budget["status"],
+                    "fields": attention_budget.get("fields", {}),
+                    "missing_fields": attention_budget.get("missing_fields", []),
+                    "message": (
+                        f"Attention budget {attention_budget['status']} for recurring control loop "
+                        f"'{job.get('name', job['id'])}' ({job['id']}): {attention_budget['message']} "
+                        "Show what operator attention bought instead of pricing report spam as closure."
+                    ),
+                }
+            )
+
         if aggregate_stewardship["status"] not in {"insufficient_history", "populated"}:
             issues.append(
                 {
@@ -1986,6 +2207,11 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
                 1 for value_surfaces in value_surface_checks
                 if value_surfaces["status"] not in {"insufficient_history", "populated"}
             ),
+            "attention_budget_checked": len(attention_budget_checks),
+            "attention_budget_issue_count": sum(
+                1 for attention_budget in attention_budget_checks
+                if attention_budget["status"] not in {"insufficient_history", "populated"}
+            ),
             "aggregate_stewardship_checked": len(aggregate_stewardship_checks),
             "aggregate_stewardship_issue_count": sum(
                 1 for stewardship in aggregate_stewardship_checks
@@ -2004,6 +2230,7 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
         "first_proof_points": first_proof_points,
         "geometry_shaping": geometry_shaping_checks,
         "value_surfaces": value_surface_checks,
+        "attention_budget": attention_budget_checks,
         "aggregate_stewardship": aggregate_stewardship_checks,
         "aggregate_stewardship_summary": aggregate_stewardship_summary,
         "trust_contracts": trust_contracts,

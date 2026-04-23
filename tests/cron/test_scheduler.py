@@ -779,6 +779,10 @@ class TestBuildJobPromptSilentHint:
         assert "Durable Store=<the durable artifact" in result
         assert "Circulation=<the cheap coordination outputs" in result
         assert "Closure Rule=<why circulation-only output cannot count as closure>" in result
+        assert "Attention Budget" in result
+        assert "Attention Cost=<how much operator attention this run consumed or asked for>" in result
+        assert "Decision Value=<what decision, judgment update, or durable state change this attention bought>" in result
+        assert "Focus Effect=<whether this shaped useful focus or drifted into low-yield alerting/report spam>" in result
         assert "Aggregate Stewardship" in result
         assert "Shared Provider Concentration=<which providers/models/base URLs or auth surfaces concentrate risk across jobs>" in result
         assert "Dependency Choke Points=<which shared artifacts, routes, queues, repos, or operator surfaces many jobs depend on>" in result
@@ -799,6 +803,7 @@ class TestBuildJobPromptSilentHint:
         assert "bounded persistence-ratchet check" not in result
         assert "Trust Contract" not in result
         assert "Coverage Completion" not in result
+        assert "Attention Budget" not in result
 
 
 class TestBuildJobPromptMissingSkill:
