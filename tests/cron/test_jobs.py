@@ -27,6 +27,7 @@ from cron.jobs import (
     inspect_first_proof_point,
     inspect_geometry_shaping,
     inspect_value_surfaces,
+    inspect_attention_budget,
     inspect_aggregate_stewardship,
     inspect_trust_contract,
     save_job_output,
@@ -792,6 +793,61 @@ Value Surfaces:
         assert contract["value_surfaces"]["fields"]["durable_store"] == "Slack heartbeat only"
         assert snapshot["summary"]["value_surfaces_checked"] >= 1
         assert snapshot["summary"]["value_surfaces_issue_count"] >= 1
+
+    def test_attention_budget_populates_trust_contract_and_topology(self, tmp_cron_dir):
+        job = create_job(
+            prompt="Coordinate backlog and keep the selected issue moving.",
+            schedule="every 10m",
+            name="coord-global",
+            role="coordinate",
+            scope="global",
+        )
+        output = """Progress report.
+
+Attention Budget:
+- Attention Cost: low, one compact six-line operator summary tied to the selected issue.
+- Decision Value: high because it names the next action, records blocker evidence, and updates durable Linear state.
+- Focus Effect: sharpens focus on one live issue and avoids report churn.
+"""
+        self._write_output(job["id"], "2026-04-21_10-00-00.md", output)
+
+        attention_budget = inspect_attention_budget(get_job(job["id"]))
+        snapshot = inspect_job_topology(include_disabled=True)
+        contract = next(item for item in snapshot["trust_contracts"] if item["job_id"] == job["id"])
+
+        assert attention_budget["status"] == "populated"
+        assert attention_budget["fields"]["attention_cost"].startswith("low")
+        assert contract["attention_budget"]["status"] == "populated"
+        assert contract["attention_budget"]["fields"]["decision_value"].startswith("high")
+        assert snapshot["summary"]["attention_budget_checked"] == 1
+        assert snapshot["summary"]["attention_budget_issue_count"] == 0
+
+    def test_attention_budget_low_yield_is_warning(self, tmp_cron_dir):
+        job = create_job(
+            prompt="Coordinate backlog and keep the selected issue moving.",
+            schedule="every 10m",
+            name="coord-global",
+            role="coordinate",
+            scope="global",
+        )
+        output = """Progress report.
+
+Attention Budget:
+- Attention Cost: high, multi-block alert flood with repeated pings.
+- Decision Value: low, no durable state and no decision change.
+- Focus Effect: low-yield report spam that scatters attention.
+"""
+        self._write_output(job["id"], "2026-04-21_10-00-00.md", output)
+
+        attention_budget = inspect_attention_budget(get_job(job["id"]))
+        snapshot = inspect_job_topology(include_disabled=True)
+        issue = next(issue for issue in snapshot["issues"] if issue["code"] == "attention_budget_low_yield")
+        contract = next(item for item in snapshot["trust_contracts"] if item["job_id"] == job["id"])
+
+        assert attention_budget["status"] == "low_yield"
+        assert issue["severity"] == "warning"
+        assert contract["attention_budget"]["status"] == "low_yield"
+        assert snapshot["summary"]["attention_budget_issue_count"] == 1
 
     def test_value_surfaces_populate_durable_and_circulation_fields(self, tmp_cron_dir):
         job = create_job(

@@ -199,6 +199,21 @@ def _build_value_surfaces_prompt_prefix(job: dict) -> str:
     )
 
 
+def _build_attention_budget_prompt_prefix(job: dict) -> str:
+    """Return guidance for pricing operator attention against decision value."""
+    if not should_check_persistence_ratchet(job):
+        return ""
+
+    return (
+        "[SYSTEM: Treat operator attention as a scarce budget on recurring reporting surfaces. "
+        "Before reporting, include a compact 'Attention Budget' block with: "
+        "Attention Cost=<how much operator attention this run consumed or asked for>; "
+        "Decision Value=<what decision, judgment update, or durable state change this attention bought>; "
+        "Focus Effect=<whether this shaped useful focus or drifted into low-yield alerting/report spam>; "
+        "Do not count low-yield output as closure when attention cost is high and decision value is low or unchanged.]"
+    )
+
+
 def _build_aggregate_stewardship_prompt_prefix(job: dict) -> str:
     """Return guidance for surfacing aggregate stewardship across the wider job economy."""
     if not should_check_persistence_ratchet(job):
@@ -535,6 +550,7 @@ def _build_job_prompt(job: dict) -> str:
     trust_prefix = _build_trust_contract_prompt_prefix(job)
     coverage_prefix = _build_coverage_completion_prompt_prefix(job)
     value_surfaces_prefix = _build_value_surfaces_prompt_prefix(job)
+    attention_budget_prefix = _build_attention_budget_prompt_prefix(job)
     aggregate_stewardship_prefix = _build_aggregate_stewardship_prompt_prefix(job)
     prompt = (
         silent_hint
@@ -543,6 +559,7 @@ def _build_job_prompt(job: dict) -> str:
         + (trust_prefix + "\n\n" if trust_prefix else "")
         + (coverage_prefix + "\n\n" if coverage_prefix else "")
         + (value_surfaces_prefix + "\n\n" if value_surfaces_prefix else "")
+        + (attention_budget_prefix + "\n\n" if attention_budget_prefix else "")
         + (aggregate_stewardship_prefix + "\n\n" if aggregate_stewardship_prefix else "")
         + prompt
     )

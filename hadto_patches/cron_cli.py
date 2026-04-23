@@ -230,6 +230,8 @@ def cron_topology(show_all: bool = False):
             proof_fields = proof_point.get("fields") or {}
             value_surfaces = contract.get("value_surfaces") or {}
             value_fields = value_surfaces.get("fields") or {}
+            attention_budget = contract.get("attention_budget") or {}
+            attention_fields = attention_budget.get("fields") or {}
             print(
                 f"    - {contract.get('name', contract.get('job_id'))} "
                 f"({str(contract.get('job_id', '?'))[:8]}): "
@@ -243,6 +245,12 @@ def cron_topology(show_all: bool = False):
                 print(f"      Circulation: {value_fields.get('circulation', '-')}")
             else:
                 print(f"      Durable: {value_surfaces.get('status', 'required')} - {value_surfaces.get('message', '-')}")
+            if attention_fields:
+                print(f"      Attention: {attention_fields.get('attention_cost', '-')}")
+                print(f"      Decision value: {attention_fields.get('decision_value', '-')}")
+                print(f"      Focus: {attention_fields.get('focus_effect', '-')}")
+            else:
+                print(f"      Attention: {attention_budget.get('status', 'required')} - {attention_budget.get('message', '-')}")
             if proof_fields:
                 print(f"      First seed: {proof_fields.get('seed_surface', '-')}")
                 print(f"      Proves: {proof_fields.get('success_signal', '-')}")
