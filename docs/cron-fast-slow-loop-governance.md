@@ -62,11 +62,24 @@ Every trust contract now carries three operator checks before a recurring automa
 
 These checks are phrased for recurring loops, delegated execution, and self-improvement review surfaces.
 
+## Aggregate stewardship
+
+Loop-level governance can still hide a fragile portfolio. Recurring and delegated Hermes work therefore also needs an `Aggregate Stewardship` block that names the macro condition of the current job economy.
+
+The block should name:
+
+- `Shared Provider Concentration`: where many jobs depend on the same provider, model, auth path, or base URL
+- `Dependency Choke Points`: which shared artifacts, routes, repos, or operator surfaces could stall many jobs at once
+- `Verification Debt`: where unverified claims or stale checks accumulate across the portfolio
+- `Synchronized Failure Risk`: which failure mode could take down many loops together
+- `Portfolio State`: whether the portfolio is healthy, fragile, or locally green but globally brittle
+- `Shared Artifact`: the durable shared surface carrying the portfolio view across runs
+
 ## Repo-visible surfaces
 
-The contract is exposed in three places:
+The contract is exposed in four places:
 
-1. `hadto_patches/cron_jobs.py` trust-contract snapshots now include `dignity_check`, `capability_check`, `viability_check`, `fast_loop_surfaces`, `slow_loop_surfaces`, and `escalation_checkpoint`
-2. `hadto_patches/cron_jobs.py` also parses recent outputs for the `First Proof Point` field set and attaches it to trust-contract snapshots
-3. `hadto_patches/cron_scheduler.py` prompts recurring jobs to report those fields in the saved Trust Contract and First Proof Point blocks
-4. `hadto_patches/cron_cli.py` prints the fast-loop, slow-loop, escalation checkpoint, first seed, success signal, and imitation path in `hermes cron topology`
+1. `hadto_patches/cron_jobs.py` trust-contract snapshots now include `dignity_check`, `capability_check`, `viability_check`, `fast_loop_surfaces`, and `slow_loop_surfaces`
+2. `hadto_patches/cron_jobs.py` parses recent outputs for `First Proof Point`, `Geometry Shaping`, `Value Surfaces`, and `Aggregate Stewardship`, then rolls them into the topology snapshot
+3. `hadto_patches/cron_scheduler.py` prompts recurring jobs to report those field sets in saved outputs
+4. `hadto_patches/cron_cli.py` prints the aggregate stewardship portfolio summary alongside trust contracts in `hermes cron topology`
