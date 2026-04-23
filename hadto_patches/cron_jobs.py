@@ -64,6 +64,11 @@ FIRST_PROOF_POINT_FIELDS = [
     "imitation_path",
     "why_first",
 ]
+VALUE_SURFACE_FIELDS = [
+    "durable_store",
+    "circulation",
+    "closure_rule",
+]
 DISCOVERY_ROLES = {"report", "study"}
 EXECUTION_ROLES = {"implement", "publish"}
 BRIDGE_ROLES = {"coordinate", "self-improve"}
@@ -262,6 +267,7 @@ def inspect_trust_contract(
     persistence_ratchet: Optional[Dict[str, Any]] = None,
     first_proof_point: Optional[Dict[str, Any]] = None,
     geometry_shaping: Optional[Dict[str, Any]] = None,
+    value_surfaces: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Return a compact trust contract for a recurring or one-shot cron loop."""
     normalized_job = _apply_skill_fields(job)
@@ -325,6 +331,14 @@ def inspect_trust_contract(
                 "Governance work must name the concrete path shift: which default changed, "
                 "which channel opened, what friction changed, what stale path was pruned, "
                 "and how this goes beyond command-style policy language."
+            ),
+        },
+        "value_surfaces": value_surfaces or {
+            "status": "required",
+            "required_fields": list(VALUE_SURFACE_FIELDS),
+            "message": (
+                "Recurring control loops must name the durable store of value, the cheap "
+                "circulation outputs, and why circulation-only output cannot count as closure."
             ),
         },
     }
@@ -520,6 +534,20 @@ _GEOMETRY_SHAPING_INLINE_KEYS = {
     "policy vs path": "policy_vs_path",
     "policy_vs_path": "policy_vs_path",
     "path shift evidence": "policy_vs_path",
+}
+
+_VALUE_SURFACE_INLINE_KEYS = {
+    "durable store": "durable_store",
+    "durable_store": "durable_store",
+    "durable artifact": "durable_store",
+    "store of value": "durable_store",
+    "circulation": "circulation",
+    "circulation outputs": "circulation",
+    "circulation-only outputs": "circulation",
+    "signals": "circulation",
+    "closure rule": "closure_rule",
+    "closure_rule": "closure_rule",
+    "closure": "closure_rule",
 }
 
 
@@ -720,6 +748,159 @@ def inspect_geometry_shaping(job: Dict[str, Any]) -> Dict[str, Any]:
         {
             "status": "populated",
             "message": "Latest report names the concrete geometry shift in defaults, channels, friction, pruning, and policy-vs-path evidence.",
+        }
+    )
+    return result
+
+
+def _parse_value_surface_fields(text: str) -> Dict[str, str]:
+    fields: Dict[str, str] = {}
+
+    def add(label: str, value: str) -> None:
+        key = _VALUE_SURFACE_INLINE_KEYS.get(label.lower().replace("_", " "))
+        if not key:
+            key = _VALUE_SURFACE_INLINE_KEYS.get(label.lower())
+        if not key:
+            return
+        usable = _usable_ratchet_value(value)
+        if usable:
+            fields[key] = usable
+
+    line_re = re.compile(
+        r"^\s*(?:[-*]\s*)?"
+        r"(durable store|durable_store|durable artifact|store of value|circulation(?:-only)? outputs?|circulation|signals|closure rule|closure_rule|closure)"
+        r"\s*[:=-]\s*(.+?)\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    for match in line_re.finditer(text):
+        add(match.group(1), match.group(2))
+
+    surface_lines = [
+        line for line in text.splitlines()
+        if ("value surfaces" in line.lower() or "durable store" in line.lower())
+        and any(key in line.lower() for key in ("durable", "circulation", "closure", "signal"))
+    ]
+    inline_re = re.compile(
+        r"\b(durable store|durable_store|durable artifact|store of value|circulation(?:-only)? outputs?|circulation|signals|closure rule|closure_rule|closure)"
+        r"\s*=\s*([^;\n]+)",
+        re.IGNORECASE,
+    )
+    for line in surface_lines:
+        for match in inline_re.finditer(line):
+            add(match.group(1), match.group(2))
+
+    return fields
+
+
+def _is_circulation_like(value: str) -> bool:
+    lowered = value.lower()
+    circulation_patterns = [
+        r"\bslack\b",
+        r"\bheartbeat\b",
+        r"\bstatus ping\b",
+        r"\bstatus summary\b",
+        r"\btransient\b",
+        r"\btrace\b",
+        r"\bmessage\b",
+        r"\bnotification\b",
+        r"\bchat\b",
+    ]
+    durable_markers = [
+        r"\bissue\b",
+        r"\bcomment\b",
+        r"\bpr\b",
+        r"\bbenchmark\b",
+        r"\bnote\b",
+        r"\boutput\b",
+        r"\bfile\b",
+        r"\bjson\b",
+        r"\bmd\b",
+        r"\bstate\b",
+        r"\bartifact\b",
+        r"\bpath\b",
+    ]
+    return any(re.search(pattern, lowered) for pattern in circulation_patterns) and not any(
+        re.search(pattern, lowered) for pattern in durable_markers
+    )
+
+
+def _inspect_value_surfaces_output(path: Path) -> Dict[str, Any]:
+    text = _response_text(_read_bounded_output(path))
+    fields = _parse_value_surface_fields(text)
+    missing = [field for field in VALUE_SURFACE_FIELDS if field not in fields]
+    durable_store = fields.get("durable_store", "")
+    circulation_only = bool(durable_store) and _is_circulation_like(durable_store)
+    return {
+        "file": path.name,
+        "has_section": "value surfaces" in text.lower() or bool(fields),
+        "fields": fields,
+        "missing_fields": missing,
+        "circulation_only": circulation_only,
+    }
+
+
+def inspect_value_surfaces(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Inspect the latest recurring-loop output for durable-vs-circulation value surfaces."""
+    normalized_job = _apply_skill_fields(job)
+    result: Dict[str, Any] = {
+        "job_id": normalized_job.get("id"),
+        "name": normalized_job.get("name", normalized_job.get("id")),
+        "role": normalized_job.get("role"),
+        "scope": normalized_job.get("scope"),
+        "required_fields": list(VALUE_SURFACE_FIELDS),
+        "status": "not_applicable",
+        "message": "Value-surface checks apply only to recurring classified control loops.",
+        "fields": {},
+    }
+    if not should_check_persistence_ratchet(normalized_job):
+        return result
+
+    files = _recent_output_files(str(normalized_job.get("id", "")), limit=1)
+    if not files:
+        result.update(
+            {
+                "status": "insufficient_history",
+                "message": "Need a saved output before checking durable and circulation value surfaces.",
+            }
+        )
+        return result
+
+    latest = _inspect_value_surfaces_output(files[-1])
+    result["latest_file"] = latest["file"]
+    result["fields"] = latest["fields"]
+    result["missing_fields"] = latest["missing_fields"]
+
+    if not latest["has_section"] or not latest["fields"]:
+        result.update(
+            {
+                "status": "missing",
+                "message": "Latest report lacks a Value Surfaces block naming durable and circulation surfaces.",
+            }
+        )
+        return result
+
+    if latest["missing_fields"]:
+        result.update(
+            {
+                "status": "incomplete",
+                "message": "Latest Value Surfaces block is missing: " + ", ".join(latest["missing_fields"]),
+            }
+        )
+        return result
+
+    if latest["circulation_only"]:
+        result.update(
+            {
+                "status": "circulation_only",
+                "message": "Latest Value Surfaces block still treats a cheap circulation signal as the durable store of value.",
+            }
+        )
+        return result
+
+    result.update(
+        {
+            "status": "populated",
+            "message": "Latest report distinguishes the durable store of value from circulation outputs and keeps closure tied to durable updates.",
         }
     )
     return result
@@ -1474,6 +1655,7 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
     persistence_ratchets: List[Dict[str, Any]] = []
     first_proof_points: List[Dict[str, Any]] = []
     geometry_shaping_checks: List[Dict[str, Any]] = []
+    value_surface_checks: List[Dict[str, Any]] = []
     trust_contracts: List[Dict[str, Any]] = []
     for job in active_jobs:
         if not should_check_persistence_ratchet(job):
@@ -1482,10 +1664,12 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
         ratchet = inspect_persistence_ratchet(job)
         proof_point = inspect_first_proof_point(job)
         geometry = inspect_geometry_shaping(job)
+        value_surfaces = inspect_value_surfaces(job)
         persistence_ratchets.append(ratchet)
         first_proof_points.append(proof_point)
         geometry_shaping_checks.append(geometry)
-        trust_contracts.append(inspect_trust_contract(job, ratchet, proof_point, geometry))
+        value_surface_checks.append(value_surfaces)
+        trust_contracts.append(inspect_trust_contract(job, ratchet, proof_point, geometry, value_surfaces))
         if ratchet["status"] not in {"insufficient_history", "healthy"}:
             issue_code = {
                 "drift": "persistence_ratchet_drift",
@@ -1547,6 +1731,24 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
                 }
             )
 
+        if value_surfaces["status"] not in {"insufficient_history", "populated"}:
+            issues.append(
+                {
+                    "severity": "warning",
+                    "code": f"value_surfaces_{value_surfaces['status']}",
+                    "job_id": job["id"],
+                    "job_name": job.get("name", job["id"]),
+                    "value_surface_status": value_surfaces["status"],
+                    "fields": value_surfaces.get("fields", {}),
+                    "missing_fields": value_surfaces.get("missing_fields", []),
+                    "message": (
+                        f"Value surfaces {value_surfaces['status']} for recurring control loop "
+                        f"'{job.get('name', job['id'])}' ({job['id']}): {value_surfaces['message']} "
+                        "Name the durable store of value separately from circulation-only signals."
+                    ),
+                }
+            )
+
     for job in inactive_jobs:
         trust_contracts.append(inspect_trust_contract(job))
 
@@ -1573,6 +1775,11 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
                 1 for geometry in geometry_shaping_checks
                 if geometry["status"] not in {"insufficient_history", "populated"}
             ),
+            "value_surfaces_checked": len(value_surface_checks),
+            "value_surfaces_issue_count": sum(
+                1 for value_surfaces in value_surface_checks
+                if value_surfaces["status"] not in {"insufficient_history", "populated"}
+            ),
             "trust_contract_checked": len(trust_contracts),
             "trust_contract_degraded_count": sum(
                 1 for contract in trust_contracts if contract.get("failed_commitment_visible")
@@ -1585,6 +1792,7 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
         "persistence_ratchets": persistence_ratchets,
         "first_proof_points": first_proof_points,
         "geometry_shaping": geometry_shaping_checks,
+        "value_surfaces": value_surface_checks,
         "trust_contracts": trust_contracts,
         "issues": issues,
     }
