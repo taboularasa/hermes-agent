@@ -752,6 +752,9 @@ class TestBuildJobPromptSilentHint:
         assert "Trust Contract" in result
         assert "one_shot_disconnected|repeated_trust_bearing" in result
         assert "discovery|execution|bridge" in result
+        assert "Dignity=<how this run preserved operator agency" in result
+        assert "Capability=<how this run compounded operator capability" in result
+        assert "Viability=<how this run kept the surrounding system stable" in result
         assert "Fast Loop=<what this run may change immediately>" in result
         assert "Slow Loop=<what requires slower governance or rule revision>" in result
         assert "Escalate When=<the concrete checkpoint" in result
