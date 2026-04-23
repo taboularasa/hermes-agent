@@ -50,6 +50,13 @@ RATCHET_SURFACES = [
     "anti_make_work",
     "leading_indicator",
 ]
+GEOMETRY_SHAPING_FIELDS = [
+    "default_changed",
+    "channel_opened",
+    "friction_changed",
+    "stale_path_pruned",
+    "policy_vs_path",
+]
 FIRST_PROOF_POINT_FIELDS = [
     "seed_surface",
     "protection_assumptions",
@@ -254,6 +261,7 @@ def inspect_trust_contract(
     job: Dict[str, Any],
     persistence_ratchet: Optional[Dict[str, Any]] = None,
     first_proof_point: Optional[Dict[str, Any]] = None,
+    geometry_shaping: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Return a compact trust contract for a recurring or one-shot cron loop."""
     normalized_job = _apply_skill_fields(job)
@@ -308,6 +316,15 @@ def inspect_trust_contract(
             "message": (
                 "Meaningful governance or capability shifts must name one bounded "
                 "first seed before broad doctrine can count as actionable."
+            ),
+        },
+        "geometry_shaping": geometry_shaping or {
+            "status": "required",
+            "required_fields": list(GEOMETRY_SHAPING_FIELDS),
+            "message": (
+                "Governance work must name the concrete path shift: which default changed, "
+                "which channel opened, what friction changed, what stale path was pruned, "
+                "and how this goes beyond command-style policy language."
             ),
         },
     }
@@ -484,6 +501,27 @@ _FIRST_PROOF_POINT_INLINE_KEYS = {
     "rationale": "why_first",
 }
 
+_GEOMETRY_SHAPING_INLINE_KEYS = {
+    "default changed": "default_changed",
+    "default_changed": "default_changed",
+    "default": "default_changed",
+    "channel opened": "channel_opened",
+    "channel_opened": "channel_opened",
+    "channel": "channel_opened",
+    "friction changed": "friction_changed",
+    "friction_changed": "friction_changed",
+    "friction added or removed": "friction_changed",
+    "friction": "friction_changed",
+    "stale path pruned": "stale_path_pruned",
+    "stale_path_pruned": "stale_path_pruned",
+    "pruned path": "stale_path_pruned",
+    "pruned": "stale_path_pruned",
+    "policy-vs-path": "policy_vs_path",
+    "policy vs path": "policy_vs_path",
+    "policy_vs_path": "policy_vs_path",
+    "path shift evidence": "policy_vs_path",
+}
+
 
 def _parse_first_proof_point_fields(text: str) -> Dict[str, str]:
     fields: Dict[str, str] = {}
@@ -522,6 +560,169 @@ def _parse_first_proof_point_fields(text: str) -> Dict[str, str]:
             add(match.group(1), match.group(2))
 
     return fields
+
+
+def _parse_geometry_shaping_fields(text: str) -> Dict[str, str]:
+    fields: Dict[str, str] = {}
+
+    def add(label: str, value: str) -> None:
+        key = _GEOMETRY_SHAPING_INLINE_KEYS.get(label.lower().replace("_", " "))
+        if not key:
+            key = _GEOMETRY_SHAPING_INLINE_KEYS.get(label.lower())
+        if not key:
+            return
+        usable = _usable_ratchet_value(value)
+        if usable:
+            fields[key] = usable
+
+    line_re = re.compile(
+        r"^\s*(?:[-*]\s*)?"
+        r"(default[_ ]changed|default|channel[_ ]opened|channel|friction[_ ]changed|friction added or removed|friction|stale path pruned|stale_path_pruned|pruned path|pruned|policy[-_ ]vs[-_ ]path|path shift evidence)"
+        r"\s*[:=-]\s*(.+?)\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    for match in line_re.finditer(text):
+        add(match.group(1), match.group(2))
+
+    geometry_lines = [
+        line for line in text.splitlines()
+        if ("geometry shaping" in line.lower() or "path shaping" in line.lower())
+        and any(
+            key in line.lower()
+            for key in ("default", "channel", "friction", "pruned", "policy", "path")
+        )
+    ]
+    inline_re = re.compile(
+        r"\b(default[_ ]changed|default|channel[_ ]opened|channel|friction[_ ]changed|friction added or removed|friction|stale path pruned|stale_path_pruned|pruned path|pruned|policy[-_ ]vs[-_ ]path|path shift evidence)"
+        r"\s*=\s*([^;\n]+)",
+        re.IGNORECASE,
+    )
+    for line in geometry_lines:
+        for match in inline_re.finditer(line):
+            add(match.group(1), match.group(2))
+
+    return fields
+
+
+def _geometry_shaping_generic_signals(fields: Dict[str, str], text: str) -> List[str]:
+    joined = " ".join(fields.values()).lower()
+    lowered = text.lower()
+    signals: List[str] = []
+    policy_patterns = [
+        r"\bshould\b",
+        r"\bmust\b",
+        r"\bpolicy\b",
+        r"\bprinciple\b",
+        r"\bdoctrine\b",
+        r"\bgovernance should\b",
+    ]
+    path_patterns = [
+        r"\bdefault\b",
+        r"\bchannel\b",
+        r"\bfriction\b",
+        r"\bprun(?:e|ed|ing)\b",
+        r"\bslack\b",
+        r"\blinear\b",
+        r"\bcron\b",
+        r"\bpr\b",
+        r"\bcomment\b",
+        r"\bbranch\b",
+        r"\bissue\b",
+    ]
+    if any(re.search(pattern, lowered) for pattern in policy_patterns) and not any(
+        re.search(pattern, joined or lowered) for pattern in path_patterns
+    ):
+        signals.append("policy_only_language")
+    if fields.get("policy_vs_path") and re.search(r"\b(policy|principle|doctrine)\b", fields["policy_vs_path"].lower()) and not re.search(
+        r"\b(default|channel|friction|prun|comment|branch|issue|cron|slack|linear|path)\b",
+        fields["policy_vs_path"].lower(),
+    ):
+        signals.append("policy_vs_path_not_grounded")
+    return signals
+
+
+def _inspect_geometry_shaping_output(path: Path) -> Dict[str, Any]:
+    text = _response_text(_read_bounded_output(path))
+    fields = _parse_geometry_shaping_fields(text)
+    missing = [field for field in GEOMETRY_SHAPING_FIELDS if field not in fields]
+    return {
+        "file": path.name,
+        "has_section": "geometry shaping" in text.lower() or "path shaping" in text.lower(),
+        "fields": fields,
+        "missing_fields": missing,
+        "generic_signals": _geometry_shaping_generic_signals(fields, text),
+    }
+
+
+def inspect_geometry_shaping(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Inspect the latest control-loop output for concrete geometry-shaping fields."""
+    normalized_job = _apply_skill_fields(job)
+    result: Dict[str, Any] = {
+        "job_id": normalized_job.get("id"),
+        "name": normalized_job.get("name", normalized_job.get("id")),
+        "role": normalized_job.get("role"),
+        "scope": normalized_job.get("scope"),
+        "required_fields": list(GEOMETRY_SHAPING_FIELDS),
+        "status": "not_applicable",
+        "message": "Geometry-shaping checks apply only to recurring classified control loops.",
+        "fields": {},
+    }
+    if not should_check_persistence_ratchet(normalized_job):
+        return result
+
+    files = _recent_output_files(str(normalized_job.get("id", "")), limit=1)
+    if not files:
+        result.update(
+            {
+                "status": "insufficient_history",
+                "message": "Need a saved output before checking geometry-shaping fields.",
+            }
+        )
+        return result
+
+    latest = _inspect_geometry_shaping_output(files[-1])
+    result["latest_file"] = latest["file"]
+    result["fields"] = latest["fields"]
+    result["missing_fields"] = latest["missing_fields"]
+    result["generic_signals"] = latest["generic_signals"]
+
+    if not latest["has_section"] or not latest["fields"]:
+        result.update(
+            {
+                "status": "missing",
+                "message": "Latest report lacks a Geometry Shaping block naming the actual path shift.",
+            }
+        )
+        return result
+
+    if latest["missing_fields"]:
+        result.update(
+            {
+                "status": "incomplete",
+                "message": "Latest Geometry Shaping block is missing: " + ", ".join(latest["missing_fields"]),
+            }
+        )
+        return result
+
+    if latest["generic_signals"]:
+        result.update(
+            {
+                "status": "policy_only",
+                "message": (
+                    "Latest Geometry Shaping block still reads like command-style policy instead of a concrete path shift: "
+                    + ", ".join(latest["generic_signals"])
+                ),
+            }
+        )
+        return result
+
+    result.update(
+        {
+            "status": "populated",
+            "message": "Latest report names the concrete geometry shift in defaults, channels, friction, pruning, and policy-vs-path evidence.",
+        }
+    )
+    return result
 
 
 def _first_proof_point_generic_signals(fields: Dict[str, str]) -> List[str]:
@@ -1272,6 +1473,7 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
 
     persistence_ratchets: List[Dict[str, Any]] = []
     first_proof_points: List[Dict[str, Any]] = []
+    geometry_shaping_checks: List[Dict[str, Any]] = []
     trust_contracts: List[Dict[str, Any]] = []
     for job in active_jobs:
         if not should_check_persistence_ratchet(job):
@@ -1279,9 +1481,11 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
             continue
         ratchet = inspect_persistence_ratchet(job)
         proof_point = inspect_first_proof_point(job)
+        geometry = inspect_geometry_shaping(job)
         persistence_ratchets.append(ratchet)
         first_proof_points.append(proof_point)
-        trust_contracts.append(inspect_trust_contract(job, ratchet, proof_point))
+        geometry_shaping_checks.append(geometry)
+        trust_contracts.append(inspect_trust_contract(job, ratchet, proof_point, geometry))
         if ratchet["status"] not in {"insufficient_history", "healthy"}:
             issue_code = {
                 "drift": "persistence_ratchet_drift",
@@ -1324,6 +1528,25 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
                 }
             )
 
+        if geometry["status"] not in {"insufficient_history", "populated"}:
+            issues.append(
+                {
+                    "severity": "warning",
+                    "code": f"geometry_shaping_{geometry['status']}",
+                    "job_id": job["id"],
+                    "job_name": job.get("name", job["id"]),
+                    "geometry_status": geometry["status"],
+                    "fields": geometry.get("fields", {}),
+                    "missing_fields": geometry.get("missing_fields", []),
+                    "generic_signals": geometry.get("generic_signals", []),
+                    "message": (
+                        f"Geometry shaping {geometry['status']} for recurring control loop "
+                        f"'{job.get('name', job['id'])}' ({job['id']}): {geometry['message']} "
+                        "Name how the system changed defaults, channels, friction, pruning, and the path-vs-policy distinction."
+                    ),
+                }
+            )
+
     for job in inactive_jobs:
         trust_contracts.append(inspect_trust_contract(job))
 
@@ -1345,6 +1568,11 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
                 1 for proof_point in first_proof_points
                 if proof_point["status"] not in {"insufficient_history", "populated"}
             ),
+            "geometry_shaping_checked": len(geometry_shaping_checks),
+            "geometry_shaping_issue_count": sum(
+                1 for geometry in geometry_shaping_checks
+                if geometry["status"] not in {"insufficient_history", "populated"}
+            ),
             "trust_contract_checked": len(trust_contracts),
             "trust_contract_degraded_count": sum(
                 1 for contract in trust_contracts if contract.get("failed_commitment_visible")
@@ -1356,6 +1584,7 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
         "grouped_active_jobs": grouped_active,
         "persistence_ratchets": persistence_ratchets,
         "first_proof_points": first_proof_points,
+        "geometry_shaping": geometry_shaping_checks,
         "trust_contracts": trust_contracts,
         "issues": issues,
     }
