@@ -50,6 +50,13 @@ RATCHET_SURFACES = [
     "anti_make_work",
     "leading_indicator",
 ]
+FIRST_PROOF_POINT_FIELDS = [
+    "seed_surface",
+    "protection_assumptions",
+    "success_signal",
+    "imitation_path",
+    "why_first",
+]
 DISCOVERY_ROLES = {"report", "study"}
 EXECUTION_ROLES = {"implement", "publish"}
 BRIDGE_ROLES = {"coordinate", "self-improve"}
@@ -219,6 +226,7 @@ def _fast_slow_loop_contract(job: Dict[str, Any]) -> Dict[str, Any]:
 def inspect_trust_contract(
     job: Dict[str, Any],
     persistence_ratchet: Optional[Dict[str, Any]] = None,
+    first_proof_point: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Return a compact trust contract for a recurring or one-shot cron loop."""
     normalized_job = _apply_skill_fields(job)
@@ -263,6 +271,14 @@ def inspect_trust_contract(
         "fast_loop_surfaces": fast_slow["fast_loop_surfaces"],
         "slow_loop_surfaces": fast_slow["slow_loop_surfaces"],
         "escalation_checkpoint": fast_slow["escalation_checkpoint"],
+        "first_proof_point": first_proof_point or {
+            "status": "required",
+            "required_fields": list(FIRST_PROOF_POINT_FIELDS),
+            "message": (
+                "Meaningful governance or capability shifts must name one bounded "
+                "first seed before broad doctrine can count as actionable."
+            ),
+        },
     }
     if ratchet_status:
         contract["persistence_ratchet_status"] = ratchet_status
@@ -412,6 +428,175 @@ def _inspect_ratchet_output(path: Path) -> Dict[str, Any]:
         "has_carry_forward": bool(categories["carry_forward"]),
         "signals": _ratchet_signal_labels(text),
     }
+
+
+_FIRST_PROOF_POINT_INLINE_KEYS = {
+    "seed surface": "seed_surface",
+    "seed_surface": "seed_surface",
+    "surface": "seed_surface",
+    "protected seed": "seed_surface",
+    "nucleation site": "seed_surface",
+    "protection assumptions": "protection_assumptions",
+    "protection_assumptions": "protection_assumptions",
+    "protection": "protection_assumptions",
+    "assumptions": "protection_assumptions",
+    "success signal": "success_signal",
+    "success_signal": "success_signal",
+    "signal": "success_signal",
+    "imitation path": "imitation_path",
+    "imitation_path": "imitation_path",
+    "expansion path": "imitation_path",
+    "replication path": "imitation_path",
+    "why first": "why_first",
+    "why_first": "why_first",
+    "first-site rationale": "why_first",
+    "rationale": "why_first",
+}
+
+
+def _parse_first_proof_point_fields(text: str) -> Dict[str, str]:
+    fields: Dict[str, str] = {}
+
+    def add(label: str, value: str) -> None:
+        key = _FIRST_PROOF_POINT_INLINE_KEYS.get(label.lower().replace("_", " "))
+        if not key:
+            key = _FIRST_PROOF_POINT_INLINE_KEYS.get(label.lower())
+        if not key:
+            return
+        usable = _usable_ratchet_value(value)
+        if usable:
+            fields[key] = usable
+
+    line_re = re.compile(
+        r"^\s*(?:[-*]\s*)?"
+        r"(seed[_ ]surface|protected seed|nucleation site|surface|protection[_ ]assumptions|protection|assumptions|success[_ ]signal|signal|imitation[_ ]path|expansion path|replication path|why[_ ]first|first-site rationale|rationale)"
+        r"\s*[:=-]\s*(.+?)\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    for match in line_re.finditer(text):
+        add(match.group(1), match.group(2))
+
+    proof_lines = [
+        line for line in text.splitlines()
+        if ("proof point" in line.lower() or "first seed" in line.lower())
+        and any(key in line.lower() for key in ("seed", "surface", "protection", "success", "signal", "imitation", "why"))
+    ]
+    inline_re = re.compile(
+        r"\b(seed[_ ]surface|protected seed|nucleation site|surface|protection[_ ]assumptions|protection|assumptions|success[_ ]signal|signal|imitation[_ ]path|expansion path|replication path|why[_ ]first|first-site rationale|rationale)"
+        r"\s*=\s*([^;\n]+)",
+        re.IGNORECASE,
+    )
+    for line in proof_lines:
+        for match in inline_re.finditer(line):
+            add(match.group(1), match.group(2))
+
+    return fields
+
+
+def _first_proof_point_generic_signals(fields: Dict[str, str]) -> List[str]:
+    joined = " ".join(fields.values()).lower()
+    signals: List[str] = []
+    generic_patterns = [
+        r"\bglobal rollout\b",
+        r"\bbroad rollout\b",
+        r"\ball users\b",
+        r"\bevery workflow\b",
+        r"\bthe whole system\b",
+        r"\borganization-wide\b",
+        r"\bcompany-wide\b",
+        r"\bframework\b",
+        r"\bprinciple\b",
+        r"\bdoctrine\b",
+    ]
+    if any(re.search(pattern, joined) for pattern in generic_patterns):
+        signals.append("broad_doctrine")
+    if not any(re.search(pattern, joined) for pattern in (r"\bhad-\d+\b", r"\b[a-z0-9_.-]+/[a-z0-9_.-]+\b", r"\bcron\b", r"\bjob\b", r"\bpr\b", r"\btest\b")):
+        signals.append("no_bounded_surface_marker")
+    return signals
+
+
+def _inspect_first_proof_point_output(path: Path) -> Dict[str, Any]:
+    text = _response_text(_read_bounded_output(path))
+    fields = _parse_first_proof_point_fields(text)
+    missing = [field for field in FIRST_PROOF_POINT_FIELDS if field not in fields]
+    return {
+        "file": path.name,
+        "has_section": "first proof point" in text.lower() or "first seed" in text.lower(),
+        "fields": fields,
+        "missing_fields": missing,
+        "generic_signals": _first_proof_point_generic_signals(fields),
+    }
+
+
+def inspect_first_proof_point(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Inspect the latest control-loop output for a bounded first proof point."""
+    normalized_job = _apply_skill_fields(job)
+    result: Dict[str, Any] = {
+        "job_id": normalized_job.get("id"),
+        "name": normalized_job.get("name", normalized_job.get("id")),
+        "role": normalized_job.get("role"),
+        "scope": normalized_job.get("scope"),
+        "required_fields": list(FIRST_PROOF_POINT_FIELDS),
+        "status": "not_applicable",
+        "message": "First proof-point discipline applies only to recurring classified control loops.",
+        "fields": {},
+    }
+    if not should_check_persistence_ratchet(normalized_job):
+        return result
+
+    files = _recent_output_files(str(normalized_job.get("id", "")), limit=1)
+    if not files:
+        result.update(
+            {
+                "status": "insufficient_history",
+                "message": "Need a saved output before checking the first proof-point field set.",
+            }
+        )
+        return result
+
+    latest = _inspect_first_proof_point_output(files[-1])
+    result["latest_file"] = latest["file"]
+    result["fields"] = latest["fields"]
+    result["missing_fields"] = latest["missing_fields"]
+    result["generic_signals"] = latest["generic_signals"]
+
+    if not latest["has_section"] or not latest["fields"]:
+        result.update(
+            {
+                "status": "missing",
+                "message": "Latest report lacks a First Proof Point block naming one bounded seed.",
+            }
+        )
+        return result
+
+    if latest["missing_fields"]:
+        result.update(
+            {
+                "status": "incomplete",
+                "message": "Latest First Proof Point block is missing: " + ", ".join(latest["missing_fields"]),
+            }
+        )
+        return result
+
+    if latest["generic_signals"]:
+        result.update(
+            {
+                "status": "generic",
+                "message": (
+                    "Latest First Proof Point reads like broad doctrine instead of a bounded nucleation site: "
+                    + ", ".join(latest["generic_signals"])
+                ),
+            }
+        )
+        return result
+
+    result.update(
+        {
+            "status": "populated",
+            "message": "Latest report names a bounded first seed, its protection assumptions, success signal, and imitation path.",
+        }
+    )
+    return result
 
 
 def inspect_persistence_ratchet(job: Dict[str, Any]) -> Dict[str, Any]:
@@ -1055,37 +1240,58 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
         )
 
     persistence_ratchets: List[Dict[str, Any]] = []
+    first_proof_points: List[Dict[str, Any]] = []
     trust_contracts: List[Dict[str, Any]] = []
     for job in active_jobs:
         if not should_check_persistence_ratchet(job):
             trust_contracts.append(inspect_trust_contract(job))
             continue
         ratchet = inspect_persistence_ratchet(job)
+        proof_point = inspect_first_proof_point(job)
         persistence_ratchets.append(ratchet)
-        trust_contracts.append(inspect_trust_contract(job, ratchet))
-        if ratchet["status"] in {"insufficient_history", "healthy"}:
-            continue
-        issue_code = {
-            "drift": "persistence_ratchet_drift",
-            "missing": "persistence_ratchet_missing",
-            "weak": "persistence_ratchet_weak",
-        }.get(ratchet["status"], "persistence_ratchet_issue")
-        issues.append(
-            {
-                "severity": "warning",
-                "code": issue_code,
-                "job_id": job["id"],
-                "job_name": job.get("name", job["id"]),
-                "ratchet_status": ratchet["status"],
-                "surfaces": list(RATCHET_SURFACES),
-                "compact_evidence": ratchet.get("compact_evidence", {}),
-                "message": (
-                    f"Persistence ratchet {ratchet['status']} for recurring control loop "
-                    f"'{job.get('name', job['id'])}' ({job['id']}): {ratchet['message']} "
-                    "This is an operator-value, anti-make-work, and leading-indicator warning."
-                ),
-            }
-        )
+        first_proof_points.append(proof_point)
+        trust_contracts.append(inspect_trust_contract(job, ratchet, proof_point))
+        if ratchet["status"] not in {"insufficient_history", "healthy"}:
+            issue_code = {
+                "drift": "persistence_ratchet_drift",
+                "missing": "persistence_ratchet_missing",
+                "weak": "persistence_ratchet_weak",
+            }.get(ratchet["status"], "persistence_ratchet_issue")
+            issues.append(
+                {
+                    "severity": "warning",
+                    "code": issue_code,
+                    "job_id": job["id"],
+                    "job_name": job.get("name", job["id"]),
+                    "ratchet_status": ratchet["status"],
+                    "surfaces": list(RATCHET_SURFACES),
+                    "compact_evidence": ratchet.get("compact_evidence", {}),
+                    "message": (
+                        f"Persistence ratchet {ratchet['status']} for recurring control loop "
+                        f"'{job.get('name', job['id'])}' ({job['id']}): {ratchet['message']} "
+                        "This is an operator-value, anti-make-work, and leading-indicator warning."
+                    ),
+                }
+            )
+
+        if proof_point["status"] not in {"insufficient_history", "populated"}:
+            issues.append(
+                {
+                    "severity": "warning",
+                    "code": f"first_proof_point_{proof_point['status']}",
+                    "job_id": job["id"],
+                    "job_name": job.get("name", job["id"]),
+                    "proof_point_status": proof_point["status"],
+                    "fields": proof_point.get("fields", {}),
+                    "missing_fields": proof_point.get("missing_fields", []),
+                    "generic_signals": proof_point.get("generic_signals", []),
+                    "message": (
+                        f"First proof point {proof_point['status']} for recurring control loop "
+                        f"'{job.get('name', job['id'])}' ({job['id']}): {proof_point['message']} "
+                        "Name one protected seed surface before treating governance language as actionable."
+                    ),
+                }
+            )
 
     for job in inactive_jobs:
         trust_contracts.append(inspect_trust_contract(job))
@@ -1103,6 +1309,11 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
                 1 for ratchet in persistence_ratchets
                 if ratchet["status"] not in {"insufficient_history", "healthy"}
             ),
+            "first_proof_point_checked": len(first_proof_points),
+            "first_proof_point_issue_count": sum(
+                1 for proof_point in first_proof_points
+                if proof_point["status"] not in {"insufficient_history", "populated"}
+            ),
             "trust_contract_checked": len(trust_contracts),
             "trust_contract_degraded_count": sum(
                 1 for contract in trust_contracts if contract.get("failed_commitment_visible")
@@ -1113,6 +1324,7 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
         "unclassified_active_jobs": unclassified_active,
         "grouped_active_jobs": grouped_active,
         "persistence_ratchets": persistence_ratchets,
+        "first_proof_points": first_proof_points,
         "trust_contracts": trust_contracts,
         "issues": issues,
     }
