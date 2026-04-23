@@ -5726,6 +5726,27 @@ class AIAgent:
             logging.error("Failed to activate fallback %s: %s", fb_model, e)
             return self._try_activate_fallback(reason=reason, error=error)  # try next in chain
 
+    def _try_advance_failed_fallback(
+        self,
+        api_error: BaseException,
+        *,
+        reason: Optional[str] = None,
+    ) -> bool:
+        """Move from a failed fallback provider to the next configured tier."""
+        if not self._fallback_activated:
+            return False
+        if self._fallback_index >= len(self._fallback_chain):
+            return False
+
+        self._emit_status(
+            "⚠️ Fallback provider rejected the request — "
+            "trying the next fallback provider..."
+        )
+        return self._try_activate_fallback(
+            reason=reason or fallback_reason_for_error(api_error) or "fallback_client_error",
+            error=api_error,
+        )
+
     # ── Per-turn primary restoration ─────────────────────────────────────
 
     def _restore_primary_runtime(self) -> bool:
@@ -8803,11 +8824,19 @@ class AIAgent:
                         'error code: 401', 'error code: 403',
                         'error code: 404', 'error code: 422',
                         'is not a valid model', 'invalid model', 'model not found',
+                        'model is not supported', 'unsupported model',
+                        'not supported when using codex',
                         'invalid api key', 'invalid_api_key', 'authentication',
                         'unauthorized', 'forbidden', 'not found',
                     ])) and not is_context_length_error
 
                     if is_client_error:
+                        if self._try_advance_failed_fallback(
+                            api_error,
+                            reason=llm_fallback_reason or "fallback_client_error",
+                        ):
+                            retry_count = 0
+                            continue
                         # Bad-input/auth/not-found errors should surface as-is:
                         # retrying on Groq would hide request bugs or missing
                         # credentials and could produce a misleading response.

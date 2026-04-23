@@ -28,6 +28,14 @@ _OPENAI_QUOTA_CODES = {
 }
 _BAD_INPUT_STATUSES = {400, 401, 404}
 _FALLBACK_METRICS: Counter[tuple[str, str]] = Counter()
+_GROQ_CHAT_MESSAGE_KEYS_BY_ROLE = {
+    "system": {"role", "content", "name"},
+    "developer": {"role", "content", "name"},
+    "user": {"role", "content", "name"},
+    "assistant": {"role", "content", "name", "tool_calls", "function_call"},
+    "tool": {"role", "content", "tool_call_id"},
+    "function": {"role", "content", "name"},
+}
 
 
 def llm_fallback_enabled(env: Optional[Mapping[str, str]] = None) -> bool:
@@ -259,6 +267,31 @@ def should_fallback_for_error(exc: BaseException) -> bool:
     return fallback_reason_for_error(exc) is not None
 
 
+def _sanitize_groq_chat_messages(messages: Any) -> Any:
+    """Strip provider-specific history fields before sending to Groq."""
+    if not isinstance(messages, list):
+        return messages
+
+    sanitized: list[Any] = []
+    for msg in messages:
+        if not isinstance(msg, Mapping):
+            sanitized.append(msg)
+            continue
+
+        role = str(msg.get("role") or "")
+        allowed = _GROQ_CHAT_MESSAGE_KEYS_BY_ROLE.get(
+            role,
+            {"role", "content", "name"},
+        )
+        cleaned = {
+            key: value
+            for key, value in msg.items()
+            if key in allowed and value is not None
+        }
+        sanitized.append(cleaned)
+    return sanitized
+
+
 def translate_kimi_chat_params(params: Mapping[str, Any]) -> dict[str, Any]:
     """Return OpenAI-compatible chat params trimmed for Groq fallback models."""
     allowed = {
@@ -278,6 +311,8 @@ def translate_kimi_chat_params(params: Mapping[str, Any]) -> dict[str, Any]:
         "parallel_tool_calls",
     }
     translated = {key: value for key, value in params.items() if key in allowed and value is not None}
+    if "messages" in translated:
+        translated["messages"] = _sanitize_groq_chat_messages(translated["messages"])
 
     if "max_tokens" not in translated and params.get("max_completion_tokens") is not None:
         translated["max_tokens"] = params["max_completion_tokens"]

@@ -331,6 +331,35 @@ class TestTryActivateFallback:
             assert agent._try_activate_fallback() is False
             assert agent._fallback_activated is False
 
+    def test_failed_codex_fallback_advances_to_next_tier(self):
+        """Fallback-side model rejection should not prevent lower-tier fallback."""
+        agent = _make_agent(
+            fallback_model=[
+                {"provider": "openai-codex", "model": "gpt-5.3-codex-spark"},
+                {"provider": "groq-kimi", "model": "openai/gpt-oss-120b"},
+            ],
+        )
+        agent._fallback_activated = True
+        agent._fallback_index = 1
+        agent.provider = "openai-codex"
+        agent.model = "gpt-5.3-codex-spark"
+        api_error = SimpleNamespace(
+            status_code=400,
+            body={
+                "error": {
+                    "message": (
+                        "The 'gpt-5.3-codex-spark' model is not supported "
+                        "when using Codex with a ChatGPT account."
+                    )
+                }
+            },
+        )
+
+        with patch.object(agent, "_try_activate_fallback", return_value=True) as mock_next:
+            assert agent._try_advance_failed_fallback(api_error, reason="fallback_client_error") is True
+
+        mock_next.assert_called_once_with(reason="fallback_client_error", error=api_error)
+
     def test_activates_nous_fallback(self):
         """Nous Portal fallback should use OAuth credentials and chat_completions mode."""
         agent = _make_agent(
