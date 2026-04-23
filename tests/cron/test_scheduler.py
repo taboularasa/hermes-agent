@@ -779,6 +779,10 @@ class TestBuildJobPromptSilentHint:
         assert "Durable Store=<the durable artifact" in result
         assert "Circulation=<the cheap coordination outputs" in result
         assert "Closure Rule=<why circulation-only output cannot count as closure>" in result
+        assert "Capability Report" in result
+        assert "self-improvement capability ledger as a durable report surface" in result
+        assert "self_improvement_benchmark(...).benchmark.capability_report.summary_markdown" in result
+        assert "self_improvement/capability_ledger.json" in result
 
     def test_one_shot_job_does_not_inject_persistence_ratchet_guidance(self):
         job = {
@@ -792,6 +796,7 @@ class TestBuildJobPromptSilentHint:
         assert "bounded persistence-ratchet check" not in result
         assert "Trust Contract" not in result
         assert "Coverage Completion" not in result
+        assert "Capability Report" not in result
 
 
 class TestBuildJobPromptMissingSkill:

@@ -199,6 +199,33 @@ def _build_value_surfaces_prompt_prefix(job: dict) -> str:
     )
 
 
+def _build_capability_report_prompt_prefix(job: dict) -> str:
+    """Return guidance for citing the durable capability-ledger report surface."""
+    if not should_check_persistence_ratchet(job):
+        return ""
+
+    try:
+        from hermes_constants import display_hermes_home
+
+        hermes_home = display_hermes_home()
+    except Exception:
+        hermes_home = "~/.hermes"
+
+    ledger_path = f"{hermes_home}/self_improvement/capability_ledger.json"
+
+    return (
+        "[SYSTEM: Treat the self-improvement capability ledger as a durable report surface, not just raw benchmark internals. "
+        "Before reporting, include a compact 'Capability Report' block with: "
+        f"Ledger=<{ledger_path}>; "
+        "Open Debt=<the capability debt or gap counts that still matter>; "
+        "Unverified Gaps=<the highest-leverage debt that still lacks verification or a passed outcome>; "
+        "Recent Outcomes=<the most relevant passed, failed, or pending capability outcomes>; "
+        "Next Decision=<the next durable capability move rather than another rediscovery pass>; "
+        "Report Surface=<cite `self_improvement_benchmark(...).benchmark.capability_report.summary_markdown` verbatim when available, otherwise summarize the ledger-backed report surface directly>. "
+        "Do not bury capability debt only inside long raw benchmark output when a compact ledger-backed report can carry it forward.]"
+    )
+
+
 def _resolve_origin(job: dict) -> Optional[dict]:
     """Extract origin info from a job, preserving any extra routing metadata."""
     origin = job.get("origin")
@@ -517,6 +544,7 @@ def _build_job_prompt(job: dict) -> str:
     trust_prefix = _build_trust_contract_prompt_prefix(job)
     coverage_prefix = _build_coverage_completion_prompt_prefix(job)
     value_surfaces_prefix = _build_value_surfaces_prompt_prefix(job)
+    capability_report_prefix = _build_capability_report_prompt_prefix(job)
     prompt = (
         silent_hint
         + (role_prefix + "\n\n" if role_prefix else "")
@@ -524,6 +552,7 @@ def _build_job_prompt(job: dict) -> str:
         + (trust_prefix + "\n\n" if trust_prefix else "")
         + (coverage_prefix + "\n\n" if coverage_prefix else "")
         + (value_surfaces_prefix + "\n\n" if value_surfaces_prefix else "")
+        + (capability_report_prefix + "\n\n" if capability_report_prefix else "")
         + prompt
     )
     if skills is None:
