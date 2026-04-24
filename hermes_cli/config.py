@@ -1314,6 +1314,23 @@ OPTIONAL_ENV_VARS = {
         "password": True,
         "category": "tool",
     },
+    "HUBSPOT_ACCESS_TOKEN": {
+        "description": "HubSpot private app or OAuth access token for CRM sales tools",
+        "prompt": "HubSpot access token",
+        "url": "https://developers.hubspot.com/docs/apps/legacy-apps/private-apps/overview",
+        "tools": ["hubspot_crm"],
+        "password": True,
+        "category": "tool",
+    },
+    "HUBSPOT_CLIENT_SECRET": {
+        "description": "HubSpot app client secret reserved for future OAuth refresh flows; current CRM calls use HUBSPOT_ACCESS_TOKEN",
+        "prompt": "HubSpot client secret (optional)",
+        "url": "https://developers.hubspot.com/docs/api-reference/legacy/authentication/oauth-tokens/v1/guide",
+        "tools": ["hubspot_crm"],
+        "password": True,
+        "category": "tool",
+        "advanced": True,
+    },
 
     # ── Honcho ──
     "HONCHO_API_KEY": {
