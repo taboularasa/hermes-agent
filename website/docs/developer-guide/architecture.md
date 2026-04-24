@@ -22,19 +22,19 @@ This page is the top-level map of Hermes Agent internals. Use it to orient yours
 ┌─────────────────────────────────────────────────────────────────────┐
 │                     AIAgent (run_agent.py)                           │
 │                                                                      │
-│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐                │
+│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐                 │
 │  │ Prompt        │ │ Provider     │ │ Tool         │                │
 │  │ Builder       │ │ Resolution   │ │ Dispatch     │                │
 │  │ (prompt_      │ │ (runtime_    │ │ (model_      │                │
-│  │  builder.py)  │ │  provider.py)│ │  tools.py)   │                │
-│  └──────┬───────┘ └──────┬───────┘ └──────┬───────┘                │
+│  │  builder.py)  │ │ provider.py) │ │  tools.py)   │                │
+│  └──────┬───────┘ └──────┬───────┘ └──────┬───────┘                 │
 │         │                │                │                          │
-│  ┌──────┴───────┐ ┌──────┴───────┐ ┌──────┴───────┐                │
-│  │ Compression  │ │ 3 API Modes  │ │ Tool Registry│                │
-│  │ & Caching    │ │ chat_compl.  │ │ (registry.py)│                │
-│  │              │ │ codex_resp.  │ │ 47 tools     │                │
-│  │              │ │ anthropic    │ │ 19 toolsets  │                │
-│  └──────────────┘ └──────────────┘ └──────────────┘                │
+│  ┌──────┴───────┐ ┌──────┴───────┐ ┌──────┴───────┐                 │
+│  │ Compression  │ │ 3 API Modes  │ │ Tool Registry│                 │
+│  │ & Caching    │ │ chat_compl.  │ │ (registry.py)│                 │
+│  │              │ │ codex_resp.  │ │ 47 tools     │                 │
+│  │              │ │ anthropic    │ │ 19 toolsets  │                 │
+│  └──────────────┘ └──────────────┘ └──────────────┘                 │
 └─────────────────────────────────────────────────────────────────────┘
            │                                    │
            ▼                                    ▼

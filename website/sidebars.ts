@@ -136,6 +136,7 @@ const sidebars: SidebarsConfig = {
         'user-guide/features/mcp',
         'user-guide/features/acp',
         'user-guide/features/api-server',
+        'user-guide/features/hubspot-crm',
         'user-guide/features/honcho',
         'user-guide/features/provider-routing',
         'user-guide/features/fallback-providers',
