@@ -110,7 +110,7 @@ API requests are wrapped in `_api_call_with_interrupt()` which runs the actual H
 ```text
 ┌──────────────────────┐     ┌──────────────┐
 │  Main thread         │     │  API thread   │
-│  wait on:            │────▶│  HTTP POST    │
+│  wait on:         -> │     │  HTTP POST    │
 │  - response ready    │     │  to provider  │
 │  - interrupt event   │     └──────────────┘
 │  - timeout           │
