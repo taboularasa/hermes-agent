@@ -33,10 +33,11 @@ OPENROUTER_MODELS: list[tuple[str, str]] = [
     ("anthropic/claude-sonnet-4.5",     ""),
     ("anthropic/claude-haiku-4.5",      ""),
     ("openrouter/elephant-alpha",       "free"),
+    ("openai/gpt-5.5",                  ""),
+    ("openai/gpt-5.3-codex",            ""),
     ("openai/gpt-5.4",                  ""),
     ("openai/gpt-5.4-mini",             ""),
     ("xiaomi/mimo-v2-pro",               ""),
-    ("openai/gpt-5.3-codex",            ""),
     ("google/gemini-3-pro-image-preview", ""),
     ("google/gemini-3-flash-preview",   ""),
     ("google/gemini-3.1-pro-preview",     ""),
@@ -80,9 +81,10 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "anthropic/claude-sonnet-4.6",
         "anthropic/claude-sonnet-4.5",
         "anthropic/claude-haiku-4.5",
+        "openai/gpt-5.5",
+        "openai/gpt-5.3-codex",
         "openai/gpt-5.4",
         "openai/gpt-5.4-mini",
-        "openai/gpt-5.3-codex",
         "google/gemini-3-pro-preview",
         "google/gemini-3-flash-preview",
         "google/gemini-3.1-pro-preview",
@@ -110,10 +112,11 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "copilot-acp",
     ],
     "copilot": [
+        "gpt-5.5",
+        "gpt-5.3-codex",
         "gpt-5.4",
         "gpt-5.4-mini",
         "gpt-5-mini",
-        "gpt-5.3-codex",
         "gpt-5.2-codex",
         "gpt-4.1",
         "gpt-4o",
@@ -206,9 +209,10 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "trinity-mini",
     ],
     "opencode-zen": [
+        "gpt-5.5",
+        "gpt-5.3-codex",
         "gpt-5.4-pro",
         "gpt-5.4",
-        "gpt-5.3-codex",
         "gpt-5.3-codex-spark",
         "gpt-5.2",
         "gpt-5.2-codex",
@@ -268,6 +272,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     "kilocode": [
         "anthropic/claude-opus-4.6",
         "anthropic/claude-sonnet-4.6",
+        "openai/gpt-5.5",
         "openai/gpt-5.4",
         "google/gemini-3-pro-preview",
         "google/gemini-3-flash-preview",
@@ -942,7 +947,7 @@ def parse_model_input(raw: str, current_provider: str) -> tuple[str, str]:
         openrouter:anthropic/claude-sonnet-4.5  →  ("openrouter", "anthropic/claude-sonnet-4.5")
         nous:hermes-3                           →  ("nous", "hermes-3")
         anthropic/claude-sonnet-4.5             →  (current_provider, "anthropic/claude-sonnet-4.5")
-        gpt-5.4                                 →  (current_provider, "gpt-5.4")
+        gpt-5.5                                 →  (current_provider, "gpt-5.5")
 
     The colon is only treated as a provider delimiter if the left side is a
     recognized provider name or alias.  This avoids misinterpreting model names
@@ -1167,6 +1172,7 @@ def provider_label(provider: Optional[str]) -> str:
 # See https://openai.com/api-priority-processing/ for the canonical list.
 # Only the bare model slug is stored (no vendor prefix).
 _PRIORITY_PROCESSING_MODELS: frozenset[str] = frozenset({
+    "gpt-5.5",
     "gpt-5.4",
     "gpt-5.4-mini",
     "gpt-5.2",

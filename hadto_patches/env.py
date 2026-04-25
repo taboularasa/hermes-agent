@@ -56,7 +56,38 @@ def _validate_llm_fallback_env() -> None:
     """Validate startup-only LLM fallback requirements after env loading."""
     from agent.llm_fallback import validate_groq_fallback_startup
 
-    validate_groq_fallback_startup(os.environ)
+    validate_groq_fallback_startup(
+        os.environ,
+        explicit_fallback_chain=_config_has_explicit_fallback_chain(),
+    )
+
+
+def _config_has_explicit_fallback_chain() -> bool:
+    """Return whether config.yaml declares a complete manual fallback chain."""
+    hermes_home_raw = os.environ.get("HERMES_HOME", "").strip()
+    hermes_home = Path(hermes_home_raw).expanduser() if hermes_home_raw else Path.home() / ".hermes"
+    config_path = hermes_home / "config.yaml"
+    if not config_path.exists():
+        return False
+
+    try:
+        import yaml
+
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return False
+    if not isinstance(config, dict):
+        return False
+
+    providers = config.get("fallback_providers")
+    if isinstance(providers, list) and any(
+        isinstance(item, dict) and item.get("provider") and item.get("model")
+        for item in providers
+    ):
+        return True
+
+    model = config.get("fallback_model")
+    return isinstance(model, dict) and bool(model.get("provider") and model.get("model"))
 
 
 def _sanitize_env_file_if_needed(env_path: str | os.PathLike) -> int:

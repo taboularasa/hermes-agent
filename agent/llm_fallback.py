@@ -63,9 +63,15 @@ def groq_fallback_model(env: Optional[Mapping[str, str]] = None) -> str:
     return configured or GROQ_FALLBACK_DEFAULT_MODEL
 
 
-def validate_groq_fallback_startup(env: Optional[Mapping[str, str]] = None) -> None:
+def validate_groq_fallback_startup(
+    env: Optional[Mapping[str, str]] = None,
+    *,
+    explicit_fallback_chain: bool = False,
+) -> None:
     """Fail fast when the automatic Groq fallback is enabled but unconfigured."""
     env = env or os.environ
+    if explicit_fallback_chain:
+        return
     if llm_fallback_enabled(env) and not groq_api_key(env):
         raise RuntimeError(
             f"{LLM_FALLBACK_FLAG}=true requires {GROQ_API_KEY_ENV} for the "
@@ -122,9 +128,15 @@ def append_automatic_groq_fallback(
     primary_api_mode: str,
     env: Optional[Mapping[str, str]] = None,
 ) -> list[dict[str, Any]]:
-    """Append the automatic Groq fallback for ChatGPT/OpenAI primaries."""
+    """Append the automatic Groq fallback for ChatGPT/OpenAI primaries.
+
+    Explicit fallback chains are exact user-declared order and should not be
+    extended with automatic providers.
+    """
     env = env or os.environ
     chain = list(fallback_chain or [])
+    if chain:
+        return chain
     if not llm_fallback_enabled(env):
         return chain
     if not is_openai_primary(primary_provider, primary_base_url, primary_api_mode):

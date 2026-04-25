@@ -441,7 +441,7 @@ class TestCustomProviderCompatibility:
                 {
                     "_config_version": 11,
                     "model": {
-                        "default": "openai/gpt-5.4",
+                        "default": "openai/gpt-5.5",
                         "provider": "openrouter",
                     },
                     "custom_providers": [
