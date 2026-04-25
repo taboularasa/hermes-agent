@@ -60,3 +60,25 @@ def test_run_conversation_persists_tokens_for_cron_sessions():
     assert result["final_response"] == "done"
     session_db.update_token_counts.assert_called_once()
     assert session_db.update_token_counts.call_args.args[0] == "cron-session"
+
+
+def test_agent_accepts_and_persists_parent_session_id():
+    session_db = MagicMock()
+    with (
+        patch("run_agent.get_tool_definitions", return_value=[]),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        AIAgent(
+            api_key="test-key",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            session_db=session_db,
+            session_id="child-session",
+            parent_session_id="parent-session",
+            platform="slack",
+        )
+
+    session_db.create_session.assert_called_once()
+    assert session_db.create_session.call_args.kwargs["parent_session_id"] == "parent-session"
