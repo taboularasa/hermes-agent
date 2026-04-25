@@ -623,6 +623,7 @@ class AIAgent:
         provider_require_parameters: bool = False,
         provider_data_collection: str = None,
         session_id: str = None,
+        parent_session_id: str = None,
         tool_progress_callback: callable = None,
         thinking_callback: callable = None,
         reasoning_callback: callable = None,
@@ -1222,6 +1223,7 @@ class AIAgent:
                         "max_tokens": max_tokens,
                     },
                     user_id=None,
+                    parent_session_id=parent_session_id,
                 )
             except Exception as e:
                 # Transient SQLite lock contention (e.g. CLI and gateway writing
