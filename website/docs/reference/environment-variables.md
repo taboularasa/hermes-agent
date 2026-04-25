@@ -389,16 +389,18 @@ For task-specific direct endpoints, Hermes uses the task's configured API key or
 
 ## Fallback Model
 
-Hermes automatically falls back from ChatGPT/OpenAI primaries to Groq (`openai/gpt-oss-120b`) for quota/rate-limit errors, overloaded responses, and repeated network timeouts. This requires `GROQ_API_KEY`; set `LLM_FALLBACK_ENABLED=false` to disable quickly.
+Hermes automatically falls back from ChatGPT/OpenAI primaries to Groq (`openai/gpt-oss-120b`) for quota/rate-limit errors, overloaded responses, and repeated network timeouts only when no explicit fallback chain is configured. This requires `GROQ_API_KEY`; set `LLM_FALLBACK_ENABLED=false` to disable quickly.
 
 Kimi K2 on Groq (`moonshotai/kimi-k2-instruct-0905`) was the originally targeted fallback, but Groq shut it down on April 15, 2026 and recommends `openai/gpt-oss-120b`. Set `GROQ_FALLBACK_MODEL` only if you need to override the default.
 
-Manual fallback providers are configured through `config.yaml`. Add a `fallback_model` section with `provider` and `model` keys to enable explicit failover when your main model encounters errors.
+Manual fallback providers are configured through `config.yaml`. Prefer `fallback_providers` for an exact ordered chain; legacy `fallback_model` remains supported for a single fallback.
 
 ```yaml
-fallback_model:
-  provider: openrouter
-  model: anthropic/claude-sonnet-4
+fallback_providers:
+  - provider: openai-codex
+    model: gpt-5.3-codex
+  - provider: openrouter
+    model: anthropic/claude-sonnet-4.6
 ```
 
 See [Fallback Providers](/docs/user-guide/features/fallback-providers) for full details.

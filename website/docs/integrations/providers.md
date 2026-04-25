@@ -105,7 +105,7 @@ Hermes supports GitHub Copilot as a first-class provider with two modes:
 **`copilot` — Direct Copilot API** (recommended). Uses your GitHub Copilot subscription to access GPT-5.x, Claude, Gemini, and other models through the Copilot API.
 
 ```bash
-hermes chat --provider copilot --model gpt-5.4
+hermes chat --provider copilot --model gpt-5.5
 ```
 
 **Authentication options** (checked in this order):
@@ -142,7 +142,7 @@ hermes chat --provider copilot-acp --model copilot-acp
 ```yaml
 model:
   provider: "copilot"
-  default: "gpt-5.4"
+  default: "gpt-5.5"
 ```
 
 | Environment variable | Description |
@@ -950,26 +950,30 @@ provider_routing:
 
 ## Fallback Model
 
-Hermes automatically adds an availability fallback for ChatGPT/OpenAI primaries: if the primary returns quota/rate-limit errors, overload errors, or repeated network timeouts, Hermes switches to Groq (`openai/gpt-oss-120b` via `https://api.groq.com/openai/v1`). The Groq key is read from `GROQ_API_KEY`; in Doppler this secret is named `GROQ_API_KEY`. Disable this automatic fallback with `LLM_FALLBACK_ENABLED=false`.
+Hermes automatically adds an availability fallback for ChatGPT/OpenAI primaries when no explicit fallback chain is configured: if the primary returns quota/rate-limit errors, overload errors, or repeated network timeouts, Hermes switches to Groq (`openai/gpt-oss-120b` via `https://api.groq.com/openai/v1`). The Groq key is read from `GROQ_API_KEY`; in Doppler this secret is named `GROQ_API_KEY`. Disable this automatic fallback with `LLM_FALLBACK_ENABLED=false`.
 
 Kimi K2 on Groq (`moonshotai/kimi-k2-instruct-0905`) was the originally targeted fallback, but Groq shut it down on April 15, 2026 and recommends `openai/gpt-oss-120b`. Set `GROQ_FALLBACK_MODEL=moonshotai/kimi-k2-instruct-0905` only if your Groq project regains access to that model.
 
-You can also configure a backup provider:model that Hermes switches to when your primary model fails (rate limits, server errors, auth failures):
+You can also configure an exact backup chain that Hermes switches through when your primary model fails (rate limits, server errors, auth failures). For ChatGPT/OpenAI/Codex, prefer GPT-5.5 primary, GPT-5.3-Codex first fallback, then OpenRouter Claude Sonnet 4.6:
 
 ```yaml
-fallback_model:
-  provider: openrouter                    # required
-  model: anthropic/claude-sonnet-4        # required
-  # base_url: http://localhost:8000/v1    # optional, for custom endpoints
-  # api_key_env: MY_CUSTOM_KEY           # optional, env var name for custom endpoint API key
+model:
+  provider: openai-codex
+  default: gpt-5.5
+
+fallback_providers:
+  - provider: openai-codex
+    model: gpt-5.3-codex
+  - provider: openrouter
+    model: anthropic/claude-sonnet-4.6
 ```
 
-When activated, the fallback swaps the model and provider mid-session without losing your conversation. It fires **at most once** per session.
+When activated, fallback swaps the model and provider mid-session without losing your conversation. If you declare `fallback_providers`, Hermes follows that order and does not append the automatic Groq fallback.
 
 Supported providers: `openrouter`, `nous`, `openai-codex`, `groq-kimi`, `copilot`, `copilot-acp`, `anthropic`, `huggingface`, `zai`, `kimi-coding`, `kimi-coding-cn`, `minimax`, `minimax-cn`, `deepseek`, `ai-gateway`, `opencode-zen`, `opencode-go`, `kilocode`, `xiaomi`, `arcee`, `alibaba`, `custom`.
 
 :::tip
-Manual fallback is configured through `config.yaml`. The automatic ChatGPT/OpenAI to Groq fallback is controlled by `LLM_FALLBACK_ENABLED`, can override its model with `GROQ_FALLBACK_MODEL`, and requires `GROQ_API_KEY`. For full details on when fallback triggers, supported providers, and how it interacts with auxiliary tasks and delegation, see [Fallback Providers](/docs/user-guide/features/fallback-providers).
+Manual fallback is configured through `config.yaml`. The automatic ChatGPT/OpenAI to Groq fallback is controlled by `LLM_FALLBACK_ENABLED`, can override its model with `GROQ_FALLBACK_MODEL`, and requires `GROQ_API_KEY`. Explicit `fallback_model` or `fallback_providers` config suppresses that automatic Groq append. For full details on when fallback triggers, supported providers, and how it interacts with auxiliary tasks and delegation, see [Fallback Providers](/docs/user-guide/features/fallback-providers).
 :::
 
 ## Smart Model Routing

@@ -2065,7 +2065,7 @@ def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["
                 "Change to:\n"
                 "  fallback_model:\n"
                 "    provider: openrouter\n"
-                "    model: anthropic/claude-sonnet-4",
+                "    model: anthropic/claude-sonnet-4.6",
             ))
         elif fb:
             if not fb.get("provider"):
@@ -2078,7 +2078,7 @@ def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["
                 issues.append(ConfigIssue(
                     "warning",
                     "fallback_model is missing 'model' field — fallback will be disabled",
-                    "Add: model: anthropic/claude-sonnet-4 (or another model)",
+                    "Add: model: anthropic/claude-sonnet-4.6 (or another model)",
                 ))
 
     # ── Check for fallback_model accidentally nested inside custom_providers ──
@@ -2764,14 +2764,14 @@ _SECURITY_COMMENT = """
 """
 
 _FALLBACK_COMMENT = """
-# ── Fallback Model ────────────────────────────────────────────────────
+# ── Fallback Providers ────────────────────────────────────────────────
 # Automatic provider failover when primary is unavailable. ChatGPT/OpenAI
-# primaries automatically fall back to Groq openai/gpt-oss-120b when
-# LLM_FALLBACK_ENABLED=true (default) and GROQ_API_KEY is present.
-# Override with GROQ_FALLBACK_MODEL if needed.
-# Uncomment and configure fallback_model to add a manual fallback. Triggers
-# on rate limits (429), overload (529), service errors (503), or connection
-# failures.
+# primaries automatically fall back to Groq openai/gpt-oss-120b only when no
+# explicit fallback_model/fallback_providers chain is configured,
+# LLM_FALLBACK_ENABLED=true (default), and GROQ_API_KEY is present.
+# Override the automatic Groq model with GROQ_FALLBACK_MODEL if needed.
+# Configure fallback_providers for an exact manual order. Triggers on rate
+# limits (429), overload (529), service errors (503), or connection failures.
 #
 # Supported providers:
 #   openrouter   (OPENROUTER_API_KEY)  — routes to any model
@@ -2786,9 +2786,21 @@ _FALLBACK_COMMENT = """
 #
 # For custom OpenAI-compatible endpoints, add base_url and api_key_env.
 #
+# Recommended ChatGPT/OpenAI/Codex chain:
+#   primary model: gpt-5.5
+#   first fallback: gpt-5.3-codex via OpenAI Codex
+#   base-case fallback: Claude Sonnet 4.6 via OpenRouter
+#
+# fallback_providers:
+#   - provider: openai-codex
+#     model: gpt-5.3-codex
+#   - provider: openrouter
+#     model: anthropic/claude-sonnet-4.6
+#
+# Legacy single-step fallback_model is still supported:
 # fallback_model:
 #   provider: openrouter
-#   model: anthropic/claude-sonnet-4
+#   model: anthropic/claude-sonnet-4.6
 #
 # ── Smart Model Routing ────────────────────────────────────────────────
 # Optional cheap-vs-strong routing for simple turns.
@@ -2813,14 +2825,14 @@ _COMMENTED_SECTIONS = """
 # security:
 #   redact_secrets: false
 
-# ── Fallback Model ────────────────────────────────────────────────────
+# ── Fallback Providers ────────────────────────────────────────────────
 # Automatic provider failover when primary is unavailable. ChatGPT/OpenAI
-# primaries automatically fall back to Groq openai/gpt-oss-120b when
-# LLM_FALLBACK_ENABLED=true (default) and GROQ_API_KEY is present.
-# Override with GROQ_FALLBACK_MODEL if needed.
-# Uncomment and configure fallback_model to add a manual fallback. Triggers
-# on rate limits (429), overload (529), service errors (503), or connection
-# failures.
+# primaries automatically fall back to Groq openai/gpt-oss-120b only when no
+# explicit fallback_model/fallback_providers chain is configured,
+# LLM_FALLBACK_ENABLED=true (default), and GROQ_API_KEY is present.
+# Override the automatic Groq model with GROQ_FALLBACK_MODEL if needed.
+# Configure fallback_providers for an exact manual order. Triggers on rate
+# limits (429), overload (529), service errors (503), or connection failures.
 #
 # Supported providers:
 #   openrouter   (OPENROUTER_API_KEY)  — routes to any model
@@ -2835,9 +2847,21 @@ _COMMENTED_SECTIONS = """
 #
 # For custom OpenAI-compatible endpoints, add base_url and api_key_env.
 #
+# Recommended ChatGPT/OpenAI/Codex chain:
+#   primary model: gpt-5.5
+#   first fallback: gpt-5.3-codex via OpenAI Codex
+#   base-case fallback: Claude Sonnet 4.6 via OpenRouter
+#
+# fallback_providers:
+#   - provider: openai-codex
+#     model: gpt-5.3-codex
+#   - provider: openrouter
+#     model: anthropic/claude-sonnet-4.6
+#
+# Legacy single-step fallback_model is still supported:
 # fallback_model:
 #   provider: openrouter
-#   model: anthropic/claude-sonnet-4
+#   model: anthropic/claude-sonnet-4.6
 #
 # ── Smart Model Routing ────────────────────────────────────────────────
 # Optional cheap-vs-strong routing for simple turns.

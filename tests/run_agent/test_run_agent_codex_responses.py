@@ -32,6 +32,7 @@ def _patch_agent_bootstrap(monkeypatch):
 
 def _build_agent(monkeypatch):
     _patch_agent_bootstrap(monkeypatch)
+    monkeypatch.setenv("LLM_FALLBACK_ENABLED", "false")
 
     agent = run_agent.AIAgent(
         model="gpt-5-codex",

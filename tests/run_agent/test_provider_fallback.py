@@ -60,6 +60,32 @@ class TestFallbackChainInit:
         assert len(agent._fallback_chain) == 2
         assert agent._fallback_model == fbs[0]
 
+    def test_explicit_chain_suppresses_automatic_groq(self, monkeypatch):
+        monkeypatch.setenv("GROQ_API_KEY", "gsk-test")
+        monkeypatch.setenv("LLM_FALLBACK_ENABLED", "true")
+        fbs = [
+            {"provider": "openai-codex", "model": "gpt-5.3-codex"},
+            {"provider": "openrouter", "model": "anthropic/claude-sonnet-4.6"},
+        ]
+        with (
+            patch("run_agent.get_tool_definitions", return_value=[]),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-key",
+                base_url="https://api.openai.com/v1",
+                provider="openai",
+                api_mode="chat_completions",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+                fallback_model=fbs,
+            )
+
+        assert agent._fallback_chain == fbs
+        assert all(item["provider"] != "groq-kimi" for item in agent._fallback_chain)
+
     def test_invalid_entries_filtered(self):
         fbs = [
             {"provider": "openai", "model": "gpt-4o"},

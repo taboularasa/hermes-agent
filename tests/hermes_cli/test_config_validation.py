@@ -101,7 +101,7 @@ class TestFallbackModelValidation:
 
     def test_missing_provider(self):
         issues = validate_config_structure({
-            "fallback_model": {"model": "anthropic/claude-sonnet-4"},
+            "fallback_model": {"model": "anthropic/claude-sonnet-4.6"},
         })
         assert any("missing 'provider'" in i.message for i in issues)
 
@@ -115,7 +115,7 @@ class TestFallbackModelValidation:
         issues = validate_config_structure({
             "fallback_model": {
                 "provider": "openrouter",
-                "model": "anthropic/claude-sonnet-4",
+                "model": "anthropic/claude-sonnet-4.6",
             },
         })
         # Only fallback-related issues should be absent

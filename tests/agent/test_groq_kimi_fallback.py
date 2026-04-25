@@ -7,6 +7,7 @@ from agent.llm_fallback import (
     GROQ_FALLBACK_DEFAULT_MODEL,
     GROQ_KIMI_BASE_URL,
     GROQ_KIMI_MODEL,
+    append_automatic_groq_fallback,
     fallback_metric_count,
     groq_fallback_model,
     translate_kimi_chat_params,
@@ -148,6 +149,25 @@ def test_openai_400_does_not_fall_back(monkeypatch):
     groq_client.chat.completions.create.assert_not_called()
 
 
+def test_explicit_fallback_chain_does_not_append_automatic_groq(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "gsk-test")
+    monkeypatch.setenv("LLM_FALLBACK_ENABLED", "true")
+    chain = [
+        {"provider": "openai-codex", "model": "gpt-5.3-codex"},
+        {"provider": "openrouter", "model": "anthropic/claude-sonnet-4.6"},
+    ]
+
+    result = append_automatic_groq_fallback(
+        chain,
+        primary_provider="openai",
+        primary_base_url="https://api.openai.com/v1",
+        primary_api_mode="chat_completions",
+    )
+
+    assert result == chain
+    assert all(item["provider"] != "groq-kimi" for item in result)
+
+
 def test_stream_failure_before_first_token_falls_back(monkeypatch):
     monkeypatch.setenv("HERMES_STREAM_RETRIES", "0")
     monkeypatch.setenv("LLM_PRIMARY_RETRIES", "0")
@@ -203,6 +223,13 @@ def test_missing_groq_api_key_fails_startup_when_enabled(monkeypatch):
 
     with pytest.raises(RuntimeError, match="GROQ_API_KEY"):
         validate_groq_fallback_startup()
+
+
+def test_explicit_fallback_chain_skips_groq_startup_requirement(monkeypatch):
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setenv("LLM_FALLBACK_ENABLED", "true")
+
+    validate_groq_fallback_startup(explicit_fallback_chain=True)
 
 
 def test_kimi_param_translation_preserves_supported_fields():

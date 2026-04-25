@@ -604,7 +604,7 @@ When `base_url` is set, Hermes ignores the provider and calls that endpoint dire
 Available providers for auxiliary tasks: `auto`, `openrouter`, `nous`, `codex`, `groq-kimi`, `copilot`, `anthropic`, `main`, `zai`, `kimi-coding`, `kimi-coding-cn`, `arcee`, `minimax`, any provider registered in the [provider registry](/docs/reference/environment-variables), or any named custom provider from your `custom_providers` list (e.g. `provider: "beans"`).
 
 :::warning `"main"` is for auxiliary tasks only
-The `"main"` provider option means "use whatever provider my main agent uses" — it's only valid inside `auxiliary:`, `compression:`, and `fallback_model:` configs. It is **not** a valid value for your top-level `model.provider` setting. If you use a custom OpenAI-compatible endpoint, set `provider: custom` in your `model:` section. See [AI Providers](/docs/integrations/providers) for all main model provider options.
+The `"main"` provider option means "use whatever provider my main agent uses" — it's only valid inside `auxiliary:`, `compression:`, `fallback_model:`, and `fallback_providers:` configs. It is **not** a valid value for your top-level `model.provider` setting. If you use a custom OpenAI-compatible endpoint, set `provider: custom` in your `model:` section. See [AI Providers](/docs/integrations/providers) for all main model provider options.
 :::
 
 ### Full auxiliary config reference
@@ -678,11 +678,11 @@ Each auxiliary task has a configurable `timeout` (in seconds). Defaults: vision 
 :::
 
 :::info
-Context compression has its own `compression:` block for thresholds and an `auxiliary.compression:` block for model/provider settings — see [Context Compression](#context-compression) above. The fallback model uses a `fallback_model:` block — see [Fallback Model](/docs/integrations/providers#fallback-model). All three follow the same provider/model/base_url pattern.
+Context compression has its own `compression:` block for thresholds and an `auxiliary.compression:` block for model/provider settings — see [Context Compression](#context-compression) above. Main-agent fallback uses `fallback_providers:` (preferred ordered chain) or legacy `fallback_model:` — see [Fallback Model](/docs/integrations/providers#fallback-model). All three follow the same provider/model/base_url pattern.
 :::
 
 :::info
-When your primary provider is ChatGPT/OpenAI, Hermes also enables an automatic availability fallback to Groq (`openai/gpt-oss-120b` by default). It requires `GROQ_API_KEY` (Doppler secret name: `GROQ_API_KEY`), can be disabled with `LLM_FALLBACK_ENABLED=false`, and can override the model with `GROQ_FALLBACK_MODEL`.
+When your primary provider is ChatGPT/OpenAI, Hermes also enables an automatic availability fallback to Groq (`openai/gpt-oss-120b` by default) only when no explicit `fallback_model` or `fallback_providers` chain is configured. It requires `GROQ_API_KEY` (Doppler secret name: `GROQ_API_KEY`), can be disabled with `LLM_FALLBACK_ENABLED=false`, and can override the model with `GROQ_FALLBACK_MODEL`.
 :::
 
 ### Changing the Vision Model
@@ -703,7 +703,7 @@ AUXILIARY_VISION_MODEL=openai/gpt-4o
 
 ### Provider Options
 
-These options apply to **auxiliary task configs** (`auxiliary:`, `compression:`, `fallback_model:`), not to your main `model.provider` setting.
+These options apply to **auxiliary task configs** (`auxiliary:`, `compression:`, `fallback_model:`, `fallback_providers:`), not to your main `model.provider` setting.
 
 | Provider | Description | Requirements |
 |----------|-------------|-------------|

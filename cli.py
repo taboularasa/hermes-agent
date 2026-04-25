@@ -2225,7 +2225,7 @@ class HermesCLI:
         if resolved_provider != "openai-codex":
             return changed
 
-        # 1. Strip provider prefix ("openai/gpt-5.4" → "gpt-5.4")
+        # 1. Strip provider prefix ("openai/gpt-5.5" → "gpt-5.5")
         if "/" in current_model:
             slug = current_model.split("/", 1)[1]
             if not self._model_is_default:
@@ -2239,7 +2239,7 @@ class HermesCLI:
 
         # 2. Replace untouched default with a Codex model
         if self._model_is_default:
-            fallback_model = "gpt-5.3-codex"
+            fallback_model = "gpt-5.5"
             try:
                 from hermes_cli.codex_models import get_codex_model_ids
 
