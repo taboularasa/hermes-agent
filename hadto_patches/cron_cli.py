@@ -230,6 +230,8 @@ def cron_topology(show_all: bool = False):
             proof_fields = proof_point.get("fields") or {}
             value_surfaces = contract.get("value_surfaces") or {}
             value_fields = value_surfaces.get("fields") or {}
+            priority_scoring = contract.get("priority_scoring") or {}
+            priority_fields = priority_scoring.get("fields") or {}
             attention_budget = contract.get("attention_budget") or {}
             attention_fields = attention_budget.get("fields") or {}
             print(
@@ -245,6 +247,12 @@ def cron_topology(show_all: bool = False):
                 print(f"      Circulation: {value_fields.get('circulation', '-')}")
             else:
                 print(f"      Durable: {value_surfaces.get('status', 'required')} - {value_surfaces.get('message', '-')}")
+            if priority_fields:
+                print(f"      Lane: {priority_fields.get('lane', '-')}")
+                print(f"      Score: {priority_fields.get('weighted_score', '-')}")
+                print(f"      Outranks: {priority_fields.get('outranks', '-')}")
+            else:
+                print(f"      Lane: {priority_scoring.get('status', 'required')} - {priority_scoring.get('message', '-')}")
             if attention_fields:
                 print(f"      Attention: {attention_fields.get('attention_cost', '-')}")
                 print(f"      Decision value: {attention_fields.get('decision_value', '-')}")

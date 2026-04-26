@@ -43,6 +43,7 @@ from cron.jobs import (
     get_due_jobs,
     mark_job_run,
     save_job_output,
+    should_check_growth_signals,
     should_check_persistence_ratchet,
 )
 
@@ -211,6 +212,54 @@ def _build_attention_budget_prompt_prefix(job: dict) -> str:
         "Decision Value=<what decision, judgment update, or durable state change this attention bought>; "
         "Focus Effect=<whether this shaped useful focus or drifted into low-yield alerting/report spam>; "
         "Do not count low-yield output as closure when attention cost is high and decision value is low or unchanged.]"
+    )
+
+
+def _build_growth_signals_prompt_prefix(job: dict) -> str:
+    """Return guidance for grounding agenda review in concrete growth evidence."""
+    if not should_check_growth_signals(job):
+        return ""
+
+    return (
+        "[SYSTEM: This recurring bridge loop is responsible for agenda review under current growth objectives. "
+        "Before reporting, inspect concrete business evidence from Slack, Linear, journal notes, or equivalent durable operator surfaces. "
+        "Include a compact 'Growth Signals' block with: "
+        "Evidence Sources=<the exact Slack threads/channels, Linear issues/comments, journal entries, or other business surfaces inspected>; "
+        "Client Pipeline=<the live proposal, demo, follow-up, contract, or pipeline-health signal that matters now>; "
+        "Social Proof=<the testimonial, case study, reference, proof asset, or credibility gap/opportunity that matters now>; "
+        "Prioritization Effect=<how those signals changed selection, ordering, deferral, or preemption in this review>; "
+        "Linear Citation=<the exact Linear issue description/comment/update surface that explicitly cites the chosen growth signals when growth work is selected>; "
+        "Next Growth Action=<the concrete growth move selected next, or why non-growth work still outranked it despite the signals>. "
+        "Do not justify growth work with generic business language alone. If growth work was selected, ensure the referenced Linear description or comment explicitly names the triggering pipeline and social-proof signals."
+    )
+
+
+def _build_priority_scoring_prompt_prefix(job: dict) -> str:
+    """Return guidance for evidence-backed maintenance/growth/capability scoring."""
+    if not should_check_persistence_ratchet(job):
+        return ""
+
+    return (
+        "[SYSTEM: Score candidate work from evidence using stable lanes before you report selection. "
+        "Use a 0-5 scale for each weighted input and compute Weighted Score = "
+        "0.30*Epoch Impact + 0.25*Reliability Impact + 0.15*Reuse + 0.15*Urgency + 0.10*Confidence - 0.10*Risk - 0.05*Effort. "
+        "Lane rules: Maintenance covers degraded reliability, broken verification, blocked operator throughput, or core infrastructure repair; "
+        "Growth covers contract-winning throughput, client pipeline, revenue, demos, or social-proof movement; "
+        "Capability covers new Hermes leverage only when it directly compounds maintenance or growth. "
+        "Gating rules: when core infrastructure is degraded or reliability impact is high, maintenance preempts growth and capability; "
+        "growth may win only after maintenance gates are clear; capability should be held unless it clearly compounds maintenance or growth and survives the same evidence test. "
+        "Before reporting, include a compact 'Priority Scoring' block with: "
+        "Lane=<maintenance|growth|capability>; "
+        "Gating Decision=<why this candidate shipped, held, or was preempted>; "
+        "Weighted Score=<final score after weights>; "
+        "Epoch Impact=<0-5 plus evidence>; "
+        "Reliability Impact=<0-5 plus evidence>; "
+        "Reuse=<0-5 plus evidence>; "
+        "Urgency=<0-5 plus evidence>; "
+        "Confidence=<0-5 plus evidence>; "
+        "Risk=<0-5 plus evidence>; "
+        "Effort=<0-5 plus evidence>; "
+        "Outranks=<why this issue beats the next-best alternative, naming the losing lane/candidate when possible>.]"
     )
 
 
@@ -550,6 +599,8 @@ def _build_job_prompt(job: dict) -> str:
     trust_prefix = _build_trust_contract_prompt_prefix(job)
     coverage_prefix = _build_coverage_completion_prompt_prefix(job)
     value_surfaces_prefix = _build_value_surfaces_prompt_prefix(job)
+    growth_signals_prefix = _build_growth_signals_prompt_prefix(job)
+    priority_scoring_prefix = _build_priority_scoring_prompt_prefix(job)
     attention_budget_prefix = _build_attention_budget_prompt_prefix(job)
     aggregate_stewardship_prefix = _build_aggregate_stewardship_prompt_prefix(job)
     prompt = (
@@ -559,6 +610,8 @@ def _build_job_prompt(job: dict) -> str:
         + (trust_prefix + "\n\n" if trust_prefix else "")
         + (coverage_prefix + "\n\n" if coverage_prefix else "")
         + (value_surfaces_prefix + "\n\n" if value_surfaces_prefix else "")
+        + (growth_signals_prefix + "\n\n" if growth_signals_prefix else "")
+        + (priority_scoring_prefix + "\n\n" if priority_scoring_prefix else "")
         + (attention_budget_prefix + "\n\n" if attention_budget_prefix else "")
         + (aggregate_stewardship_prefix + "\n\n" if aggregate_stewardship_prefix else "")
         + prompt

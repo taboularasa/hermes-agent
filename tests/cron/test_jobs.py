@@ -27,6 +27,7 @@ from cron.jobs import (
     inspect_first_proof_point,
     inspect_geometry_shaping,
     inspect_value_surfaces,
+    inspect_growth_signals,
     inspect_attention_budget,
     inspect_aggregate_stewardship,
     inspect_trust_contract,
@@ -883,6 +884,69 @@ Value Surfaces:
         assert contract["value_surfaces"]["status"] == "populated"
         assert contract["value_surfaces"]["fields"]["closure_rule"].startswith("circulation-only output does not count")
         assert not [issue for issue in snapshot["issues"] if issue["code"].startswith("value_surfaces_")]
+
+    def test_growth_signals_populate_trust_contract_and_topology(self, tmp_cron_dir):
+        job = create_job(
+            prompt="Coordinate backlog and keep the selected issue moving.",
+            schedule="every 10m",
+            name="coord-global",
+            role="coordinate",
+            scope="global",
+        )
+        output = """Progress report.
+
+Growth Signals:
+- Evidence Sources: Slack #sales thread on demo slippage, Linear HAD-135 comment with proposal blocker notes, and the operator journal entry about missing customer proof assets.
+- Client Pipeline: two live proposals are waiting on a demo follow-up and one contract thread is stalled until a revised scope note is sent.
+- Social Proof: no fresh case study or testimonial is attached to the active proposals, and the reference request draft is still missing.
+- Prioritization Effect: selected the growth-adjacent follow-up issue ahead of internal cleanup because the proposal/demo blockers are live and revenue-adjacent; deferred maintenance work.
+- Linear Citation: Linear issue comment HAD-135 now cites the stalled demo follow-up, proposal blocker, and missing case study/testimonial proof.
+- Next Growth Action: send the revised demo follow-up and attach the missing proof-asset request in the selected issue thread.
+"""
+        self._write_output(job["id"], "2026-04-21_10-00-00.md", output)
+
+        growth_signals = inspect_growth_signals(get_job(job["id"]))
+        snapshot = inspect_job_topology(include_disabled=True)
+        contract = next(item for item in snapshot["trust_contracts"] if item["job_id"] == job["id"])
+
+        assert growth_signals["status"] == "populated"
+        assert growth_signals["fields"]["evidence_sources"].startswith("Slack #sales thread")
+        assert growth_signals["fields"]["linear_citation"].startswith("Linear issue comment HAD-135")
+        assert contract["growth_signals"]["status"] == "populated"
+        assert contract["growth_signals"]["fields"]["prioritization_effect"].startswith("selected the growth-adjacent")
+        assert snapshot["summary"]["growth_signals_checked"] == 1
+        assert snapshot["summary"]["growth_signals_issue_count"] == 0
+
+    def test_growth_signals_missing_linear_signal_citation_is_warning(self, tmp_cron_dir):
+        job = create_job(
+            prompt="Coordinate backlog and keep the selected issue moving.",
+            schedule="every 10m",
+            name="coord-global",
+            role="coordinate",
+            scope="global",
+        )
+        output = """Progress report.
+
+Growth Signals:
+- Evidence Sources: Slack #sales and journal notes.
+- Client Pipeline: a proposal is blocked.
+- Social Proof: proof is weak.
+- Prioritization Effect: moved a growth task up.
+- Linear Citation: Linear comment updated.
+- Next Growth Action: send follow-up.
+"""
+        self._write_output(job["id"], "2026-04-21_10-00-00.md", output)
+
+        growth_signals = inspect_growth_signals(get_job(job["id"]))
+        snapshot = inspect_job_topology(include_disabled=True)
+        issue = next(issue for issue in snapshot["issues"] if issue["code"] == "growth_signals_weak")
+        contract = next(item for item in snapshot["trust_contracts"] if item["job_id"] == job["id"])
+
+        assert growth_signals["status"] == "weak"
+        assert "linear_citation_missing_growth_signal" in growth_signals["issues"]
+        assert issue["severity"] == "warning"
+        assert contract["growth_signals"]["status"] == "weak"
+        assert snapshot["summary"]["growth_signals_issue_count"] == 1
 
     def test_aggregate_stewardship_missing_is_warning_after_report(self, tmp_cron_dir):
         job = create_job(

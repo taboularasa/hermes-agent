@@ -779,6 +779,13 @@ class TestBuildJobPromptSilentHint:
         assert "Durable Store=<the durable artifact" in result
         assert "Circulation=<the cheap coordination outputs" in result
         assert "Closure Rule=<why circulation-only output cannot count as closure>" in result
+        assert "Growth Signals" in result
+        assert "Evidence Sources=<the exact Slack threads/channels, Linear issues/comments, journal entries" in result
+        assert "Client Pipeline=<the live proposal, demo, follow-up, contract, or pipeline-health signal" in result
+        assert "Social Proof=<the testimonial, case study, reference, proof asset, or credibility gap/opportunity" in result
+        assert "Prioritization Effect=<how those signals changed selection, ordering, deferral, or preemption" in result
+        assert "Linear Citation=<the exact Linear issue description/comment/update surface" in result
+        assert "Next Growth Action=<the concrete growth move selected next" in result
         assert "Attention Budget" in result
         assert "Attention Cost=<how much operator attention this run consumed or asked for>" in result
         assert "Decision Value=<what decision, judgment update, or durable state change this attention bought>" in result

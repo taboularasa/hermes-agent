@@ -62,6 +62,45 @@ Every trust contract now carries three operator checks before a recurring automa
 
 These checks are phrased for recurring loops, delegated execution, and self-improvement review surfaces.
 
+## Priority scoring lanes
+
+Recurring agenda review and self-improvement selection must score candidate work from evidence using stable lanes before choosing a next item.
+
+### Lane definitions
+
+- `Maintenance`: reliability repair, broken verification, blocked operator throughput, core infrastructure recovery, and contract-preserving cleanup
+- `Growth`: work that improves contract-winning throughput, client pipeline movement, demos, proposals, conversion, or social proof
+- `Capability`: new Hermes leverage or automation that only survives if it compounds maintenance or growth instead of serving internal neatness alone
+
+### Weighted inputs
+
+Use a `0-5` scale for each input and compute:
+
+`Weighted Score = 0.30*Epoch Impact + 0.25*Reliability Impact + 0.15*Reuse + 0.15*Urgency + 0.10*Confidence - 0.10*Risk - 0.05*Effort`
+
+- `Epoch Impact`: how directly the work serves the current epoch objective, especially contract-winning throughput
+- `Reliability Impact`: how strongly the work reduces breakage, restores trust, or prevents operator stalls
+- `Reuse`: how much durable leverage or repeat benefit the work creates
+- `Urgency`: how time-sensitive the opportunity, blocker, or degradation is
+- `Confidence`: how strong the evidence and execution confidence are
+- `Risk`: downside, regression, distraction, or blast radius
+- `Effort`: expected implementation and verification cost
+
+### Gating behavior
+
+- Maintenance preempts the other lanes when core infrastructure is degraded, verification is broken, or reliability impact is high enough that growth work would ride on a failing base.
+- Growth competes only after maintenance gates are clear. Growth evidence should be grounded in concrete pipeline or social-proof signals, not generic business language.
+- Capability work should usually be held. It survives only when it clearly compounds maintenance or growth and still wins on the same weighted evidence.
+
+### Required explanation
+
+When one issue outranks another, the selection artifact should say:
+
+- which lane the winning issue belongs to
+- whether the candidate shipped, held, or was preempted by gating
+- the weighted score and input breakdown
+- why it outranked the next-best alternative, preferably naming the losing issue or lane
+
 ## Aggregate stewardship
 
 Loop-level governance can still hide a fragile portfolio. Recurring and delegated Hermes work therefore also needs an `Aggregate Stewardship` block that names the macro condition of the current job economy.
@@ -81,5 +120,6 @@ The contract is exposed in four places:
 
 1. `hadto_patches/cron_jobs.py` trust-contract snapshots now include `dignity_check`, `capability_check`, `viability_check`, `fast_loop_surfaces`, and `slow_loop_surfaces`
 2. `hadto_patches/cron_jobs.py` parses recent outputs for `First Proof Point`, `Geometry Shaping`, `Value Surfaces`, and `Aggregate Stewardship`, then rolls them into the topology snapshot
-3. `hadto_patches/cron_scheduler.py` prompts recurring jobs to report those field sets in saved outputs
-4. `hadto_patches/cron_cli.py` prints the aggregate stewardship portfolio summary alongside trust contracts in `hermes cron topology`
+3. `hadto_patches/cron_jobs.py` also parses `Priority Scoring` blocks so lane choice, gating, weighted inputs, and outrank reasons stay visible in topology
+4. `hadto_patches/cron_scheduler.py` prompts recurring jobs to report those field sets in saved outputs
+5. `hadto_patches/cron_cli.py` prints the aggregate stewardship portfolio summary alongside trust contracts in `hermes cron topology`

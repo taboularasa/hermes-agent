@@ -69,6 +69,14 @@ VALUE_SURFACE_FIELDS = [
     "circulation",
     "closure_rule",
 ]
+GROWTH_SIGNAL_FIELDS = [
+    "evidence_sources",
+    "client_pipeline",
+    "social_proof",
+    "prioritization_effect",
+    "linear_citation",
+    "next_growth_action",
+]
 ATTENTION_BUDGET_FIELDS = [
     "attention_cost",
     "decision_value",
@@ -82,9 +90,30 @@ AGGREGATE_STEWARDSHIP_FIELDS = [
     "portfolio_state",
     "shared_artifact",
 ]
+PRIORITY_SCORING_FIELDS = [
+    "lane",
+    "gating_decision",
+    "weighted_score",
+    "epoch_impact",
+    "reliability_impact",
+    "reuse",
+    "urgency",
+    "confidence",
+    "risk",
+    "effort",
+    "outranks",
+]
 DISCOVERY_ROLES = {"report", "study"}
 EXECUTION_ROLES = {"implement", "publish"}
 BRIDGE_ROLES = {"coordinate", "self-improve"}
+
+
+def should_check_growth_signals(job: Dict[str, Any]) -> bool:
+    """Return True when a recurring bridge loop should ground agenda review in growth evidence."""
+    normalized_job = _apply_skill_fields(job)
+    if not should_check_persistence_ratchet(normalized_job):
+        return False
+    return _discovery_execution_mode(normalized_job) == "bridge"
 
 
 def _normalize_skill_list(skill: Optional[str] = None, skills: Optional[Any] = None) -> List[str]:
@@ -281,6 +310,8 @@ def inspect_trust_contract(
     first_proof_point: Optional[Dict[str, Any]] = None,
     geometry_shaping: Optional[Dict[str, Any]] = None,
     value_surfaces: Optional[Dict[str, Any]] = None,
+    growth_signals: Optional[Dict[str, Any]] = None,
+    priority_scoring: Optional[Dict[str, Any]] = None,
     attention_budget: Optional[Dict[str, Any]] = None,
     aggregate_stewardship: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -354,6 +385,22 @@ def inspect_trust_contract(
             "message": (
                 "Recurring control loops must name the durable store of value, the cheap "
                 "circulation outputs, and why circulation-only output cannot count as closure."
+            ),
+        },
+        "growth_signals": growth_signals or {
+            "status": "required" if should_check_growth_signals(normalized_job) else "not_applicable",
+            "required_fields": list(GROWTH_SIGNAL_FIELDS),
+            "message": (
+                "Recurring bridge loops that review the agenda must cite concrete Slack/Linear/journal evidence for client-pipeline and social-proof signals, "
+                "say how those signals changed prioritization, and name the Linear comment or description that cited them."
+            ),
+        },
+        "priority_scoring": priority_scoring or {
+            "status": "required",
+            "required_fields": list(PRIORITY_SCORING_FIELDS),
+            "message": (
+                "Recurring control loops must score candidate work by lane, gating decision, weighted evidence inputs, "
+                "and an explicit outrank reason."
             ),
         },
         "attention_budget": attention_budget or {
@@ -581,6 +628,34 @@ _VALUE_SURFACE_INLINE_KEYS = {
     "closure": "closure_rule",
 }
 
+_GROWTH_SIGNAL_INLINE_KEYS = {
+    "evidence sources": "evidence_sources",
+    "evidence_sources": "evidence_sources",
+    "sources": "evidence_sources",
+    "business evidence": "evidence_sources",
+    "client pipeline": "client_pipeline",
+    "client_pipeline": "client_pipeline",
+    "pipeline": "client_pipeline",
+    "pipeline health": "client_pipeline",
+    "proposal demo follow-up": "client_pipeline",
+    "social proof": "social_proof",
+    "social_proof": "social_proof",
+    "proof": "social_proof",
+    "proof asset": "social_proof",
+    "prioritization effect": "prioritization_effect",
+    "prioritization_effect": "prioritization_effect",
+    "priority effect": "prioritization_effect",
+    "priority": "prioritization_effect",
+    "linear citation": "linear_citation",
+    "linear_citation": "linear_citation",
+    "citation": "linear_citation",
+    "writeback": "linear_citation",
+    "next growth action": "next_growth_action",
+    "next_growth_action": "next_growth_action",
+    "next action": "next_growth_action",
+    "growth action": "next_growth_action",
+}
+
 _ATTENTION_BUDGET_INLINE_KEYS = {
     "attention cost": "attention_cost",
     "attention_cost": "attention_cost",
@@ -617,6 +692,31 @@ _AGGREGATE_STEWARDSHIP_INLINE_KEYS = {
     "shared artifact": "shared_artifact",
     "shared_artifact": "shared_artifact",
     "artifact": "shared_artifact",
+}
+
+_PRIORITY_SCORING_INLINE_KEYS = {
+    "lane": "lane",
+    "candidate lane": "lane",
+    "work lane": "lane",
+    "gating decision": "gating_decision",
+    "gating_decision": "gating_decision",
+    "gate": "gating_decision",
+    "weighted score": "weighted_score",
+    "weighted_score": "weighted_score",
+    "score": "weighted_score",
+    "epoch impact": "epoch_impact",
+    "epoch_impact": "epoch_impact",
+    "epoch": "epoch_impact",
+    "reliability impact": "reliability_impact",
+    "reliability_impact": "reliability_impact",
+    "reliability": "reliability_impact",
+    "reuse": "reuse",
+    "urgency": "urgency",
+    "confidence": "confidence",
+    "risk": "risk",
+    "effort": "effort",
+    "outranks": "outranks",
+    "ranking reason": "outranks",
 }
 
 
@@ -900,6 +1000,48 @@ def _parse_attention_budget_fields(text: str) -> Dict[str, str]:
     return fields
 
 
+def _parse_growth_signal_fields(text: str) -> Dict[str, str]:
+    fields: Dict[str, str] = {}
+
+    def add(label: str, value: str) -> None:
+        key = _GROWTH_SIGNAL_INLINE_KEYS.get(label.lower().replace("_", " "))
+        if not key:
+            key = _GROWTH_SIGNAL_INLINE_KEYS.get(label.lower())
+        if not key:
+            return
+        usable = _usable_ratchet_value(value)
+        if usable:
+            fields[key] = usable
+
+    line_re = re.compile(
+        r"^\s*(?:[-*]\s*)?"
+        r"(evidence sources|evidence_sources|sources|business evidence|client pipeline|client_pipeline|pipeline(?: health)?|proposal demo follow-up|social proof|social_proof|proof(?: asset)?|prioritization effect|prioritization_effect|priority effect|priority|linear citation|linear_citation|citation|writeback|next growth action|next_growth_action|next action|growth action)"
+        r"\s*[:=-]\s*(.+?)\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    for match in line_re.finditer(text):
+        add(match.group(1), match.group(2))
+
+    growth_lines = [
+        line for line in text.splitlines()
+        if "growth signals" in line.lower()
+        or any(
+            key in line.lower()
+            for key in ("client pipeline", "social proof", "linear citation", "next growth action")
+        )
+    ]
+    inline_re = re.compile(
+        r"\b(evidence sources|evidence_sources|sources|business evidence|client pipeline|client_pipeline|pipeline(?: health)?|proposal demo follow-up|social proof|social_proof|proof(?: asset)?|prioritization effect|prioritization_effect|priority effect|priority|linear citation|linear_citation|citation|writeback|next growth action|next_growth_action|next action|growth action)"
+        r"\s*=\s*([^;\n]+)",
+        re.IGNORECASE,
+    )
+    for line in growth_lines:
+        for match in inline_re.finditer(line):
+            add(match.group(1), match.group(2))
+
+    return fields
+
+
 def _is_circulation_like(value: str) -> bool:
     lowered = value.lower()
     circulation_patterns = [
@@ -1013,6 +1155,50 @@ def _inspect_attention_budget_output(path: Path) -> Dict[str, Any]:
     }
 
 
+def _growth_signal_issues(fields: Dict[str, str]) -> List[str]:
+    issues: List[str] = []
+    evidence_sources = fields.get("evidence_sources", "").lower()
+    linear_citation = fields.get("linear_citation", "").lower()
+    prioritization = fields.get("prioritization_effect", "").lower()
+    growth_markers = (
+        r"\bproposal\b",
+        r"\bdemo\b",
+        r"\bfollow-up\b",
+        r"\bfollow up\b",
+        r"\bpipeline\b",
+        r"\btestimonial\b",
+        r"\bcase study\b",
+        r"\breference\b",
+        r"\bproof asset\b",
+        r"\bsocial proof\b",
+    )
+
+    if not any(marker in evidence_sources for marker in ("slack", "linear", "journal")):
+        issues.append("evidence_sources_not_grounded")
+    if linear_citation and "linear" not in linear_citation:
+        issues.append("linear_citation_missing_linear_surface")
+    if linear_citation and not any(re.search(pattern, linear_citation) for pattern in growth_markers):
+        issues.append("linear_citation_missing_growth_signal")
+    if prioritization and not any(
+        token in prioritization for token in ("select", "defer", "preempt", "order", "priority", "rank")
+    ):
+        issues.append("prioritization_effect_not_decision_shaping")
+    return issues
+
+
+def _inspect_growth_signals_output(path: Path) -> Dict[str, Any]:
+    text = _response_text(_read_bounded_output(path))
+    fields = _parse_growth_signal_fields(text)
+    missing = [field for field in GROWTH_SIGNAL_FIELDS if field not in fields]
+    return {
+        "file": path.name,
+        "has_section": "growth signals" in text.lower() or bool(fields),
+        "fields": fields,
+        "missing_fields": missing,
+        "issues": _growth_signal_issues(fields),
+    }
+
+
 def _parse_aggregate_stewardship_fields(text: str) -> Dict[str, str]:
     fields: Dict[str, str] = {}
 
@@ -1049,6 +1235,147 @@ def _parse_aggregate_stewardship_fields(text: str) -> Dict[str, str]:
             add(match.group(1), match.group(2))
 
     return fields
+
+
+def _parse_priority_scoring_fields(text: str) -> Dict[str, str]:
+    fields: Dict[str, str] = {}
+
+    def add(label: str, value: str) -> None:
+        key = _PRIORITY_SCORING_INLINE_KEYS.get(label.lower().replace("_", " "))
+        if not key:
+            key = _PRIORITY_SCORING_INLINE_KEYS.get(label.lower())
+        if not key:
+            return
+        usable = _usable_ratchet_value(value)
+        if usable:
+            fields[key] = usable
+
+    line_re = re.compile(
+        r"^\s*(?:[-*]\s*)?"
+        r"(lane|candidate lane|work lane|gating decision|gating_decision|gate|weighted score|weighted_score|score|epoch impact|epoch_impact|epoch|reliability impact|reliability_impact|reliability|reuse|urgency|confidence|risk|effort|outranks|ranking reason)"
+        r"\s*[:=-]\s*(.+?)\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    for match in line_re.finditer(text):
+        add(match.group(1), match.group(2))
+
+    scoring_lines = [
+        line for line in text.splitlines()
+        if "priority scoring" in line.lower() or "weighted score" in line.lower()
+    ]
+    inline_re = re.compile(
+        r"\b(lane|candidate lane|work lane|gating decision|gating_decision|gate|weighted score|weighted_score|score|epoch impact|epoch_impact|epoch|reliability impact|reliability_impact|reliability|reuse|urgency|confidence|risk|effort|outranks|ranking reason)"
+        r"\s*=\s*([^;\n]+)",
+        re.IGNORECASE,
+    )
+    for line in scoring_lines:
+        for match in inline_re.finditer(line):
+            add(match.group(1), match.group(2))
+
+    return fields
+
+
+def _priority_scoring_problem_signals(fields: Dict[str, str]) -> List[str]:
+    signals: List[str] = []
+    lane = fields.get("lane", "").lower()
+    gate = fields.get("gating_decision", "").lower()
+    outranks = fields.get("outranks", "").lower()
+
+    valid_lanes = {"maintenance", "growth", "capability"}
+    if lane and lane not in valid_lanes:
+        signals.append("unknown_lane")
+    if lane == "capability" and not re.search(r"\b(maintenance|growth|reliability|throughput|contract|verification|operator)\b", outranks):
+        signals.append("capability_not_compounding")
+    if lane in {"growth", "capability"} and re.search(r"\b(core degraded|degraded|broken|failing|incident|red)\b", gate):
+        signals.append("non_maintenance_during_degradation")
+    if not outranks or len(outranks.split()) < 4:
+        signals.append("outrank_reason_missing")
+    for key in ("weighted_score", "epoch_impact", "reliability_impact", "reuse", "urgency", "confidence", "risk", "effort"):
+        value = fields.get(key, "")
+        if value and not re.search(r"\d", value):
+            signals.append(f"{key}_non_numeric")
+    return sorted(set(signals))
+
+
+def _inspect_priority_scoring_output(path: Path) -> Dict[str, Any]:
+    text = _response_text(_read_bounded_output(path))
+    fields = _parse_priority_scoring_fields(text)
+    missing = [field for field in PRIORITY_SCORING_FIELDS if field not in fields]
+    return {
+        "file": path.name,
+        "has_section": "priority scoring" in text.lower() or bool(fields),
+        "fields": fields,
+        "missing_fields": missing,
+        "problem_signals": _priority_scoring_problem_signals(fields),
+    }
+
+
+def inspect_priority_scoring(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Inspect the latest recurring-loop output for evidence-backed candidate scoring."""
+    normalized_job = _apply_skill_fields(job)
+    result: Dict[str, Any] = {
+        "job_id": normalized_job.get("id"),
+        "name": normalized_job.get("name", normalized_job.get("id")),
+        "role": normalized_job.get("role"),
+        "scope": normalized_job.get("scope"),
+        "required_fields": list(PRIORITY_SCORING_FIELDS),
+        "status": "not_applicable",
+        "message": "Priority-scoring checks apply only to recurring classified control loops.",
+        "fields": {},
+    }
+    if not should_check_persistence_ratchet(normalized_job):
+        return result
+
+    files = _recent_output_files(str(normalized_job.get("id", "")), limit=1)
+    if not files:
+        result.update(
+            {
+                "status": "insufficient_history",
+                "message": "Need a saved output before checking candidate scoring fields.",
+            }
+        )
+        return result
+
+    latest = _inspect_priority_scoring_output(files[-1])
+    result["latest_file"] = latest["file"]
+    result["fields"] = latest["fields"]
+    result["missing_fields"] = latest["missing_fields"]
+    result["problem_signals"] = latest["problem_signals"]
+
+    if not latest["has_section"] or not latest["fields"]:
+        result.update(
+            {
+                "status": "missing",
+                "message": "Latest report lacks a Priority Scoring block for maintenance, growth, and capability candidates.",
+            }
+        )
+        return result
+
+    if latest["missing_fields"]:
+        result.update(
+            {
+                "status": "incomplete",
+                "message": "Latest Priority Scoring block is missing: " + ", ".join(latest["missing_fields"]),
+            }
+        )
+        return result
+
+    if latest["problem_signals"]:
+        result.update(
+            {
+                "status": "ungrounded",
+                "message": "Latest Priority Scoring block has ungrounded lane or ranking signals: " + ", ".join(latest["problem_signals"]),
+            }
+        )
+        return result
+
+    result.update(
+        {
+            "status": "populated",
+            "message": "Latest report scores a candidate by lane, weighted evidence inputs, gating decision, and outrank reason.",
+        }
+    )
+    return result
 
 
 def _aggregate_stewardship_stale_fields(fields: Dict[str, str]) -> List[str]:
@@ -1216,6 +1543,74 @@ def inspect_value_surfaces(job: Dict[str, Any]) -> Dict[str, Any]:
         {
             "status": "populated",
             "message": "Latest report distinguishes the durable store of value from circulation outputs and keeps closure tied to durable updates.",
+        }
+    )
+    return result
+
+
+def inspect_growth_signals(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Inspect the latest recurring bridge-loop output for growth evidence used in agenda review."""
+    normalized_job = _apply_skill_fields(job)
+    result: Dict[str, Any] = {
+        "job_id": normalized_job.get("id"),
+        "name": normalized_job.get("name", normalized_job.get("id")),
+        "role": normalized_job.get("role"),
+        "scope": normalized_job.get("scope"),
+        "required_fields": list(GROWTH_SIGNAL_FIELDS),
+        "status": "not_applicable",
+        "message": "Growth-signal checks apply only to recurring bridge loops that review the agenda.",
+        "fields": {},
+    }
+    if not should_check_growth_signals(normalized_job):
+        return result
+
+    files = _recent_output_files(str(normalized_job.get("id", "")), limit=1)
+    if not files:
+        result.update(
+            {
+                "status": "insufficient_history",
+                "message": "Need a saved output before checking agenda-review growth signals.",
+            }
+        )
+        return result
+
+    latest = _inspect_growth_signals_output(files[-1])
+    result["latest_file"] = latest["file"]
+    result["fields"] = latest["fields"]
+    result["missing_fields"] = latest["missing_fields"]
+    result["issues"] = latest["issues"]
+
+    if not latest["has_section"] or not latest["fields"]:
+        result.update(
+            {
+                "status": "missing",
+                "message": "Latest report lacks a Growth Signals block grounding agenda review in pipeline and social-proof evidence.",
+            }
+        )
+        return result
+
+    if latest["missing_fields"]:
+        result.update(
+            {
+                "status": "incomplete",
+                "message": "Latest Growth Signals block is missing: " + ", ".join(latest["missing_fields"]),
+            }
+        )
+        return result
+
+    if latest["issues"]:
+        result.update(
+            {
+                "status": "weak",
+                "message": "Latest Growth Signals block does not yet ground evidence, prioritization, and Linear writeback strongly enough: " + ", ".join(latest["issues"]),
+            }
+        )
+        return result
+
+    result.update(
+        {
+            "status": "populated",
+            "message": "Latest report grounds agenda review in concrete pipeline and social-proof evidence and names the Linear citation used for growth work.",
         }
     )
     return result
@@ -2038,6 +2433,8 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
     first_proof_points: List[Dict[str, Any]] = []
     geometry_shaping_checks: List[Dict[str, Any]] = []
     value_surface_checks: List[Dict[str, Any]] = []
+    growth_signal_checks: List[Dict[str, Any]] = []
+    priority_scoring_checks: List[Dict[str, Any]] = []
     attention_budget_checks: List[Dict[str, Any]] = []
     aggregate_stewardship_checks: List[Dict[str, Any]] = []
     trust_contracts: List[Dict[str, Any]] = []
@@ -2049,15 +2446,31 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
         proof_point = inspect_first_proof_point(job)
         geometry = inspect_geometry_shaping(job)
         value_surfaces = inspect_value_surfaces(job)
+        growth_signals = inspect_growth_signals(job)
+        priority_scoring = inspect_priority_scoring(job)
         attention_budget = inspect_attention_budget(job)
         aggregate_stewardship = inspect_aggregate_stewardship(job)
         persistence_ratchets.append(ratchet)
         first_proof_points.append(proof_point)
         geometry_shaping_checks.append(geometry)
         value_surface_checks.append(value_surfaces)
+        growth_signal_checks.append(growth_signals)
+        priority_scoring_checks.append(priority_scoring)
         attention_budget_checks.append(attention_budget)
         aggregate_stewardship_checks.append(aggregate_stewardship)
-        trust_contracts.append(inspect_trust_contract(job, ratchet, proof_point, geometry, value_surfaces, attention_budget, aggregate_stewardship))
+        trust_contracts.append(
+            inspect_trust_contract(
+                job,
+                ratchet,
+                proof_point,
+                geometry,
+                value_surfaces,
+                growth_signals,
+                priority_scoring,
+                attention_budget,
+                aggregate_stewardship,
+            )
+        )
         if ratchet["status"] not in {"insufficient_history", "healthy"}:
             issue_code = {
                 "drift": "persistence_ratchet_drift",
@@ -2137,6 +2550,44 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
                 }
             )
 
+        if growth_signals["status"] not in {"not_applicable", "insufficient_history", "populated"}:
+            issues.append(
+                {
+                    "severity": "warning",
+                    "code": f"growth_signals_{growth_signals['status']}",
+                    "job_id": job["id"],
+                    "job_name": job.get("name", job["id"]),
+                    "growth_signal_status": growth_signals["status"],
+                    "fields": growth_signals.get("fields", {}),
+                    "missing_fields": growth_signals.get("missing_fields", []),
+                    "issues": growth_signals.get("issues", []),
+                    "message": (
+                        f"Growth signals {growth_signals['status']} for recurring control loop "
+                        f"'{job.get('name', job['id'])}' ({job['id']}): {growth_signals['message']} "
+                        "Ground agenda review in pipeline and social-proof evidence and cite those signals in Linear when growth work is selected."
+                    ),
+                }
+            )
+
+        if priority_scoring["status"] not in {"insufficient_history", "populated"}:
+            issues.append(
+                {
+                    "severity": "warning",
+                    "code": f"priority_scoring_{priority_scoring['status']}",
+                    "job_id": job["id"],
+                    "job_name": job.get("name", job["id"]),
+                    "priority_scoring_status": priority_scoring["status"],
+                    "fields": priority_scoring.get("fields", {}),
+                    "missing_fields": priority_scoring.get("missing_fields", []),
+                    "problem_signals": priority_scoring.get("problem_signals", []),
+                    "message": (
+                        f"Priority scoring {priority_scoring['status']} for recurring control loop "
+                        f"'{job.get('name', job['id'])}' ({job['id']}): {priority_scoring['message']} "
+                        "Score candidate work from evidence and say why it outranks the alternatives."
+                    ),
+                }
+            )
+
         if attention_budget["status"] not in {"insufficient_history", "populated"}:
             issues.append(
                 {
@@ -2207,6 +2658,16 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
                 1 for value_surfaces in value_surface_checks
                 if value_surfaces["status"] not in {"insufficient_history", "populated"}
             ),
+            "growth_signals_checked": len(growth_signal_checks),
+            "growth_signals_issue_count": sum(
+                1 for growth_signals in growth_signal_checks
+                if growth_signals["status"] not in {"not_applicable", "insufficient_history", "populated"}
+            ),
+            "priority_scoring_checked": len(priority_scoring_checks),
+            "priority_scoring_issue_count": sum(
+                1 for priority_scoring in priority_scoring_checks
+                if priority_scoring["status"] not in {"insufficient_history", "populated"}
+            ),
             "attention_budget_checked": len(attention_budget_checks),
             "attention_budget_issue_count": sum(
                 1 for attention_budget in attention_budget_checks
@@ -2230,6 +2691,8 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
         "first_proof_points": first_proof_points,
         "geometry_shaping": geometry_shaping_checks,
         "value_surfaces": value_surface_checks,
+        "growth_signals": growth_signal_checks,
+        "priority_scoring": priority_scoring_checks,
         "attention_budget": attention_budget_checks,
         "aggregate_stewardship": aggregate_stewardship_checks,
         "aggregate_stewardship_summary": aggregate_stewardship_summary,
