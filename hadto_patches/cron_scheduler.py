@@ -31,6 +31,7 @@ from hermes_cli.config import load_config
 from typing import Optional
 
 from hermes_time import now as _hermes_now
+from hadto_patches.self_improvement_policy import build_self_improvement_writeback_contract
 
 logger = logging.getLogger("cron.scheduler")
 
@@ -92,8 +93,15 @@ def _build_role_prompt_prefix(job: dict) -> str:
         "(planning, verification, delegation, evidence handling, candidate selection, or similar), also create or "
         "update Hermes self-improvement work via self_improvement_pipeline or an equivalent backlog issue when those "
         "tools are available. For self-improvement reporting, carry forward the usable evidence, decision, and artifact "
-        "state that prevents rediscovering the same gap in the next run. If you decide no action is warranted yet, say "
-        "why in the report instead of silently continuing.]"
+        "state that prevents rediscovering the same gap in the next run. "
+        f"{build_self_improvement_writeback_contract()} "
+        "When you do create or update such work, include a compact 'Self-Improvement Guardrails' block with: "
+        "Lane=<maintenance|growth|capability or another explicit lane>; "
+        "Evidence Sources=<specific logs/files/issues/checks that justify the work>; "
+        "Verification Target=<the concrete check that proves the work helped>; "
+        "Lane WIP=<active Hermes-owned items in that lane and the cap>; "
+        "Budget Rule=<passed|blocked|not_applicable plus the reason>. "
+        "If you decide no action is warranted yet, say why in the report instead of silently continuing.]"
     )
 
 
