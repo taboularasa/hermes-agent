@@ -18,6 +18,14 @@ from typing import Any, Iterable
 BOOK_STUDY_CONTEXT = "context"
 BOOK_STUDY_NO_CONTEXT = "no_context"
 BOOK_STUDY_RESPONSE_SCHEMA = "hermes.denovo.book_study_response.v1"
+BOOK_STUDY_REQUEST_KINDS = frozenset(
+    {
+        "book-study",
+        "book_study",
+        "book-study-context",
+        "chapter-prior-context",
+    },
+)
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _STABLE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._/-]{2,160}$")
@@ -237,6 +245,67 @@ def fixture_book_study_response() -> BookStudyResponse:
         ),
         references=references,
     )
+
+
+def is_book_study_wakeup(notification: Any, thread_context: str = "") -> bool:
+    """Return whether a De Novo wake-up should use book-study handling."""
+    request_kind = str(getattr(notification, "request_kind", "") or "").strip().lower()
+    if request_kind in BOOK_STUDY_REQUEST_KINDS:
+        return True
+    context = thread_context.lower()
+    return (
+        "book-study" in context
+        or "book study" in context
+        or "chapter" in context
+        or "ontology context" in context
+    )
+
+
+def build_book_study_event_text(notification: Any, *, thread_context: str) -> str:
+    """Build the task-shaped event text Hermes receives for book-study turns."""
+    identity = notification.identity
+    cleaned_context = sanitize_book_study_thread_context(thread_context)
+    lines = [
+        "De Novo is asking Hermes for book-study context in Slack.",
+        "Answer in the referenced Slack thread only, using Hermes' own Slack credentials.",
+        "Write a concise book-club style reply grounded in Hermes memory and ontology context.",
+        "If no citable Hermes context matches the question, say that explicitly and do not fabricate.",
+        (
+            "For every contextual claim, make a source-linked reference available in this shape: "
+            "`reference_id`, `kind`, `memory_summary_sha256`, `source_artifact_iri`, "
+            "`source_stable_id`, `source_sha256`, and `citation_locator`."
+        ),
+        "Do not paste unredacted Hermes memory, chapter passages, study notes, transcripts, tokens, URLs, or private endpoint details.",
+        f"Slack channel: {identity.channel_id}",
+        f"Slack parent thread_ts: {identity.thread_ts}",
+        f"Slack message ts: {identity.message_ts}",
+        f"Slack metadata event: {identity.metadata_event}",
+        f"Redacted context hashes: {', '.join(identity.context_sha256)}",
+    ]
+    if cleaned_context.strip():
+        lines.extend(("", cleaned_context.strip()))
+    else:
+        lines.extend(("", "No Slack thread context was available; produce the no-context response if Hermes cannot cite a matching memory."))
+    return "\n".join(lines)
+
+
+def sanitize_book_study_thread_context(thread_context: str) -> str:
+    """Remove unsafe raw/private lines from Slack thread context."""
+    safe_lines: list[str] = []
+    for line in thread_context.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            safe_lines.append(line)
+            continue
+        lowered = stripped.lower()
+        if any(fragment in lowered for fragment in _FORBIDDEN_TEXT_FRAGMENTS):
+            safe_lines.append(
+                "[redacted unsafe book-study context line "
+                f"sha256={sha256_text(stripped)}]",
+            )
+            continue
+        safe_lines.append(line)
+    return "\n".join(safe_lines)
 
 
 def redaction_proof(*values: Any) -> dict[str, bool]:

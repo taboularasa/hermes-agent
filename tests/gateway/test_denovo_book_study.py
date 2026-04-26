@@ -12,6 +12,7 @@ from hadto_patches.denovo_book_study import (
     build_book_study_response,
     build_no_context_book_study_response,
     fixture_book_study_response,
+    sanitize_book_study_thread_context,
     redaction_proof,
     sha256_text,
 )
@@ -55,6 +56,24 @@ def test_no_context_response_is_explicit_and_claims_no_references():
     assert response.to_proof()["empty_context"] is True
     assert response.to_proof()["reference_count"] == 0
     assert "References: none" in response.to_slack_text()
+
+
+def test_sanitizes_unsafe_thread_context_lines_without_dropping_safe_question():
+    context = "\n".join(
+        [
+            "[thread parent] David: Book study question",
+            "De Novo: What did Hermes learn from this chapter?",
+            "De Novo: raw chapter text: private paragraph",
+            "De Novo: see https://example.test/private",
+        ],
+    )
+
+    cleaned = sanitize_book_study_thread_context(context)
+
+    assert "What did Hermes learn from this chapter?" in cleaned
+    assert "raw chapter text" not in cleaned
+    assert "https://example.test" not in cleaned
+    assert cleaned.count("[redacted unsafe book-study context line sha256=") == 2
 
 
 def test_response_hash_is_deterministic_and_bound_to_content():
