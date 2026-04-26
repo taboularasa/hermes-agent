@@ -480,6 +480,86 @@ class TestDeNovoSlackWakeupRoute:
         )
 
     @pytest.mark.asyncio
+    async def test_denovo_book_study_wakeup_dispatches_task_shaped_slack_event(self):
+        routes = {
+            "denovo": {
+                "secret": _INSECURE_NO_AUTH,
+                "handler": "denovo_slack_thread_wakeup",
+            },
+        }
+        adapter = _make_adapter(routes=routes)
+        slack_adapter = MagicMock()
+        slack_adapter.handle_message = AsyncMock()
+        slack_adapter.fetch_denovo_wakeup_thread_context = AsyncMock(
+            return_value=(
+                "[Thread context]\n"
+                "De Novo: What did Hermes learn from this chapter?\n"
+                "De Novo: raw chapter text: private paragraph"
+            ),
+        )
+        adapter.gateway_runner = MagicMock(
+            adapters={Platform.SLACK: slack_adapter},
+        )
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/denovo",
+                json=_denovo_slack_wakeup_payload(requestKind="book-study"),
+            )
+            data = await resp.json()
+
+        assert resp.status == 202
+        assert data["status"] == "accepted"
+        assert data["proof"]["request_kind"] == "book-study"
+        assert data["proof"]["thread_context_fetched"] is True
+        slack_adapter.handle_message.assert_awaited_once()
+        event = slack_adapter.handle_message.await_args.args[0]
+        assert event.source.platform == Platform.SLACK
+        assert event.source.thread_id == "1714060000.000001"
+        assert "De Novo is asking Hermes for book-study context in Slack." in event.text
+        assert "What did Hermes learn from this chapter?" in event.text
+        assert "raw chapter text: private paragraph" not in event.text
+        assert "[redacted unsafe book-study context line sha256=" in event.text
+        assert "webhook:" not in event.text
+
+    @pytest.mark.asyncio
+    async def test_denovo_book_study_wakeup_without_thread_context_has_no_context_path(self):
+        routes = {
+            "denovo": {
+                "secret": _INSECURE_NO_AUTH,
+                "handler": "denovo_slack_thread_wakeup",
+            },
+        }
+        adapter = _make_adapter(routes=routes)
+        slack_adapter = MagicMock()
+        slack_adapter.handle_message = AsyncMock()
+        slack_adapter.fetch_denovo_wakeup_thread_context = AsyncMock(return_value="")
+        adapter.gateway_runner = MagicMock(
+            adapters={Platform.SLACK: slack_adapter},
+        )
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/denovo",
+                json=_denovo_slack_wakeup_payload(
+                    requestKind="book-study",
+                    messageIdentity={
+                        "idempotencyKey": "denovo:C123ABC:1714060000.223344",
+                        "messageTs": "1714060000.223344",
+                    },
+                ),
+            )
+            data = await resp.json()
+
+        assert resp.status == 202
+        assert data["proof"]["thread_context_fetched"] is False
+        event = slack_adapter.handle_message.await_args.args[0]
+        assert "No Slack thread context was available" in event.text
+        assert "no-context response" in event.text
+
+    @pytest.mark.asyncio
     async def test_denovo_slack_wakeup_suppresses_duplicate_semantic_delivery(self):
         routes = {
             "denovo": {

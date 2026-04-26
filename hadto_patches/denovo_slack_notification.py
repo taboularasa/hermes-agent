@@ -186,6 +186,7 @@ def denovo_slack_wakeup_proof(
         "app_id_seen": bool(identity.app_id),
         "bot_id_seen": bool(identity.bot_id),
         "metadata_event": identity.metadata_event,
+        "request_kind": notification.request_kind,
         "idempotency_key_seen": bool(identity.idempotency_key),
         "context_hash_count": len(identity.context_sha256),
         "thread_context_fetched": thread_context_fetched,
