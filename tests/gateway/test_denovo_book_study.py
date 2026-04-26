@@ -9,6 +9,7 @@ from hadto_patches.denovo_book_study import (
     BookStudyMemoryReference,
     BookStudyResponse,
     BookStudyResponseError,
+    build_book_study_fixture_proof,
     build_book_study_response,
     build_no_context_book_study_response,
     fixture_book_study_response,
@@ -56,6 +57,37 @@ def test_no_context_response_is_explicit_and_claims_no_references():
     assert response.to_proof()["empty_context"] is True
     assert response.to_proof()["reference_count"] == 0
     assert "References: none" in response.to_slack_text()
+
+
+def test_fixture_proof_covers_context_and_no_context_without_raw_material():
+    proof = build_book_study_fixture_proof()
+
+    assert proof["schema"] == "hermes.denovo.book_study_fixture_proof.v1"
+    assert proof["issue"] == "HAD-547"
+    assert proof["status"] == "passed"
+    assert proof["slack_identity"]["channel_id"] == "C123BOOKSTUDY"
+    assert proof["slack_identity"]["thread_ts"] == "1760000123.000000"
+    assert proof["slack_identity"]["message_ts"] == "1760000123.000400"
+    assert proof["context_case"]["reference_count"] == 1
+    assert proof["context_case"]["citation_locator_count"] == 1
+    assert proof["no_context_case"]["reference_count"] == 0
+    assert proof["no_context_case"]["empty_context"] is True
+    assert proof["redaction"] == {
+        "contains_secrets": False,
+        "contains_public_url": False,
+        "contains_response_url": False,
+        "contains_raw_hermes_memory": False,
+        "contains_raw_chapter_text": False,
+        "contains_private_endpoint": False,
+        "contains_cookie": False,
+        "contains_html_script": False,
+    }
+
+    proof_text = repr(proof)
+    assert "Hermes connects this question" not in proof_text
+    assert "No citable Hermes book-study" not in proof_text
+    assert "raw chapter text" not in proof_text.lower()
+    assert "https://" not in proof_text
 
 
 def test_sanitizes_unsafe_thread_context_lines_without_dropping_safe_question():

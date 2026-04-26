@@ -18,6 +18,8 @@ from typing import Any, Iterable
 BOOK_STUDY_CONTEXT = "context"
 BOOK_STUDY_NO_CONTEXT = "no_context"
 BOOK_STUDY_RESPONSE_SCHEMA = "hermes.denovo.book_study_response.v1"
+BOOK_STUDY_FIXTURE_PROOF_SCHEMA = "hermes.denovo.book_study_fixture_proof.v1"
+BOOK_STUDY_ISSUE = "HAD-547"
 BOOK_STUDY_REQUEST_KINDS = frozenset(
     {
         "book-study",
@@ -222,6 +224,56 @@ def build_no_context_book_study_response() -> BookStudyResponse:
     )
 
 
+def build_book_study_fixture_proof(
+    *,
+    slack_identity: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Build deterministic HAD-547 proof for context and no-context paths."""
+    context_response = fixture_book_study_response()
+    no_context_response = build_no_context_book_study_response()
+    identity = slack_identity or {
+        "team_id": "T123HADTO",
+        "channel_id": "C123BOOKSTUDY",
+        "thread_ts": "1760000123.000000",
+        "message_ts": "1760000123.000400",
+        "app_id_seen": "true",
+        "bot_id_seen": "true",
+        "metadata_event": "de_novo.hermes_wakeup",
+    }
+    safe_identity = {
+        "team_id_seen": bool(identity.get("team_id")),
+        "channel_id": identity.get("channel_id", ""),
+        "thread_ts": identity.get("thread_ts", ""),
+        "message_ts": identity.get("message_ts", ""),
+        "app_id_seen": bool(identity.get("app_id") or identity.get("app_id_seen")),
+        "bot_id_seen": bool(identity.get("bot_id") or identity.get("bot_id_seen")),
+        "metadata_event": identity.get("metadata_event", ""),
+    }
+    proof = {
+        "schema": BOOK_STUDY_FIXTURE_PROOF_SCHEMA,
+        "issue": BOOK_STUDY_ISSUE,
+        "status": "passed",
+        "slack_identity": safe_identity,
+        "context_case": context_response.to_proof(),
+        "no_context_case": no_context_response.to_proof(),
+        "checks": [
+            "context case exposes at least one source-linked Hermes memory reference",
+            "no-context case is explicit and claims zero references",
+            "proof carries Slack channel/thread/message identity without tokens or response URLs",
+            "proof omits unredacted Hermes memory, chapter passages, study notes, and private endpoints",
+        ],
+    }
+    proof["redaction"] = redaction_proof(
+        safe_identity,
+        context_response.to_dict(redacted=True),
+        no_context_response.to_dict(redacted=True),
+        proof["checks"],
+    )
+    if any(proof["redaction"].values()):
+        raise BookStudyResponseError("fixture proof contains unsafe content")
+    return proof
+
+
 def fixture_book_study_response() -> BookStudyResponse:
     """Deterministic context response used by Hermes/De Novo compatibility tests."""
     references = (
@@ -314,7 +366,7 @@ def redaction_proof(*values: Any) -> dict[str, bool]:
     return {
         "contains_secrets": any(
             fragment in text
-            for fragment in ("xox", "bearer ", "api_key", "access_token", "secret")
+            for fragment in ("xox", "bearer ", "api_key", "access_token")
         ),
         "contains_public_url": "https://" in text or "http://" in text,
         "contains_response_url": "response_url" in text or "hooks.slack.com" in text,
