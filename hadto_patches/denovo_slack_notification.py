@@ -10,6 +10,10 @@ from dataclasses import dataclass
 import re
 from typing import Any, Mapping
 
+from gateway.config import Platform
+from gateway.platforms.base import MessageEvent, MessageType
+from gateway.session import SessionSource
+
 
 AVAILABILITY_PLANE = "restate-cloud-webhook-edge-only"
 INGRESS_CONVENTION = "phoneitin-web-restate-funnel"
@@ -96,6 +100,68 @@ class DeNovoSlackNotification:
     identity: DeNovoSlackIdentity
 
 
+def build_denovo_slack_message_event(
+    notification: DeNovoSlackNotification,
+    *,
+    thread_context: str = "",
+) -> MessageEvent:
+    """Build the Slack-sourced event Hermes should process for a wake-up.
+
+    The event is intentionally sourced from Slack, not from webhook, so normal
+    Hermes reply delivery uses the original Slack channel and parent thread.
+    """
+    identity = notification.identity
+    chat_type = "dm" if identity.channel_id.startswith("D") else "group"
+    source = SessionSource(
+        platform=Platform.SLACK,
+        chat_id=identity.channel_id,
+        chat_name=identity.channel_id,
+        chat_type=chat_type,
+        user_id=identity.bot_id,
+        user_name="De Novo",
+        thread_id=identity.thread_ts,
+        user_id_alt=identity.app_id,
+    )
+    text = _event_text(notification, thread_context=thread_context)
+    return MessageEvent(
+        text=text,
+        message_type=MessageType.TEXT,
+        source=source,
+        raw_message=redacted_notification_payload(notification),
+        message_id=identity.message_ts,
+        reply_to_message_id=identity.thread_ts if identity.thread_ts != identity.message_ts else None,
+    )
+
+
+def redacted_notification_payload(notification: DeNovoSlackNotification) -> dict[str, Any]:
+    """Return the non-secret notification fields safe to attach to raw_message."""
+    identity = notification.identity
+    return {
+        "type": "de_novo_slack_thread_wakeup",
+        "signal_id": notification.signal_id,
+        "source_request_id": notification.source_request_id,
+        "target_agent_id": notification.target_agent_id,
+        "availability_plane": notification.availability_plane,
+        "ingress_convention": notification.ingress_convention,
+        "execution_engine": notification.execution_engine,
+        "webhook_infra_only": notification.webhook_infra_only,
+        "uses_de_novo_execution_kernel": notification.uses_de_novo_execution_kernel,
+        "slack": {
+            "team_id": identity.team_id,
+            "channel_id": identity.channel_id,
+            "message_ts": identity.message_ts,
+            "thread_ts": identity.thread_ts,
+            "app_id": identity.app_id,
+            "bot_id": identity.bot_id,
+            "message_subtype": identity.message_subtype,
+            "metadata_event": identity.metadata_event,
+            "idempotency_key": identity.idempotency_key,
+            "context_sha256": list(identity.context_sha256),
+            "permalink_sha256": identity.permalink_sha256,
+        },
+    }
+
+
 def parse_denovo_slack_notification(
     payload: Mapping[str, Any],
 ) -> DeNovoSlackNotification:
@@ -174,6 +240,22 @@ def _parse_identity(payload: Mapping[str, Any]) -> DeNovoSlackIdentity:
         context_sha256=context_sha256,
         permalink_sha256=permalink_sha256,
     )
+
+
+def _event_text(notification: DeNovoSlackNotification, *, thread_context: str) -> str:
+    identity = notification.identity
+    lines = [
+        "De Novo posted a Hermes-directed Slack message and sent a wake-up notification.",
+        "Use Hermes' Slack credentials to answer in the referenced Slack thread.",
+        f"Slack channel: {identity.channel_id}",
+        f"Slack parent thread_ts: {identity.thread_ts}",
+        f"Slack message ts: {identity.message_ts}",
+        f"Slack metadata event: {identity.metadata_event}",
+        f"Redacted context hashes: {', '.join(identity.context_sha256)}",
+    ]
+    if thread_context.strip():
+        lines.extend(("", thread_context.strip()))
+    return "\n".join(lines)
 
 
 def _reject_private_denovo_fields(value: Any, path: str = "") -> None:

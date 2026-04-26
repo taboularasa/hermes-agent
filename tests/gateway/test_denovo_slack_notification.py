@@ -9,8 +9,12 @@ from hadto_patches.denovo_slack_notification import (
     SLACK_BOT_MESSAGE_SUBTYPE,
     SLACK_METADATA_EVENT,
     DeNovoSlackNotificationError,
+    build_denovo_slack_message_event,
     parse_denovo_slack_notification,
+    redacted_notification_payload,
 )
+from gateway.config import Platform
+from gateway.session import build_session_key
 
 
 HASH_A = "a" * 64
@@ -70,6 +74,51 @@ def test_missing_thread_ts_derives_from_message_ts():
     )
 
     assert notification.identity.thread_ts == "1714060000.123456"
+
+
+def test_builds_slack_sourced_message_event_for_thread_dispatch():
+    notification = parse_denovo_slack_notification(_payload())
+    event = build_denovo_slack_message_event(
+        notification,
+        thread_context="[Thread context]\nDe Novo: What did Hermes learn?",
+    )
+
+    assert event.source.platform == Platform.SLACK
+    assert event.source.chat_id == "C123ABC"
+    assert event.source.chat_type == "group"
+    assert event.source.thread_id == "1714060000.000001"
+    assert event.source.user_id == "B123ABC"
+    assert event.source.user_id_alt == "A123ABC"
+    assert event.message_id == "1714060000.123456"
+    assert event.reply_to_message_id == "1714060000.000001"
+    assert "webhook:" not in build_session_key(event.source)
+    assert "What did Hermes learn?" in event.text
+    assert "Redacted context hashes" in event.text
+
+
+def test_builds_dm_message_event_when_channel_is_im():
+    notification = parse_denovo_slack_notification(
+        _payload(messageIdentity={"channelId": "D123ABC"}),
+    )
+    event = build_denovo_slack_message_event(notification)
+
+    assert event.source.platform == Platform.SLACK
+    assert event.source.chat_type == "dm"
+    assert event.source.chat_id == "D123ABC"
+
+
+def test_redacted_raw_payload_keeps_identity_without_private_handles():
+    notification = parse_denovo_slack_notification(_payload())
+    raw = redacted_notification_payload(notification)
+    raw_text = repr(raw).lower()
+
+    assert raw["slack"]["app_id"] == "A123ABC"
+    assert raw["slack"]["bot_id"] == "B123ABC"
+    assert raw["slack"]["idempotency_key"] == "denovo:C123ABC:1714060000.123456"
+    assert "https://" not in raw_text
+    assert "localhost" not in raw_text
+    assert "127.0.0.1" not in raw_text
+    assert "credential" not in raw_text
 
 
 @pytest.mark.parametrize(
