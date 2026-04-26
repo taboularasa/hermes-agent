@@ -32,6 +32,13 @@ from gateway.platforms.webhook import (
     _INSECURE_NO_AUTH,
     check_webhook_requirements,
 )
+from hadto_patches.denovo_slack_notification import (
+    AVAILABILITY_PLANE,
+    EXECUTION_ENGINE,
+    INGRESS_CONVENTION,
+    SLACK_BOT_MESSAGE_SUBTYPE,
+    SLACK_METADATA_EVENT,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +105,36 @@ def _github_signature(body: bytes, secret: str) -> str:
 def _generic_signature(body: bytes, secret: str) -> str:
     """Compute X-Webhook-Signature (plain HMAC-SHA256 hex) for *body*."""
     return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+
+def _denovo_slack_wakeup_payload(**overrides):
+    payload = {
+        "signalId": "signal-had-546",
+        "sourceRequestId": "request-had-546",
+        "targetAgentId": "hermes",
+        "availabilityPlane": AVAILABILITY_PLANE,
+        "ingressConvention": INGRESS_CONVENTION,
+        "executionEngine": EXECUTION_ENGINE,
+        "webhookInfraOnly": True,
+        "usesDeNovoExecutionKernel": False,
+        "messageIdentity": {
+            "teamId": "T123ABC",
+            "channelId": "C123ABC",
+            "messageTs": "1714060000.123456",
+            "threadTs": "1714060000.000001",
+            "appId": "A123ABC",
+            "botId": "B123ABC",
+            "messageSubtype": SLACK_BOT_MESSAGE_SUBTYPE,
+            "metadataEvent": SLACK_METADATA_EVENT,
+            "idempotencyKey": "denovo:C123ABC:1714060000.123456",
+            "contextSha256": ["a" * 64],
+        },
+    }
+    identity = overrides.pop("messageIdentity", None)
+    if identity:
+        payload["messageIdentity"].update(identity)
+    payload.update(overrides)
+    return payload
 
 
 # ===================================================================
@@ -384,6 +421,149 @@ class TestHTTPHandling:
         mock_runner.cleanup.assert_awaited_once()
         assert adapter._runner is None
         assert not adapter.is_connected
+
+
+# ===================================================================
+# De Novo Slack wake-up route
+# ===================================================================
+
+
+class TestDeNovoSlackWakeupRoute:
+    @pytest.mark.asyncio
+    async def test_denovo_slack_wakeup_dispatches_to_slack_adapter(self):
+        routes = {
+            "denovo": {
+                "secret": _INSECURE_NO_AUTH,
+                "handler": "denovo_slack_thread_wakeup",
+            },
+        }
+        adapter = _make_adapter(routes=routes)
+        slack_adapter = MagicMock()
+        slack_adapter.handle_message = AsyncMock()
+        adapter.gateway_runner = MagicMock(
+            adapters={Platform.SLACK: slack_adapter},
+        )
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/denovo",
+                json=_denovo_slack_wakeup_payload(),
+                headers={"X-Request-ID": "req-1"},
+            )
+            data = await resp.json()
+
+        assert resp.status == 202
+        assert data["status"] == "accepted"
+        assert data["idempotency_key"] == "denovo:C123ABC:1714060000.123456"
+        slack_adapter.handle_message.assert_awaited_once()
+        event = slack_adapter.handle_message.await_args.args[0]
+        assert event.source.platform == Platform.SLACK
+        assert event.source.chat_id == "C123ABC"
+        assert event.source.thread_id == "1714060000.000001"
+        assert event.message_id == "1714060000.123456"
+        assert event.raw_message["type"] == "de_novo_slack_thread_wakeup"
+
+    @pytest.mark.asyncio
+    async def test_denovo_slack_wakeup_suppresses_duplicate_semantic_delivery(self):
+        routes = {
+            "denovo": {
+                "secret": _INSECURE_NO_AUTH,
+                "handler": "denovo_slack_thread_wakeup",
+            },
+        }
+        adapter = _make_adapter(routes=routes)
+        slack_adapter = MagicMock()
+        slack_adapter.handle_message = AsyncMock()
+        adapter.gateway_runner = MagicMock(
+            adapters={Platform.SLACK: slack_adapter},
+        )
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            first = await cli.post(
+                "/webhooks/denovo",
+                json=_denovo_slack_wakeup_payload(),
+                headers={"X-Request-ID": "req-1"},
+            )
+            second = await cli.post(
+                "/webhooks/denovo",
+                json=_denovo_slack_wakeup_payload(),
+                headers={"X-Request-ID": "req-2"},
+            )
+            data = await second.json()
+
+        assert first.status == 202
+        assert second.status == 200
+        assert data["status"] == "duplicate"
+        assert data["channel_id"] == "C123ABC"
+        assert slack_adapter.handle_message.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_denovo_slack_wakeup_missing_slack_adapter_returns_retryable_error(self):
+        routes = {
+            "denovo": {
+                "secret": _INSECURE_NO_AUTH,
+                "handler": "denovo_slack_thread_wakeup",
+            },
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter.gateway_runner = MagicMock(adapters={})
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/denovo",
+                json=_denovo_slack_wakeup_payload(),
+            )
+            data = await resp.json()
+
+        assert resp.status == 503
+        assert data["error"] == "slack_adapter_unavailable"
+
+    @pytest.mark.asyncio
+    async def test_denovo_slack_wakeup_rejects_invalid_payload(self):
+        routes = {
+            "denovo": {
+                "secret": _INSECURE_NO_AUTH,
+                "handler": "denovo_slack_thread_wakeup",
+            },
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter.gateway_runner = MagicMock(adapters={Platform.SLACK: MagicMock()})
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/denovo",
+                json=_denovo_slack_wakeup_payload(
+                    messageIdentity={"messageTs": "bad-ts"},
+                ),
+            )
+            data = await resp.json()
+
+        assert resp.status == 400
+        assert data["error"] == "invalid_de_novo_slack_wakeup"
+
+    @pytest.mark.asyncio
+    async def test_denovo_slack_wakeup_still_requires_route_hmac(self):
+        routes = {
+            "denovo": {
+                "secret": "real-secret",
+                "handler": "denovo_slack_thread_wakeup",
+            },
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter.gateway_runner = MagicMock(adapters={Platform.SLACK: MagicMock()})
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/denovo",
+                json=_denovo_slack_wakeup_payload(),
+            )
+
+        assert resp.status == 401
 
 
 # ===================================================================
