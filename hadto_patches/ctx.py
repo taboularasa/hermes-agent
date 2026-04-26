@@ -46,6 +46,8 @@ _CTX_DAEMON_RECOVERY_LOCK = threading.Lock()
 _DEFAULT_DAEMON_URL = "http://127.0.0.1:19876"
 _DEFAULT_DATA_DIR = "~/.ctx-data"
 _DEFAULT_CTX_BINDING_STALE_HOURS = 12
+_DEFAULT_CTX_CRON_BINDING_STALE_HOURS = 2
+_DEFAULT_CTX_INACTIVE_BINDING_RETENTION_HOURS = 24 * 7
 _ACTIVE_CODEX_HANDOFF_REASON = "ctx task handed off to delegated Codex run"
 _CTX_DAEMON_SERVICE_CANDIDATES = ("ctx-daemon.service", "ctx.service")
 _CTX_CLOSED_POOL_SIGNATURE = "attempted to acquire a connection on a closed pool"
@@ -169,6 +171,13 @@ def _ctx_binding_age_hours(record: Dict[str, Any], *, now: datetime) -> Optional
     if not ts:
         return None
     return (now - ts).total_seconds() / 3600
+
+
+def _ctx_binding_stale_hours(record: Dict[str, Any], *, stale_hours: int) -> int:
+    platform = str(record.get("platform") or "").strip().lower()
+    if platform == "cron":
+        return min(stale_hours, _DEFAULT_CTX_CRON_BINDING_STALE_HOURS)
+    return stale_hours
 
 
 def _ctx_bindings_path(bindings_path: Optional[Path] = None) -> Path:
@@ -433,7 +442,10 @@ def _ctx_binding_retirement_reason(
     if _binding_has_active_codex_handoff(record, active_codex_indexes=active_codex_indexes):
         return None
 
+    now = now or datetime.now(timezone.utc)
     session_id = str(record.get("session_id") or "").strip()
+    effective_stale_hours = _ctx_binding_stale_hours(record, stale_hours=stale_hours)
+    saw_live_session = False
     if session_db and session_id:
         try:
             session = session_db.get_session(session_id)
@@ -443,12 +455,68 @@ def _ctx_binding_retirement_reason(
         if isinstance(session, dict) and session.get("ended_at") is not None:
             end_reason = str(session.get("end_reason") or "session ended").strip()
             return f"ctx binding retired: session ended ({end_reason})"
+        if isinstance(session, dict):
+            saw_live_session = True
+        activity_hours = _session_activity_age_hours(session_db, session_id=session_id, now=now)
+        if activity_hours is not None and activity_hours >= effective_stale_hours:
+            return f"ctx binding retired: stale active binding (>{effective_stale_hours}h)"
+        if saw_live_session:
+            return None
 
-    now = now or datetime.now(timezone.utc)
     age_hours = _ctx_binding_age_hours(record, now=now)
-    if age_hours is not None and age_hours >= stale_hours:
-        return f"ctx binding retired: stale active binding (>{stale_hours}h)"
+    if age_hours is not None and age_hours >= effective_stale_hours:
+        return f"ctx binding retired: stale active binding (>{effective_stale_hours}h)"
     return None
+
+
+def _session_activity_age_hours(session_db, *, session_id: str, now: datetime) -> Optional[float]:
+    if session_db is None or not session_id:
+        return None
+    try:
+        with session_db._lock:
+            row = session_db._conn.execute(
+                """
+                SELECT COALESCE(
+                    (SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = s.id),
+                    s.started_at
+                ) AS last_active
+                FROM sessions s
+                WHERE s.id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+    except Exception:
+        logger.debug("Failed to read session activity while normalizing ctx binding %s", session_id, exc_info=True)
+        return None
+    if row is None:
+        return None
+    last_active = row["last_active"] if isinstance(row, dict) or hasattr(row, "keys") else row[0]
+    if last_active is None:
+        return None
+    try:
+        return max(0.0, (now.timestamp() - float(last_active)) / 3600)
+    except Exception:
+        return None
+
+
+def _prune_inactive_ctx_bindings(
+    sessions: Dict[str, Any],
+    *,
+    session_ids: Iterable[str],
+    now: datetime,
+    retention_hours: int = _DEFAULT_CTX_INACTIVE_BINDING_RETENTION_HOURS,
+) -> bool:
+    changed = False
+    for current_session_id in session_ids:
+        record = sessions.get(current_session_id)
+        if not isinstance(record, dict) or bool(record.get("active")):
+            continue
+        age_hours = _ctx_binding_age_hours(record, now=now)
+        if age_hours is None or age_hours < retention_hours:
+            continue
+        sessions.pop(current_session_id, None)
+        changed = True
+    return changed
 
 
 def _clear_binding_overrides(session_ids: Iterable[str]) -> None:
@@ -515,6 +583,9 @@ def normalize_ctx_bindings(
                     changed = True
                 retired[current_session_id] = reason
                 cleared_overrides.append(current_session_id)
+            prune_ids = session_ids if session_id else list(sessions.keys())
+            if _prune_inactive_ctx_bindings(sessions, session_ids=prune_ids, now=now):
+                changed = True
             if changed:
                 _save_bindings(data, bindings_path)
     finally:
