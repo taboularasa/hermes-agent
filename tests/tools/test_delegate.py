@@ -23,6 +23,9 @@ from tools.delegate_tool import (
     DELEGATE_TASK_SCHEMA,
     _get_max_concurrent_children,
     MAX_DEPTH,
+    _build_assistant_summary_comment,
+    _build_verified_status_comment,
+    _merge_status_comments,
     check_delegate_requirements,
     delegate_task,
     _build_child_agent,
@@ -448,6 +451,18 @@ class TestDelegateObservability(unittest.TestCase):
             self.assertEqual(entry["exit_reason"], "completed")
             self.assertEqual(entry["tokens"]["input"], 5000)
             self.assertEqual(entry["tokens"]["output"], 1200)
+            self.assertEqual(
+                entry["status_comments"]["assistant_summary"]["verification_backed"],
+                False,
+            )
+            self.assertEqual(
+                entry["status_comments"]["canonical"]["verification_backed"],
+                True,
+            )
+            self.assertEqual(
+                entry["status_comments"]["canonical"]["interim"],
+                False,
+            )
 
             # Tool trace
             self.assertEqual(len(entry["tool_trace"]), 1)
@@ -455,6 +470,7 @@ class TestDelegateObservability(unittest.TestCase):
             self.assertIn("args_bytes", entry["tool_trace"][0])
             self.assertIn("result_bytes", entry["tool_trace"][0])
             self.assertEqual(entry["tool_trace"][0]["status"], "ok")
+            self.assertEqual(entry["tool_trace"][0]["preview"], "test")
 
     def test_tool_trace_detects_error(self):
         """Tool results containing 'error' should be marked as error status."""
@@ -573,6 +589,23 @@ class TestDelegateObservability(unittest.TestCase):
 
             result = json.loads(delegate_task(goal="Test max iter", parent_agent=parent))
             self.assertEqual(result["results"][0]["exit_reason"], "max_iterations")
+
+    def test_unverified_assistant_summary_cannot_replace_verified_status(self):
+        verified = _build_verified_status_comment(
+            {
+                "status": "completed",
+                "exit_reason": "completed",
+                "api_calls": 2,
+                "tool_trace": [{"tool": "terminal", "status": "ok", "preview": "pytest tests/tools/test_delegate.py -q"}],
+            }
+        )
+        assistant = _build_assistant_summary_comment("Docs only. Tests not run.")
+
+        canonical = _merge_status_comments(verified, assistant)
+
+        self.assertEqual(canonical, verified)
+        self.assertTrue(canonical["verification_backed"])
+        self.assertFalse(canonical["interim"])
 
 
 class TestBlockedTools(unittest.TestCase):

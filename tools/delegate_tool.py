@@ -83,6 +83,98 @@ _HEARTBEAT_INTERVAL = 30  # seconds between parent activity heartbeats during de
 DEFAULT_TOOLSETS = ["terminal", "file", "web"]
 
 
+def _preview_tool_call(tool_name: str, arguments: str) -> Optional[str]:
+    """Return a short human-readable preview for a tool call."""
+    try:
+        parsed = json.loads(arguments) if arguments else {}
+    except Exception:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+
+    primary_keys = (
+        "cmd",
+        "command",
+        "goal",
+        "prompt",
+        "query",
+        "q",
+        "path",
+        "url",
+        "name",
+    )
+    for key in primary_keys:
+        value = parsed.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:120]
+    return None
+
+
+def _build_verified_status_comment(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a verification-backed status comment from runtime metadata."""
+    status = str(entry.get("status") or "unknown")
+    exit_reason = str(entry.get("exit_reason") or status)
+    api_calls = entry.get("api_calls", 0)
+    tool_trace = entry.get("tool_trace") or []
+
+    tool_parts = []
+    for item in tool_trace[:3]:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("tool") or "tool")
+        preview = str(item.get("preview") or "").strip()
+        tool_status = str(item.get("status") or "unknown")
+        label = f"{name}({tool_status})"
+        if preview:
+            label += f' "{preview[:40]}"'
+        tool_parts.append(label)
+    tools_summary = ", ".join(tool_parts) if tool_parts else "no tool evidence captured"
+    text = (
+        f"Delegated run {status}; exit_reason={exit_reason}; "
+        f"api_calls={api_calls}; evidence={tools_summary}."
+    )
+    return {
+        "text": text,
+        "verification_backed": True,
+        "interim": False,
+        "source": "delegate_task.runtime",
+    }
+
+
+def _build_assistant_summary_comment(summary: Optional[str]) -> Dict[str, Any]:
+    """Wrap the child assistant summary as an explicitly non-canonical note."""
+    text = (summary or "").strip()
+    return {
+        "text": text,
+        "verification_backed": False,
+        "interim": True,
+        "source": "delegate_task.assistant_summary",
+    }
+
+
+def _merge_status_comments(
+    current: Optional[Dict[str, Any]],
+    candidate: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Prefer verified non-interim comments as the canonical durable status."""
+    if not candidate:
+        return current
+    if not current:
+        return candidate
+
+    current_verified = bool(current.get("verification_backed"))
+    candidate_verified = bool(candidate.get("verification_backed"))
+    if current_verified != candidate_verified:
+        return candidate if candidate_verified else current
+
+    current_interim = bool(current.get("interim"))
+    candidate_interim = bool(candidate.get("interim"))
+    if current_interim != candidate_interim:
+        return current if not current_interim else candidate
+
+    return candidate
+
+
 def check_delegate_requirements() -> bool:
     """Delegation has no external requirements -- always available."""
     return True
@@ -511,6 +603,10 @@ def _run_single_child(
                         entry_t = {
                             "tool": fn.get("name", "unknown"),
                             "args_bytes": len(fn.get("arguments", "")),
+                            "preview": _preview_tool_call(
+                                fn.get("name", "unknown"),
+                                fn.get("arguments", ""),
+                            ),
                         }
                         tool_trace.append(entry_t)
                         tc_id = tc.get("id")
@@ -560,6 +656,15 @@ def _run_single_child(
                 "output": _output_tokens if isinstance(_output_tokens, (int, float)) else 0,
             },
             "tool_trace": tool_trace,
+        }
+        assistant_summary_comment = _build_assistant_summary_comment(summary)
+        verified_status_comment = _build_verified_status_comment(entry)
+        entry["status_comments"] = {
+            "assistant_summary": assistant_summary_comment,
+            "canonical": _merge_status_comments(
+                assistant_summary_comment,
+                verified_status_comment,
+            ),
         }
         if status == "failed":
             entry["error"] = result.get("error", "Subagent did not produce a response.")
