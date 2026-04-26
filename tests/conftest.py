@@ -30,6 +30,7 @@ def _isolate_hermes_home(tmp_path, monkeypatch):
     (fake_home / "memories").mkdir()
     (fake_home / "skills").mkdir()
     monkeypatch.setenv("HERMES_HOME", str(fake_home))
+    monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(fake_home / "gateway-locks"))
     # Production requires Doppler. Tests run without a real Doppler config and
     # inject env explicitly where needed.
     monkeypatch.setenv("HERMES_REQUIRE_DOPPLER", "0")
@@ -96,7 +97,7 @@ def _ensure_current_event_loop(request):
         return
 
     try:
-        loop = asyncio.get_event_loop_policy().get_event_loop()
+        loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
 

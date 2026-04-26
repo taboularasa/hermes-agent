@@ -376,6 +376,15 @@ class WebhookAdapter(BasePlatformAdapter):
                 {"status": "ignored", "event": event_type}
             )
 
+        delivery_id = self._delivery_id(request)
+        if self._is_denovo_slack_thread_wakeup_route(route_config):
+            return await self._handle_denovo_slack_thread_wakeup(
+                payload=payload,
+                route_name=route_name,
+                event_type=event_type,
+                delivery_id=delivery_id,
+            )
+
         # Format prompt from template
         prompt_template = route_config.get("prompt", "")
         prompt = self._render_prompt(
@@ -410,12 +419,6 @@ class WebhookAdapter(BasePlatformAdapter):
                         )
             except Exception as e:
                 logger.warning("[webhook] Skill loading failed: %s", e)
-
-        # Build a unique delivery ID
-        delivery_id = request.headers.get(
-            "X-GitHub-Delivery",
-            request.headers.get("X-Request-ID", str(int(time.time() * 1000))),
-        )
 
         # ── Idempotency ─────────────────────────────────────────
         # Skip duplicate deliveries (webhook retries).
@@ -493,6 +496,173 @@ class WebhookAdapter(BasePlatformAdapter):
             },
             status=202,
         )
+
+    def _delivery_id(self, request: "web.Request") -> str:
+        """Return the provider delivery/request ID used for webhook idempotency."""
+        return request.headers.get(
+            "X-GitHub-Delivery",
+            request.headers.get("X-Request-ID", str(int(time.time() * 1000))),
+        )
+
+    def _is_denovo_slack_thread_wakeup_route(self, route_config: dict) -> bool:
+        """Whether this route should dispatch a De Novo Slack wake-up."""
+        mode = (
+            route_config.get("handler")
+            or route_config.get("mode")
+            or route_config.get("type")
+            or ""
+        )
+        return str(mode).strip().lower() == "denovo_slack_thread_wakeup"
+
+    async def _handle_denovo_slack_thread_wakeup(
+        self,
+        *,
+        payload: dict,
+        route_name: str,
+        event_type: str,
+        delivery_id: str,
+    ) -> "web.Response":
+        """Dispatch a De Novo wake-up into Hermes' native Slack adapter."""
+        from hadto_patches.denovo_slack_notification import (
+            DeNovoSlackNotificationError,
+            build_denovo_slack_message_event,
+            denovo_slack_wakeup_proof,
+            parse_denovo_slack_notification,
+        )
+
+        try:
+            notification = parse_denovo_slack_notification(payload)
+        except DeNovoSlackNotificationError as exc:
+            logger.warning(
+                "[webhook] Rejected De Novo Slack wake-up on %s: %s",
+                route_name,
+                exc,
+            )
+            return web.json_response(
+                {"error": "invalid_de_novo_slack_wakeup", "detail": str(exc)},
+                status=400,
+            )
+
+        identity = notification.identity
+        now = time.time()
+        self._seen_deliveries = {
+            k: v
+            for k, v in self._seen_deliveries.items()
+            if now - v < self._idempotency_ttl
+        }
+        semantic_delivery_ids = (
+            f"denovo-slack-idempotency:{identity.duplicate_key}",
+            f"denovo-slack-message:{identity.channel_id}:{identity.message_ts}",
+        )
+        if any(key in self._seen_deliveries for key in semantic_delivery_ids):
+            logger.info(
+                "[webhook] Duplicate De Novo Slack wake-up route=%s channel=%s ts=%s",
+                route_name,
+                identity.channel_id,
+                identity.message_ts,
+            )
+            proof = denovo_slack_wakeup_proof(
+                notification,
+                status="duplicate",
+                delivery_id=delivery_id,
+                duplicate=True,
+            )
+            return web.json_response(
+                {
+                    "status": "duplicate",
+                    "route": route_name,
+                    "event": event_type,
+                    "delivery_id": delivery_id,
+                    "idempotency_key": identity.idempotency_key,
+                    "channel_id": identity.channel_id,
+                    "message_ts": identity.message_ts,
+                    "thread_ts": identity.thread_ts,
+                    "proof": proof,
+                },
+                status=200,
+            )
+
+        slack_adapter = None
+        if self.gateway_runner is not None:
+            slack_adapter = self.gateway_runner.adapters.get(Platform.SLACK)
+        if slack_adapter is None:
+            logger.warning(
+                "[webhook] De Novo Slack wake-up route=%s has no connected Slack adapter",
+                route_name,
+            )
+            return web.json_response(
+                {
+                    "error": "slack_adapter_unavailable",
+                    "route": route_name,
+                    "delivery_id": delivery_id,
+                },
+                status=503,
+            )
+
+        for key in semantic_delivery_ids:
+            self._seen_deliveries[key] = now
+        thread_context = await self._fetch_denovo_slack_thread_context(
+            slack_adapter,
+            notification,
+        )
+        event = build_denovo_slack_message_event(
+            notification,
+            thread_context=thread_context,
+        )
+        await slack_adapter.handle_message(event)
+        logger.info(
+            "[webhook] Accepted De Novo Slack wake-up route=%s channel=%s thread_ts=%s message_ts=%s",
+            route_name,
+            identity.channel_id,
+            identity.thread_ts,
+            identity.message_ts,
+        )
+        proof = denovo_slack_wakeup_proof(
+            notification,
+            status="accepted",
+            delivery_id=delivery_id,
+            thread_context_fetched=bool(thread_context),
+        )
+        return web.json_response(
+            {
+                "status": "accepted",
+                "route": route_name,
+                "event": event_type,
+                "delivery_id": delivery_id,
+                "idempotency_key": identity.idempotency_key,
+                "channel_id": identity.channel_id,
+                "message_ts": identity.message_ts,
+                "thread_ts": identity.thread_ts,
+                "proof": proof,
+            },
+            status=202,
+        )
+
+    async def _fetch_denovo_slack_thread_context(
+        self,
+        slack_adapter: Any,
+        notification: Any,
+    ) -> str:
+        """Best-effort Slack context fetch for De Novo wake-ups."""
+        fetcher = getattr(slack_adapter, "fetch_denovo_wakeup_thread_context", None)
+        if not callable(fetcher):
+            return ""
+        identity = notification.identity
+        try:
+            return await fetcher(
+                channel_id=identity.channel_id,
+                thread_ts=identity.thread_ts,
+                message_ts=identity.message_ts,
+                team_id=identity.team_id,
+                sender_bot_id=identity.bot_id,
+                sender_app_id=identity.app_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[webhook] De Novo Slack wake-up thread context fetch failed: %s",
+                exc,
+            )
+            return ""
 
     # ------------------------------------------------------------------
     # Signature validation
