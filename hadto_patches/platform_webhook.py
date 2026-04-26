@@ -526,6 +526,7 @@ class WebhookAdapter(BasePlatformAdapter):
         from hadto_patches.denovo_slack_notification import (
             DeNovoSlackNotificationError,
             build_denovo_slack_message_event,
+            denovo_slack_wakeup_proof,
             parse_denovo_slack_notification,
         )
 
@@ -549,16 +550,22 @@ class WebhookAdapter(BasePlatformAdapter):
             for k, v in self._seen_deliveries.items()
             if now - v < self._idempotency_ttl
         }
-        semantic_delivery_id = (
-            f"denovo-slack:{identity.duplicate_key}:"
-            f"{identity.channel_id}:{identity.message_ts}"
+        semantic_delivery_ids = (
+            f"denovo-slack-idempotency:{identity.duplicate_key}",
+            f"denovo-slack-message:{identity.channel_id}:{identity.message_ts}",
         )
-        if semantic_delivery_id in self._seen_deliveries:
+        if any(key in self._seen_deliveries for key in semantic_delivery_ids):
             logger.info(
                 "[webhook] Duplicate De Novo Slack wake-up route=%s channel=%s ts=%s",
                 route_name,
                 identity.channel_id,
                 identity.message_ts,
+            )
+            proof = denovo_slack_wakeup_proof(
+                notification,
+                status="duplicate",
+                delivery_id=delivery_id,
+                duplicate=True,
             )
             return web.json_response(
                 {
@@ -570,6 +577,7 @@ class WebhookAdapter(BasePlatformAdapter):
                     "channel_id": identity.channel_id,
                     "message_ts": identity.message_ts,
                     "thread_ts": identity.thread_ts,
+                    "proof": proof,
                 },
                 status=200,
             )
@@ -591,7 +599,8 @@ class WebhookAdapter(BasePlatformAdapter):
                 status=503,
             )
 
-        self._seen_deliveries[semantic_delivery_id] = now
+        for key in semantic_delivery_ids:
+            self._seen_deliveries[key] = now
         thread_context = await self._fetch_denovo_slack_thread_context(
             slack_adapter,
             notification,
@@ -608,6 +617,12 @@ class WebhookAdapter(BasePlatformAdapter):
             identity.thread_ts,
             identity.message_ts,
         )
+        proof = denovo_slack_wakeup_proof(
+            notification,
+            status="accepted",
+            delivery_id=delivery_id,
+            thread_context_fetched=bool(thread_context),
+        )
         return web.json_response(
             {
                 "status": "accepted",
@@ -618,6 +633,7 @@ class WebhookAdapter(BasePlatformAdapter):
                 "channel_id": identity.channel_id,
                 "message_ts": identity.message_ts,
                 "thread_ts": identity.thread_ts,
+                "proof": proof,
             },
             status=202,
         )

@@ -459,6 +459,9 @@ class TestDeNovoSlackWakeupRoute:
         assert resp.status == 202
         assert data["status"] == "accepted"
         assert data["idempotency_key"] == "denovo:C123ABC:1714060000.123456"
+        assert data["proof"]["status"] == "accepted"
+        assert data["proof"]["thread_context_fetched"] is True
+        assert data["proof"]["raw_context_logged"] is False
         slack_adapter.handle_message.assert_awaited_once()
         event = slack_adapter.handle_message.await_args.args[0]
         assert event.source.platform == Platform.SLACK
@@ -510,6 +513,43 @@ class TestDeNovoSlackWakeupRoute:
         assert second.status == 200
         assert data["status"] == "duplicate"
         assert data["channel_id"] == "C123ABC"
+        assert data["proof"]["duplicate"] is True
+        assert slack_adapter.handle_message.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_denovo_slack_wakeup_suppresses_duplicate_channel_message_ts(self):
+        routes = {
+            "denovo": {
+                "secret": _INSECURE_NO_AUTH,
+                "handler": "denovo_slack_thread_wakeup",
+            },
+        }
+        adapter = _make_adapter(routes=routes)
+        slack_adapter = MagicMock()
+        slack_adapter.handle_message = AsyncMock()
+        slack_adapter.fetch_denovo_wakeup_thread_context = AsyncMock(return_value="")
+        adapter.gateway_runner = MagicMock(
+            adapters={Platform.SLACK: slack_adapter},
+        )
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            first = await cli.post(
+                "/webhooks/denovo",
+                json=_denovo_slack_wakeup_payload(),
+            )
+            second = await cli.post(
+                "/webhooks/denovo",
+                json=_denovo_slack_wakeup_payload(
+                    messageIdentity={"idempotencyKey": "denovo:different-key"},
+                ),
+            )
+            data = await second.json()
+
+        assert first.status == 202
+        assert second.status == 200
+        assert data["status"] == "duplicate"
+        assert data["message_ts"] == "1714060000.123456"
         assert slack_adapter.handle_message.await_count == 1
 
     @pytest.mark.asyncio
@@ -545,6 +585,8 @@ class TestDeNovoSlackWakeupRoute:
 
         assert resp.status == 202
         assert data["status"] == "accepted"
+        assert data["proof"]["thread_context_fetched"] is False
+        assert "slack rate limit" not in repr(data).lower()
         slack_adapter.handle_message.assert_awaited_once()
         event = slack_adapter.handle_message.await_args.args[0]
         assert "slack rate limit" not in event.text

@@ -162,6 +162,39 @@ def redacted_notification_payload(notification: DeNovoSlackNotification) -> dict
     }
 
 
+def denovo_slack_wakeup_proof(
+    notification: DeNovoSlackNotification,
+    *,
+    status: str,
+    delivery_id: str = "",
+    duplicate: bool = False,
+    thread_context_fetched: bool = False,
+) -> dict[str, Any]:
+    """Build a redacted proof record for webhook responses and logs."""
+    identity = notification.identity
+    return {
+        "status": status,
+        "delivery_id_seen": bool(delivery_id),
+        "duplicate": duplicate,
+        "slack_identity_seen": True,
+        "channel_id": identity.channel_id,
+        "thread_ts": identity.thread_ts,
+        "message_ts": identity.message_ts,
+        "team_id_seen": bool(identity.team_id),
+        "app_id_seen": bool(identity.app_id),
+        "bot_id_seen": bool(identity.bot_id),
+        "metadata_event": identity.metadata_event,
+        "idempotency_key_seen": bool(identity.idempotency_key),
+        "context_hash_count": len(identity.context_sha256),
+        "thread_context_fetched": thread_context_fetched,
+        "webhook_infra_only": notification.webhook_infra_only,
+        "uses_de_novo_execution_kernel": notification.uses_de_novo_execution_kernel,
+        "raw_context_logged": False,
+        "secret_logged": False,
+        "de_novo_private_endpoint_seen": False,
+    }
+
+
 def parse_denovo_slack_notification(
     payload: Mapping[str, Any],
 ) -> DeNovoSlackNotification:

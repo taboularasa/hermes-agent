@@ -10,6 +10,7 @@ from hadto_patches.denovo_slack_notification import (
     SLACK_METADATA_EVENT,
     DeNovoSlackNotificationError,
     build_denovo_slack_message_event,
+    denovo_slack_wakeup_proof,
     parse_denovo_slack_notification,
     redacted_notification_payload,
 )
@@ -119,6 +120,28 @@ def test_redacted_raw_payload_keeps_identity_without_private_handles():
     assert "localhost" not in raw_text
     assert "127.0.0.1" not in raw_text
     assert "credential" not in raw_text
+
+
+def test_redacted_proof_records_identity_without_raw_context_or_secrets():
+    notification = parse_denovo_slack_notification(_payload())
+    proof = denovo_slack_wakeup_proof(
+        notification,
+        status="accepted",
+        delivery_id="delivery-1",
+        thread_context_fetched=True,
+    )
+    proof_text = repr(proof).lower()
+
+    assert proof["status"] == "accepted"
+    assert proof["slack_identity_seen"] is True
+    assert proof["context_hash_count"] == 2
+    assert proof["thread_context_fetched"] is True
+    assert proof["raw_context_logged"] is False
+    assert proof["secret_logged"] is False
+    assert proof["de_novo_private_endpoint_seen"] is False
+    assert "https://" not in proof_text
+    assert "localhost" not in proof_text
+    assert "bearer " not in proof_text
 
 
 @pytest.mark.parametrize(
