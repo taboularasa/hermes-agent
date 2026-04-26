@@ -11,8 +11,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
-import re
 from typing import Any, Iterable
+
+from hadto_patches.denovo_source_reference import (
+    INFORMAL_CONTEXT,
+    NEEDS_SOURCE_RETRIEVAL,
+    ONTOLOGY_COMMIT_READY,
+    SourceLinkedHermesReference,
+    SourceReferenceError,
+    build_reference_export,
+)
 
 
 BOOK_STUDY_CONTEXT = "context"
@@ -28,11 +36,6 @@ BOOK_STUDY_REQUEST_KINDS = frozenset(
         "chapter-prior-context",
     },
 )
-
-_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_STABLE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._/-]{2,160}$")
-_KIND_RE = re.compile(r"^[a-z][a-z0-9._/-]{2,80}$")
-_LOCATOR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._/# -]{1,160}$")
 
 _FORBIDDEN_TEXT_FRAGMENTS = (
     "raw hermes memory",
@@ -84,41 +87,34 @@ class BookStudyMemoryReference:
     source_sha256: str
     citation_locator: str
 
+    @property
+    def ontology_readiness(self) -> str:
+        return self.to_source_reference().ontology_readiness
+
     def validate(self) -> None:
-        _match("reference_id", self.reference_id, _STABLE_ID_RE)
-        _match("kind", self.kind, _KIND_RE)
-        _match("memory_summary_sha256", self.memory_summary_sha256, _SHA256_RE)
-        _match("source_stable_id", self.source_stable_id, _STABLE_ID_RE)
-        _match("source_sha256", self.source_sha256, _SHA256_RE)
-        _match("citation_locator", self.citation_locator, _LOCATOR_RE)
-        _validate_safe_text("source_artifact_iri", self.source_artifact_iri)
-        if "://" in self.source_artifact_iri:
-            raise BookStudyResponseError("source_artifact_iri must not be a URL")
-        if not self.source_artifact_iri.startswith(("urn:", "minio:", "object:", "source:")):
-            raise BookStudyResponseError("source_artifact_iri must be an artifact IRI")
+        try:
+            self.to_source_reference().validate()
+        except SourceReferenceError as exc:
+            raise BookStudyResponseError(str(exc)) from exc
+
+    def to_source_reference(self) -> SourceLinkedHermesReference:
+        return SourceLinkedHermesReference(
+            reference_id=self.reference_id,
+            kind=self.kind,
+            memory_summary_sha256=self.memory_summary_sha256,
+            source_artifact_iri=self.source_artifact_iri,
+            source_stable_id=self.source_stable_id,
+            source_sha256=self.source_sha256,
+            citation_locator=self.citation_locator,
+        )
 
     def to_dict(self) -> dict[str, str]:
         self.validate()
-        return {
-            "id": self.reference_id,
-            "kind": self.kind,
-            "memorySummarySha256": self.memory_summary_sha256,
-            "sourceArtifactIri": self.source_artifact_iri,
-            "sourceStableId": self.source_stable_id,
-            "sourceSha256": self.source_sha256,
-            "citationLocator": self.citation_locator,
-        }
+        return self.to_source_reference().to_dict()
 
     def to_slack_line(self) -> str:
         self.validate()
-        return (
-            f"- `{self.reference_id}` ({self.kind}) "
-            f"summary_sha256={self.memory_summary_sha256} "
-            f"source={self.source_artifact_iri} "
-            f"stable_id={self.source_stable_id} "
-            f"source_sha256={self.source_sha256} "
-            f"locator={self.citation_locator}"
-        )
+        return self.to_source_reference().to_public_line()
 
 
 @dataclass(frozen=True)
@@ -165,13 +161,16 @@ class BookStudyResponse:
 
     def to_proof(self) -> dict[str, Any]:
         self.validate()
+        reference_export = _source_reference_export(self.response_sha256, self.references)
         return {
             "schema": BOOK_STUDY_RESPONSE_SCHEMA,
             "status": self.status,
             "response_sha256": self.response_sha256,
             "reference_count": len(self.references),
+            "readiness_counts": _readiness_counts(self.references),
             "citation_locator_count": sum(1 for ref in self.references if ref.citation_locator),
             "references": [ref.to_dict() for ref in self.references],
+            "source_reference_export": reference_export.to_proof() if reference_export else None,
             "raw_hermes_memory_stored": False,
             "raw_chapter_text_stored": False,
             "empty_context": self.status == BOOK_STUDY_NO_CONTEXT,
@@ -286,7 +285,7 @@ def fixture_book_study_response() -> BookStudyResponse:
             source_artifact_iri="urn:denovo:source:minio:had547-book-study",
             source_stable_id="minio:had547-book-study",
             source_sha256=sha256_text("had547 source-linked book study reference"),
-            citation_locator="chapter:1#paragraph:3",
+            citation_locator="paragraph:3",
         ),
     )
     return build_book_study_response(
@@ -409,9 +408,27 @@ def _response_hash(
     return sha256_text(json.dumps(payload, sort_keys=True, separators=(",", ":")))
 
 
-def _match(name: str, value: str, pattern: re.Pattern[str]) -> None:
-    if not isinstance(value, str) or not pattern.fullmatch(value.strip()):
-        raise BookStudyResponseError(f"{name} is malformed")
+def _source_reference_export(
+    response_sha256: str,
+    references: tuple[BookStudyMemoryReference, ...],
+):
+    if not references:
+        return None
+    return build_reference_export(
+        response_id=f"book-study-{response_sha256}",
+        references=(ref.to_source_reference() for ref in references),
+    )
+
+
+def _readiness_counts(references: tuple[BookStudyMemoryReference, ...]) -> dict[str, int]:
+    counts = {
+        ONTOLOGY_COMMIT_READY: 0,
+        NEEDS_SOURCE_RETRIEVAL: 0,
+        INFORMAL_CONTEXT: 0,
+    }
+    for reference in references:
+        counts[reference.ontology_readiness] += 1
+    return counts
 
 
 def _validate_safe_text(name: str, value: str) -> None:

@@ -17,6 +17,12 @@ from hadto_patches.denovo_book_study import (
     redaction_proof,
     sha256_text,
 )
+from hadto_patches.denovo_source_reference import (
+    INFORMAL_CONTEXT,
+    NEEDS_SOURCE_RETRIEVAL,
+    ONTOLOGY_COMMIT_READY,
+    SOURCE_REFERENCE_EXPORT_SCHEMA,
+)
 
 
 def test_context_response_renders_source_linked_slack_text_and_proof():
@@ -31,10 +37,22 @@ def test_context_response_renders_source_linked_slack_text_and_proof():
     assert "References for De Novo ingestion:" in slack_text
     assert "`hermes-memory-had547-book-study`" in slack_text
     assert "source=urn:denovo:source:minio:had547-book-study" in slack_text
-    assert "locator=chapter:1#paragraph:3" in slack_text
+    assert "readiness=ontology_commit_ready" in slack_text
+    assert "locator=paragraph:3" in slack_text
     assert proof["schema"] == BOOK_STUDY_RESPONSE_SCHEMA
     assert proof["reference_count"] == 1
+    assert proof["readiness_counts"] == {
+        ONTOLOGY_COMMIT_READY: 1,
+        NEEDS_SOURCE_RETRIEVAL: 0,
+        INFORMAL_CONTEXT: 0,
+    }
     assert proof["citation_locator_count"] == 1
+    assert proof["source_reference_export"]["schema"] == SOURCE_REFERENCE_EXPORT_SCHEMA
+    assert proof["source_reference_export"]["reference_count"] == 1
+    assert proof["source_reference_export"]["source_ready_reference_ids"] == [
+        "hermes-memory-had547-book-study",
+    ]
+    assert proof["references"][0]["ontologyReadiness"] == ONTOLOGY_COMMIT_READY
     assert proof["raw_hermes_memory_stored"] is False
     assert proof["raw_chapter_text_stored"] is False
     assert proof["redaction"] == {
@@ -54,8 +72,15 @@ def test_no_context_response_is_explicit_and_claims_no_references():
 
     assert response.status == BOOK_STUDY_NO_CONTEXT
     assert response.references == ()
-    assert response.to_proof()["empty_context"] is True
-    assert response.to_proof()["reference_count"] == 0
+    proof = response.to_proof()
+    assert proof["empty_context"] is True
+    assert proof["reference_count"] == 0
+    assert proof["readiness_counts"] == {
+        ONTOLOGY_COMMIT_READY: 0,
+        NEEDS_SOURCE_RETRIEVAL: 0,
+        INFORMAL_CONTEXT: 0,
+    }
+    assert proof["source_reference_export"] is None
     assert "References: none" in response.to_slack_text()
 
 
@@ -70,8 +95,10 @@ def test_fixture_proof_covers_context_and_no_context_without_raw_material():
     assert proof["slack_identity"]["message_ts"] == "1760000123.000400"
     assert proof["context_case"]["reference_count"] == 1
     assert proof["context_case"]["citation_locator_count"] == 1
+    assert proof["context_case"]["readiness_counts"][ONTOLOGY_COMMIT_READY] == 1
     assert proof["no_context_case"]["reference_count"] == 0
     assert proof["no_context_case"]["empty_context"] is True
+    assert proof["no_context_case"]["source_reference_export"] is None
     assert proof["redaction"] == {
         "contains_secrets": False,
         "contains_public_url": False,
@@ -130,6 +157,19 @@ def test_response_hash_is_deterministic_and_bound_to_content():
         tampered.validate()
 
 
+def test_book_study_reference_mirrors_generic_source_reference_contract():
+    reference = fixture_book_study_response().references[0]
+    source_reference = reference.to_source_reference()
+
+    assert reference.ontology_readiness == ONTOLOGY_COMMIT_READY
+    assert source_reference.reference_id == reference.reference_id
+    assert source_reference.source_artifact_iri == "urn:denovo:source:minio:had547-book-study"
+    assert source_reference.source_stable_id == "minio:had547-book-study"
+    assert source_reference.source_sha256 == sha256_text("had547 source-linked book study reference")
+    assert source_reference.citation_locator == "paragraph:3"
+    assert source_reference.to_dict()["ontologyReadiness"] == ONTOLOGY_COMMIT_READY
+
+
 def test_rejects_context_without_reference_and_no_context_with_reference():
     reference = fixture_book_study_response().references[0]
 
@@ -155,7 +195,7 @@ def test_rejects_context_without_reference_and_no_context_with_reference():
         (lambda ref: setattr(ref, "kind", "Bad Kind"), "kind"),
         (lambda ref: setattr(ref, "memory_summary_sha256", "abc"), "memory_summary_sha256"),
         (lambda ref: setattr(ref, "source_artifact_iri", "https://example.test/ref"), "source_artifact_iri"),
-        (lambda ref: setattr(ref, "source_artifact_iri", "plain-id"), "artifact IRI"),
+        (lambda ref: setattr(ref, "source_artifact_iri", "plain-id"), "source_artifact_iri"),
         (lambda ref: setattr(ref, "source_stable_id", "x"), "source_stable_id"),
         (lambda ref: setattr(ref, "source_sha256", "abc"), "source_sha256"),
         (lambda ref: setattr(ref, "citation_locator", "x"), "citation_locator"),
