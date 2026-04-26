@@ -97,6 +97,41 @@ def test_builds_slack_sourced_message_event_for_thread_dispatch():
     assert "Redacted context hashes" in event.text
 
 
+def test_builds_book_study_event_text_when_request_kind_is_book_study():
+    notification = parse_denovo_slack_notification(
+        _payload(requestKind="book-study"),
+    )
+    event = build_denovo_slack_message_event(
+        notification,
+        thread_context="\n".join(
+            [
+                "[Thread context]",
+                "De Novo: What did Hermes learn from this chapter?",
+                "De Novo: raw chapter text: private paragraph",
+            ],
+        ),
+    )
+
+    assert "De Novo is asking Hermes for book-study context in Slack." in event.text
+    assert "concise book-club style reply" in event.text
+    assert "`reference_id`, `kind`, `memory_summary_sha256`" in event.text
+    assert "no citable Hermes context" in event.text
+    assert "raw chapter text: private paragraph" not in event.text
+    assert "[redacted unsafe book-study context line sha256=" in event.text
+    assert event.raw_message["request_kind"] == "book-study"
+
+
+def test_builds_book_study_event_text_when_thread_context_mentions_chapter():
+    notification = parse_denovo_slack_notification(_payload())
+    event = build_denovo_slack_message_event(
+        notification,
+        thread_context="De Novo: What did Hermes learn from this chapter?",
+    )
+
+    assert "De Novo is asking Hermes for book-study context in Slack." in event.text
+    assert "What did Hermes learn from this chapter?" in event.text
+
+
 def test_builds_dm_message_event_when_channel_is_im():
     notification = parse_denovo_slack_notification(
         _payload(messageIdentity={"channelId": "D123ABC"}),

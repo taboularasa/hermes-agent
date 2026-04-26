@@ -92,6 +92,7 @@ class DeNovoSlackNotification:
     signal_id: str
     source_request_id: str
     target_agent_id: str
+    request_kind: str
     availability_plane: str
     ingress_convention: str
     execution_engine: str
@@ -141,6 +142,7 @@ def redacted_notification_payload(notification: DeNovoSlackNotification) -> dict
         "signal_id": notification.signal_id,
         "source_request_id": notification.source_request_id,
         "target_agent_id": notification.target_agent_id,
+        "request_kind": notification.request_kind,
         "availability_plane": notification.availability_plane,
         "ingress_convention": notification.ingress_convention,
         "execution_engine": notification.execution_engine,
@@ -184,6 +186,7 @@ def denovo_slack_wakeup_proof(
         "app_id_seen": bool(identity.app_id),
         "bot_id_seen": bool(identity.bot_id),
         "metadata_event": identity.metadata_event,
+        "request_kind": notification.request_kind,
         "idempotency_key_seen": bool(identity.idempotency_key),
         "context_hash_count": len(identity.context_sha256),
         "thread_context_fetched": thread_context_fetched,
@@ -212,6 +215,10 @@ def parse_denovo_slack_notification(
         signal_id=_optional_str(payload, "signalId"),
         source_request_id=_optional_str(payload, "sourceRequestId"),
         target_agent_id=_required_str(payload, "targetAgentId"),
+        request_kind=(
+            _optional_str(payload, "requestKind")
+            or _optional_str(payload, "contextKind")
+        ),
         availability_plane=_required_str(payload, "availabilityPlane"),
         ingress_convention=_required_str(payload, "ingressConvention"),
         execution_engine=_required_str(payload, "executionEngine"),
@@ -231,6 +238,8 @@ def parse_denovo_slack_notification(
         raise DeNovoSlackNotificationError("webhookInfraOnly must be true")
     if notification.uses_de_novo_execution_kernel:
         raise DeNovoSlackNotificationError("usesDeNovoExecutionKernel must be false")
+    if notification.request_kind:
+        _match_required("requestKind", notification.request_kind, _IDEMPOTENCY_RE)
     return notification
 
 
@@ -276,6 +285,17 @@ def _parse_identity(payload: Mapping[str, Any]) -> DeNovoSlackIdentity:
 
 
 def _event_text(notification: DeNovoSlackNotification, *, thread_context: str) -> str:
+    from hadto_patches.denovo_book_study import (
+        build_book_study_event_text,
+        is_book_study_wakeup,
+    )
+
+    if is_book_study_wakeup(notification, thread_context):
+        return build_book_study_event_text(
+            notification,
+            thread_context=thread_context,
+        )
+
     identity = notification.identity
     lines = [
         "De Novo posted a Hermes-directed Slack message and sent a wake-up notification.",
