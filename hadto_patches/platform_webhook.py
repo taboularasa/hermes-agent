@@ -592,7 +592,14 @@ class WebhookAdapter(BasePlatformAdapter):
             )
 
         self._seen_deliveries[semantic_delivery_id] = now
-        event = build_denovo_slack_message_event(notification)
+        thread_context = await self._fetch_denovo_slack_thread_context(
+            slack_adapter,
+            notification,
+        )
+        event = build_denovo_slack_message_event(
+            notification,
+            thread_context=thread_context,
+        )
         await slack_adapter.handle_message(event)
         logger.info(
             "[webhook] Accepted De Novo Slack wake-up route=%s channel=%s thread_ts=%s message_ts=%s",
@@ -614,6 +621,32 @@ class WebhookAdapter(BasePlatformAdapter):
             },
             status=202,
         )
+
+    async def _fetch_denovo_slack_thread_context(
+        self,
+        slack_adapter: Any,
+        notification: Any,
+    ) -> str:
+        """Best-effort Slack context fetch for De Novo wake-ups."""
+        fetcher = getattr(slack_adapter, "fetch_denovo_wakeup_thread_context", None)
+        if not callable(fetcher):
+            return ""
+        identity = notification.identity
+        try:
+            return await fetcher(
+                channel_id=identity.channel_id,
+                thread_ts=identity.thread_ts,
+                message_ts=identity.message_ts,
+                team_id=identity.team_id,
+                sender_bot_id=identity.bot_id,
+                sender_app_id=identity.app_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[webhook] De Novo Slack wake-up thread context fetch failed: %s",
+                exc,
+            )
+            return ""
 
     # ------------------------------------------------------------------
     # Signature validation

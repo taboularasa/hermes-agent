@@ -1197,6 +1197,80 @@ class TestThreadReplyHandling:
         adapter.handle_message.assert_not_called()
 
 
+class TestDeNovoWakeupThreadContext:
+    @pytest.mark.asyncio
+    async def test_fetches_de_novo_bot_message_with_human_context(self, adapter):
+        adapter._team_bot_user_ids = {"T_TEAM": "U_BOT"}
+        adapter._app.client.conversations_replies = AsyncMock(return_value={
+            "messages": [
+                {
+                    "ts": "1000.000001",
+                    "user": "U_HUMAN",
+                    "text": "<@U_BOT> Parent context",
+                },
+                {
+                    "ts": "1000.000002",
+                    "bot_id": "B_DENOVO",
+                    "app_id": "A_DENOVO",
+                    "subtype": "bot_message",
+                    "text": "What did Hermes learn from this chapter?",
+                },
+                {
+                    "ts": "1000.000003",
+                    "bot_id": "B_OTHER",
+                    "app_id": "A_OTHER",
+                    "subtype": "bot_message",
+                    "text": "Ignore another bot",
+                },
+                {
+                    "ts": "1000.000004",
+                    "user": "U_BOT",
+                    "text": "Ignore Hermes itself",
+                },
+            ],
+        })
+        adapter._app.client.users_info = AsyncMock(return_value={
+            "user": {"profile": {"display_name": "David"}}
+        })
+
+        context = await adapter.fetch_denovo_wakeup_thread_context(
+            channel_id="C123",
+            thread_ts="1000.000001",
+            message_ts="1000.000002",
+            team_id="T_TEAM",
+            sender_bot_id="B_DENOVO",
+            sender_app_id="A_DENOVO",
+        )
+
+        assert "[thread parent] David: Parent context" in context
+        assert "[de-novo message] De Novo: What did Hermes learn" in context
+        assert "Ignore another bot" not in context
+        assert "Ignore Hermes itself" not in context
+        adapter._app.client.conversations_replies.assert_awaited_once_with(
+            channel="C123",
+            ts="1000.000001",
+            limit=15,
+            inclusive=True,
+        )
+
+    @pytest.mark.asyncio
+    async def test_thread_context_fetch_failure_returns_empty_context(self, adapter):
+        adapter._app.client.conversations_replies = AsyncMock(
+            side_effect=Exception("rate_limited"),
+        )
+
+        context = await adapter.fetch_denovo_wakeup_thread_context(
+            channel_id="C123",
+            thread_ts="1000.000001",
+            message_ts="1000.000002",
+            team_id="T_TEAM",
+            sender_bot_id="B_DENOVO",
+            sender_app_id="A_DENOVO",
+        )
+
+        assert context == ""
+
+
 # ---------------------------------------------------------------------------
 # TestAssistantThreadLifecycle
 # ---------------------------------------------------------------------------

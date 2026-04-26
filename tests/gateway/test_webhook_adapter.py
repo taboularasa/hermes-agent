@@ -440,6 +440,9 @@ class TestDeNovoSlackWakeupRoute:
         adapter = _make_adapter(routes=routes)
         slack_adapter = MagicMock()
         slack_adapter.handle_message = AsyncMock()
+        slack_adapter.fetch_denovo_wakeup_thread_context = AsyncMock(
+            return_value="[Thread context]\nDe Novo: What should Hermes answer?",
+        )
         adapter.gateway_runner = MagicMock(
             adapters={Platform.SLACK: slack_adapter},
         )
@@ -463,6 +466,15 @@ class TestDeNovoSlackWakeupRoute:
         assert event.source.thread_id == "1714060000.000001"
         assert event.message_id == "1714060000.123456"
         assert event.raw_message["type"] == "de_novo_slack_thread_wakeup"
+        assert "What should Hermes answer?" in event.text
+        slack_adapter.fetch_denovo_wakeup_thread_context.assert_awaited_once_with(
+            channel_id="C123ABC",
+            thread_ts="1714060000.000001",
+            message_ts="1714060000.123456",
+            team_id="T123ABC",
+            sender_bot_id="B123ABC",
+            sender_app_id="A123ABC",
+        )
 
     @pytest.mark.asyncio
     async def test_denovo_slack_wakeup_suppresses_duplicate_semantic_delivery(self):
@@ -475,6 +487,7 @@ class TestDeNovoSlackWakeupRoute:
         adapter = _make_adapter(routes=routes)
         slack_adapter = MagicMock()
         slack_adapter.handle_message = AsyncMock()
+        slack_adapter.fetch_denovo_wakeup_thread_context = AsyncMock(return_value="")
         adapter.gateway_runner = MagicMock(
             adapters={Platform.SLACK: slack_adapter},
         )
@@ -498,6 +511,44 @@ class TestDeNovoSlackWakeupRoute:
         assert data["status"] == "duplicate"
         assert data["channel_id"] == "C123ABC"
         assert slack_adapter.handle_message.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_denovo_slack_wakeup_accepts_when_thread_context_fetch_fails(self):
+        routes = {
+            "denovo": {
+                "secret": _INSECURE_NO_AUTH,
+                "handler": "denovo_slack_thread_wakeup",
+            },
+        }
+        adapter = _make_adapter(routes=routes)
+        slack_adapter = MagicMock()
+        slack_adapter.handle_message = AsyncMock()
+        slack_adapter.fetch_denovo_wakeup_thread_context = AsyncMock(
+            side_effect=RuntimeError("slack rate limit"),
+        )
+        adapter.gateway_runner = MagicMock(
+            adapters={Platform.SLACK: slack_adapter},
+        )
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/denovo",
+                json=_denovo_slack_wakeup_payload(
+                    messageIdentity={
+                        "idempotencyKey": "denovo:C123ABC:1714060000.654321",
+                        "messageTs": "1714060000.654321",
+                    },
+                ),
+            )
+            data = await resp.json()
+
+        assert resp.status == 202
+        assert data["status"] == "accepted"
+        slack_adapter.handle_message.assert_awaited_once()
+        event = slack_adapter.handle_message.await_args.args[0]
+        assert "slack rate limit" not in event.text
+        assert "Use Hermes' Slack credentials" in event.text
 
     @pytest.mark.asyncio
     async def test_denovo_slack_wakeup_missing_slack_adapter_returns_retryable_error(self):

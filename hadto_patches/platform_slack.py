@@ -1508,6 +1508,91 @@ class SlackAdapter(BasePlatformAdapter):
             logger.warning("[Slack] Failed to fetch thread context: %s", e)
             return ""
 
+    async def fetch_denovo_wakeup_thread_context(
+        self,
+        channel_id: str,
+        thread_ts: str,
+        message_ts: str,
+        team_id: str = "",
+        sender_bot_id: str = "",
+        sender_app_id: str = "",
+        limit: int = 15,
+    ) -> str:
+        """Fetch Slack context for a De Novo wake-up using Hermes credentials.
+
+        The generic thread-context helper skips all bot messages to avoid echo
+        loops. De Novo wake-ups are different: the referenced message is
+        bot-authored by De Novo, so include only the matching De Novo bot/app
+        message plus human context and still exclude Hermes' own messages.
+        """
+        if team_id and channel_id:
+            self._channel_team[channel_id] = team_id
+        try:
+            client = self._get_client(channel_id)
+            result = await client.conversations_replies(
+                channel=channel_id,
+                ts=thread_ts,
+                limit=limit,
+                inclusive=True,
+            )
+        except Exception as e:
+            logger.warning(
+                "[Slack] Failed to fetch De Novo wake-up thread context: %s",
+                e,
+            )
+            return ""
+
+        messages = result.get("messages", [])
+        if not messages:
+            return ""
+
+        bot_uid = self._team_bot_user_ids.get(team_id, self._bot_user_id)
+        context_parts = []
+        for msg in messages:
+            msg_text = msg.get("text", "").strip()
+            if not msg_text:
+                continue
+
+            msg_user = msg.get("user", "")
+            if bot_uid and msg_user == bot_uid:
+                continue
+
+            msg_bot_id = msg.get("bot_id", "")
+            msg_app_id = msg.get("app_id", "")
+            is_bot_message = bool(msg_bot_id or msg.get("subtype") == "bot_message")
+            is_denovo_message = (
+                (sender_bot_id and msg_bot_id == sender_bot_id)
+                or (sender_app_id and msg_app_id == sender_app_id)
+            )
+            if is_bot_message and not is_denovo_message:
+                continue
+
+            if bot_uid:
+                msg_text = msg_text.replace(f"<@{bot_uid}>", "").strip()
+            if not msg_text:
+                continue
+
+            if is_denovo_message:
+                name = "De Novo"
+            else:
+                name = await self._resolve_user_name(msg_user, chat_id=channel_id)
+
+            if msg.get("ts") == message_ts:
+                prefix = "[de-novo message] "
+            elif msg.get("ts") == thread_ts:
+                prefix = "[thread parent] "
+            else:
+                prefix = ""
+            context_parts.append(f"{prefix}{name}: {msg_text}")
+
+        if not context_parts:
+            return ""
+        return (
+            "[Slack thread context fetched by Hermes for De Novo wake-up:]\n"
+            + "\n".join(context_parts)
+            + "\n[End of Slack thread context]\n\n"
+        )
+
     async def _handle_slash_command(self, command: dict) -> None:
         """Handle /hermes slash command."""
         text = command.get("text", "").strip()
