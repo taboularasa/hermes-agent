@@ -14,6 +14,7 @@ NEEDS_SOURCE_RETRIEVAL = "needs_source_retrieval"
 INFORMAL_CONTEXT = "informal_context"
 
 SOURCE_REFERENCE_SCHEMA = "hermes.denovo.source_reference.v1"
+SOURCE_REFERENCE_EXPORT_SCHEMA = "hermes.denovo.source_reference_export.v1"
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _STABLE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9:._/-]{2,160}$")
@@ -169,8 +170,100 @@ class SourceLinkedHermesReference:
         )
 
 
+@dataclass(frozen=True)
+class SourceReferenceExport:
+    """A deterministic bundle of Hermes references for De Novo ingestion."""
+
+    response_id: str
+    references: tuple[SourceLinkedHermesReference, ...]
+    bundle_sha256: str
+
+    def validate(self) -> None:
+        _match("response_id", self.response_id, _REFERENCE_ID_RE)
+        if not self.references:
+            raise SourceReferenceError("export references are required")
+        validate_references(self.references)
+        expected = _bundle_hash(self.response_id, self.references)
+        if self.bundle_sha256 != expected:
+            raise SourceReferenceError("bundle_sha256 does not match export content")
+        proof_redaction = redaction_proof(
+            self.response_id,
+            [ref.to_dict() for ref in self.references],
+            self.readiness_counts(),
+        )
+        if any(proof_redaction.values()):
+            raise SourceReferenceError("export contains unsafe content")
+
+    def readiness_counts(self) -> dict[str, int]:
+        counts = {
+            ONTOLOGY_COMMIT_READY: 0,
+            NEEDS_SOURCE_RETRIEVAL: 0,
+            INFORMAL_CONTEXT: 0,
+        }
+        for reference in self.references:
+            counts[reference.ontology_readiness] += 1
+        return counts
+
+    def to_dict(self) -> dict[str, Any]:
+        self.validate()
+        return {
+            "schema": SOURCE_REFERENCE_EXPORT_SCHEMA,
+            "responseId": self.response_id,
+            "bundleSha256": self.bundle_sha256,
+            "readinessCounts": self.readiness_counts(),
+            "references": [ref.to_dict() for ref in self.references],
+        }
+
+    def to_proof(self) -> dict[str, Any]:
+        self.validate()
+        reference_dicts = [ref.to_dict() for ref in self.references]
+        return {
+            "schema": SOURCE_REFERENCE_EXPORT_SCHEMA,
+            "response_id": self.response_id,
+            "bundle_sha256": self.bundle_sha256,
+            "reference_count": len(self.references),
+            "readiness_counts": self.readiness_counts(),
+            "citation_locator_count": sum(1 for ref in self.references if ref.citation_locator),
+            "source_ready_reference_ids": [
+                ref.reference_id
+                for ref in self.references
+                if ref.ontology_readiness == ONTOLOGY_COMMIT_READY
+            ],
+            "pending_reference_ids": [
+                ref.reference_id
+                for ref in self.references
+                if ref.ontology_readiness == NEEDS_SOURCE_RETRIEVAL
+            ],
+            "informal_reference_ids": [
+                ref.reference_id
+                for ref in self.references
+                if ref.ontology_readiness == INFORMAL_CONTEXT
+            ],
+            "redaction": redaction_proof(
+                self.response_id,
+                reference_dicts,
+                self.readiness_counts(),
+            ),
+        }
+
+
 def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def build_reference_export(
+    *,
+    response_id: str,
+    references: Iterable[SourceLinkedHermesReference],
+) -> SourceReferenceExport:
+    refs = validate_references(references)
+    export = SourceReferenceExport(
+        response_id=response_id,
+        references=refs,
+        bundle_sha256=_bundle_hash(response_id, refs),
+    )
+    export.validate()
+    return export
 
 
 def validate_references(references: Iterable[SourceLinkedHermesReference]) -> tuple[SourceLinkedHermesReference, ...]:
@@ -244,6 +337,37 @@ def fixture_references() -> tuple[SourceLinkedHermesReference, ...]:
             citation_locator="paragraph:3",
         ),
     )
+
+
+def fixture_reference_export() -> SourceReferenceExport:
+    """Export fixture with ready, pending, and informal references."""
+    ready = fixture_references()[0]
+    pending = SourceLinkedHermesReference(
+        reference_id="hermes-memory-had550-needs-source",
+        kind="ontology-memory",
+        memory_summary_sha256=sha256_text("Hermes has a memory with retrievable source evidence."),
+        source_retrieval_hint="minio:hermes-memory-exports/had550-needs-source",
+    )
+    informal = SourceLinkedHermesReference(
+        reference_id="hermes-memory-had550-informal-context",
+        kind="ontology-memory",
+        memory_summary_sha256=sha256_text("Hermes has context without enough source evidence."),
+    )
+    return build_reference_export(
+        response_id="had550-hermes-reference-export",
+        references=(ready, pending, informal),
+    )
+
+
+def _bundle_hash(
+    response_id: str,
+    references: tuple[SourceLinkedHermesReference, ...],
+) -> str:
+    payload = {
+        "responseId": response_id,
+        "references": [ref.to_dict() for ref in references],
+    }
+    return sha256_text(json.dumps(payload, sort_keys=True, separators=(",", ":")))
 
 
 def _match(name: str, value: str, pattern: re.Pattern[str]) -> None:

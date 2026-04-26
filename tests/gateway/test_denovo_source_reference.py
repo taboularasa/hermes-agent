@@ -7,7 +7,10 @@ from hadto_patches.denovo_source_reference import (
     NEEDS_SOURCE_RETRIEVAL,
     ONTOLOGY_COMMIT_READY,
     SourceLinkedHermesReference,
+    SourceReferenceExport,
     SourceReferenceError,
+    build_reference_export,
+    fixture_reference_export,
     fixture_references,
     redaction_proof,
     sha256_text,
@@ -143,6 +146,83 @@ def test_validate_references_returns_tuple_and_redaction_proof_is_clean():
         "contains_html_script": False,
         "contains_presigned_url": False,
     }
+
+
+def test_reference_export_classifies_ready_pending_and_informal_refs():
+    export = fixture_reference_export()
+    proof = export.to_proof()
+
+    assert export.response_id == "had550-hermes-reference-export"
+    assert proof["reference_count"] == 3
+    assert proof["readiness_counts"] == {
+        ONTOLOGY_COMMIT_READY: 1,
+        NEEDS_SOURCE_RETRIEVAL: 1,
+        INFORMAL_CONTEXT: 1,
+    }
+    assert proof["citation_locator_count"] == 1
+    assert proof["source_ready_reference_ids"] == ["hermes-memory-had550-url-source"]
+    assert proof["pending_reference_ids"] == ["hermes-memory-had550-needs-source"]
+    assert proof["informal_reference_ids"] == ["hermes-memory-had550-informal-context"]
+    assert proof["redaction"] == {
+        "contains_secrets": False,
+        "contains_public_url": False,
+        "contains_response_url": False,
+        "contains_raw_hermes_memory": False,
+        "contains_raw_transcript": False,
+        "contains_raw_chapter_text": False,
+        "contains_private_endpoint": False,
+        "contains_cookie": False,
+        "contains_html_script": False,
+        "contains_presigned_url": False,
+    }
+
+
+def test_reference_export_hash_is_deterministic_and_bound_to_content():
+    export = fixture_reference_export()
+    copied = SourceReferenceExport(
+        response_id=export.response_id,
+        references=export.references,
+        bundle_sha256=export.bundle_sha256,
+    )
+    copied.validate()
+
+    tampered_refs = (
+        SourceLinkedHermesReference(
+            reference_id="hermes-memory-had550-url-source-changed",
+            kind=export.references[0].kind,
+            memory_summary_sha256=export.references[0].memory_summary_sha256,
+            source_artifact_iri=export.references[0].source_artifact_iri,
+            source_stable_id=export.references[0].source_stable_id,
+            source_sha256=export.references[0].source_sha256,
+            citation_locator=export.references[0].citation_locator,
+        ),
+        *export.references[1:],
+    )
+    tampered = SourceReferenceExport(
+        response_id=export.response_id,
+        references=tampered_refs,
+        bundle_sha256=export.bundle_sha256,
+    )
+
+    with pytest.raises(SourceReferenceError, match="bundle_sha256"):
+        tampered.validate()
+
+
+def test_reference_export_rejects_empty_or_unsafe_bundles():
+    with pytest.raises(SourceReferenceError, match="references"):
+        build_reference_export(response_id="had550-empty-export", references=())
+
+    unsafe = SourceLinkedHermesReference(
+        reference_id="hermes-memory-had550-unsafe-export",
+        kind="ontology-memory",
+        memory_summary_sha256=sha256_text("unsafe export"),
+        source_retrieval_hint="https://example.test?X-Amz-Signature=bad",
+    )
+    with pytest.raises(SourceReferenceError, match="unsafe"):
+        build_reference_export(
+            response_id="had550-unsafe-export",
+            references=(unsafe,),
+        )
 
 
 def test_redaction_proof_detects_unsafe_material():
