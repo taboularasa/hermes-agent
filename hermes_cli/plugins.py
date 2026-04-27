@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 from hermes_constants import get_hermes_home
+from hermes_cli.plugin_compat import apply_runtime_plugin_compatibility
 from utils import env_var_enabled
 
 try:
@@ -545,6 +546,11 @@ class PluginManager:
             else:
                 ctx = PluginContext(manifest, self)
                 register_fn(ctx)
+                apply_runtime_plugin_compatibility(
+                    manifest.name,
+                    plugin_path=manifest.path,
+                    module=module,
+                )
                 loaded.tools_registered = [
                     t for t in self._plugin_tool_names
                     if t not in {
