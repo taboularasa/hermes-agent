@@ -729,6 +729,10 @@ class TestBuildJobPromptSilentHint:
         assert "classified as role=study" in result
         assert "execution loop, not a passive summary" in result
         assert "self_improvement_pipeline" in result
+        assert "Evidence Sources" in result
+        assert "Verification Target" in result
+        assert "Lane WIP" in result
+        assert "maintenance and growth are both healthy" in result
         assert "prevents rediscovering the same gap" in result
 
     def test_non_study_role_does_not_inject_study_guidance(self):
