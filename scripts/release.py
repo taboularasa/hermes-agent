@@ -114,6 +114,7 @@ AUTHOR_MAP = {
     "hermes@nousresearch.com": "NousResearch",
     "chinmingcock@gmail.com": "ChimingLiu",
     "openclaw@sparklab.ai": "openclaw",
+    "david@hadto.net": "taboularasa",
     "semihcvlk53@gmail.com": "Himess",
     "erenkar950@gmail.com": "erenkarakus",
     "adavyasharma@gmail.com": "adavyas",
