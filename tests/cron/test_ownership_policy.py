@@ -2,7 +2,10 @@ import pytest
 
 from hadto_patches.ownership_policy import (
     IssueOwnershipFacts,
+    build_ownership_decision_audit_records,
+    canonical_ownership_dedupe_key,
     evaluate_ownership_policy,
+    format_ownership_decision_audit,
     ownership_policy_override,
 )
 
@@ -52,6 +55,27 @@ def test_issue_ownership_policy_contract_table(name, facts, expected):
     assert decision.ownable.allowed is expected["ownable"], name
 
 
+def test_policy_exposes_stable_operator_reason_strings():
+    de_novo = evaluate_ownership_policy(IssueOwnershipFacts(project_name="De Novo", state_type="backlog"))
+    human_owned = evaluate_ownership_policy(
+        IssueOwnershipFacts(
+            project_name="Hadto.co",
+            state_type="backlog",
+            assignee_name="David",
+            assignee_is_human=True,
+        )
+    )
+    normal = evaluate_ownership_policy(IssueOwnershipFacts(project_name="Hadto.co", state_type="backlog"))
+
+    assert de_novo.selectable.reason == "de_novo_block"
+    assert de_novo.delegateable.reason == "de_novo_block"
+    assert de_novo.assignable.reason == "de_novo_block"
+    assert human_owned.selectable.reason == "human_owned"
+    assert normal.selectable.reason == "selected"
+    assert normal.delegateable.reason == "delegate_allowed"
+    assert normal.assignable.reason == "assign_allowed"
+
+
 def test_issue_text_guard_blocks_selection_and_ownership_but_not_comments():
     decision = evaluate_ownership_policy(
         IssueOwnershipFacts(
@@ -78,7 +102,8 @@ def test_explicit_thread_local_override_allows_de_novo_ownership_temporarily():
 
     assert decision.selectable.allowed is True
     assert decision.ownable.allowed is True
-    assert decision.ownable.reason == "explicit_override"
+    assert decision.selectable.reason == "selected"
+    assert decision.ownable.detail == "explicit_thread_override"
     assert decision.override_reason == "HAD-511 operator-approved De Novo pickup"
     assert evaluate_ownership_policy(facts).ownable.allowed is False
 
@@ -95,5 +120,103 @@ def test_explicit_input_override_allows_de_novo_ownership():
 
     assert decision.selectable.allowed is True
     assert decision.ownable.allowed is True
-    assert decision.ownable.reason == "explicit_override"
+    assert decision.selectable.reason == "selected"
+    assert decision.ownable.detail == "explicit_thread_override"
     assert decision.override_reason == "HAD-511 manual review"
+
+
+def test_audit_records_distinguish_selected_execution_comment_and_denied_delegation():
+    facts = IssueOwnershipFacts(
+        issue_id="lin-1",
+        issue_key="HAD-514",
+        project_name="De Novo",
+        state_type="backlog",
+        planning_only=True,
+    )
+
+    records = build_ownership_decision_audit_records(
+        facts,
+        selected=False,
+        comment_attempted=True,
+        comment_written=True,
+        delegate_attempted=True,
+    )
+    payloads = [record.to_dict() for record in records]
+
+    assert payloads[0]["action"] == "select"
+    assert payloads[0]["outcome"] == "denied"
+    assert payloads[0]["reason"] == "de_novo_block"
+    assert payloads[1]["action"] == "execute"
+    assert payloads[1]["outcome"] == "skipped"
+    assert payloads[1]["reason"] == "planning_only"
+    assert payloads[2]["action"] == "comment"
+    assert payloads[2]["outcome"] == "commented"
+    assert payloads[2]["reason"] == "commented"
+    assert payloads[3]["action"] == "delegate"
+    assert payloads[3]["outcome"] == "skipped"
+    assert payloads[3]["reason"] == "planning_only"
+    assert payloads[3]["policy_reason"] == "delegate_denied"
+
+    output = format_ownership_decision_audit(records)
+    assert "issue=HAD-514" in output
+    assert "dedupe_key=workspace-orchestrator:HAD-514" in output
+    assert "action=select outcome=denied reason=de_novo_block" in output
+    assert "action=execute outcome=skipped reason=planning_only" in output
+    assert "action=delegate outcome=skipped reason=planning_only policy_reason=delegate_denied" in output
+
+
+def test_audit_records_capture_allowed_delegate_assign_and_writeback_skip():
+    facts = IssueOwnershipFacts(issue_key="had-515", project_name="Hadto.co", state_type="backlog")
+
+    records = build_ownership_decision_audit_records(
+        facts,
+        selected=True,
+        live_execution_started=True,
+        delegate_attempted=True,
+        delegated=True,
+        assign_attempted=True,
+    )
+
+    assert canonical_ownership_dedupe_key("had-515") == "workspace-orchestrator:HAD-515"
+    assert records[0].outcome == "selected"
+    assert records[0].reason == "selected"
+    assert records[1].action == "execute"
+    assert records[1].reason == "live_execution"
+    assert records[2].action == "delegate"
+    assert records[2].outcome == "delegated"
+    assert records[2].reason == "delegate_allowed"
+    assert records[3].action == "assign"
+    assert records[3].outcome == "skipped"
+    assert records[3].reason == "writeback_skipped"
+    assert records[3].policy_reason == "assign_allowed"
+
+
+def test_audit_records_capture_repo_unresolved_and_already_undelegated():
+    facts = IssueOwnershipFacts(
+        issue_key="HAD-516",
+        project_name="Hadto.co",
+        state_type="backlog",
+        repo_resolved=False,
+        already_undelegated=True,
+    )
+
+    records = build_ownership_decision_audit_records(
+        facts,
+        selected=True,
+        delegate_attempted=True,
+        assign_attempted=True,
+        undelegate_attempted=True,
+    )
+
+    assert records[1].action == "execute"
+    assert records[1].reason == "repo_unresolved"
+    assert records[2].action == "delegate"
+    assert records[2].outcome == "denied"
+    assert records[2].reason == "repo_unresolved"
+    assert records[2].policy_reason == "delegate_denied"
+    assert records[3].action == "assign"
+    assert records[3].reason == "repo_unresolved"
+    assert records[3].policy_reason == "assign_denied"
+    assert records[4].action == "undelegate"
+    assert records[4].outcome == "skipped"
+    assert records[4].reason == "already_undelegated"

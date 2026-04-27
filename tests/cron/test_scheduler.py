@@ -790,6 +790,12 @@ class TestBuildJobPromptSilentHint:
         assert "Synchronized Failure Risk=<what could fail many loops at once>" in result
         assert "Portfolio State=<whether the portfolio is locally green but globally fragile, or why it is healthy>" in result
         assert "Shared Artifact=<the durable shared artifact that carries this portfolio view across runs" in result
+        assert "Ownership Decisions" in result
+        assert "Selection=<selected|denied|skipped reason=..." in result
+        assert "Execution=<started|skipped reason=live_execution|planning_only|repo_unresolved>" in result
+        assert "Delegate=<delegated|denied|skipped reason=delegate_allowed|delegate_denied|de_novo_block|human_owned|already_undelegated|writeback_skipped>" in result
+        assert "workspace-orchestrator:HAD-" in result
+        assert "de_novo_block, human_owned, explicit_thread_override" in result
 
     def test_one_shot_job_does_not_inject_persistence_ratchet_guidance(self):
         job = {
@@ -804,6 +810,7 @@ class TestBuildJobPromptSilentHint:
         assert "Trust Contract" not in result
         assert "Coverage Completion" not in result
         assert "Attention Budget" not in result
+        assert "Ownership Decisions" not in result
 
 
 class TestBuildJobPromptMissingSkill:
