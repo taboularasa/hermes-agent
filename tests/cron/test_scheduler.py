@@ -797,6 +797,33 @@ class TestBuildJobPromptSilentHint:
         assert "workspace-orchestrator:HAD-" in result
         assert "de_novo_block, human_owned, explicit_thread_override" in result
 
+    def test_control_mode_discovery_injects_exploration_guidance(self):
+        job = {
+            "prompt": "Coordinate backlog",
+            "control_mode": "discovery",
+            "bridge_conditions": [
+                "Preserve at least two candidate paths",
+                "Name contradiction evidence before promotion",
+            ],
+        }
+        result = _build_job_prompt(job)
+        assert "control_mode=discovery" in result
+        assert "preserve multiple candidate paths" in result
+        assert "what was explored" in result
+        assert "Preserve at least two candidate paths" in result
+
+    def test_control_mode_bridge_injects_promotion_guidance(self):
+        job = {
+            "prompt": "Decide next action",
+            "control_mode": "bridge",
+            "bridge_conditions": ["Promote only after contradiction check passes"],
+        }
+        result = _build_job_prompt(job)
+        assert "control_mode=bridge" in result
+        assert "promote one candidate into execution" in result
+        assert "what was chosen for promotion" in result
+        assert "Promote only after contradiction check passes" in result
+
     def test_one_shot_job_does_not_inject_persistence_ratchet_guidance(self):
         job = {
             "id": "oneshot123",

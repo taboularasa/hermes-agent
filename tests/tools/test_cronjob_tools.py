@@ -175,7 +175,7 @@ class TestScheduleCronjob:
         assert job["provider"] == "custom"
         assert job["base_url"] == "http://127.0.0.1:4000/v1"
 
-    def test_schedule_persists_role_and_scope(self):
+    def test_schedule_persists_role_scope_and_control_mode(self):
         result = json.loads(schedule_cronjob(
             prompt="Pinned job",
             schedule="every 1h",
@@ -189,11 +189,15 @@ class TestScheduleCronjob:
                 job_id=result["job_id"],
                 role="Implement",
                 scope="Workbench",
+                control_mode="Execution",
+                bridge_conditions=["Checks green", "Selected path recorded"],
             )
         )
         assert updated["success"] is True
         assert updated["job"]["role"] == "implement"
         assert updated["job"]["scope"] == "workbench"
+        assert updated["job"]["control_mode"] == "execution"
+        assert updated["job"]["bridge_conditions"] == ["Checks green", "Selected path recorded"]
 
     def test_thread_id_captured_in_origin(self, monkeypatch):
         monkeypatch.setenv("HERMES_SESSION_PLATFORM", "telegram")
@@ -263,6 +267,8 @@ class TestListCronjobs:
         assert "enabled" in job
         assert "role" in job
         assert "scope" in job
+        assert "control_mode" in job
+        assert "bridge_conditions" in job
 
 
 # =========================================================================
