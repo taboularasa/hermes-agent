@@ -232,6 +232,30 @@ def _build_aggregate_stewardship_prompt_prefix(job: dict) -> str:
     )
 
 
+def _build_ownership_audit_prompt_prefix(job: dict) -> str:
+    """Return guidance for visible backlog selection and ownership mutation reasons."""
+    if not should_check_persistence_ratchet(job):
+        return ""
+    role = str(job.get("role") or "").strip().lower()
+    scope = str(job.get("scope") or "").strip().lower()
+    if role != "coordinate" or scope != "global":
+        return ""
+
+    return (
+        "[SYSTEM: When this workspace coordinator selects backlog work or attempts Linear ownership writeback, "
+        "emit compact ownership audit evidence. Distinguish three surfaces: selected backlog work, live execution, "
+        "and ownership mutation. Before reporting a substantive run, include an 'Ownership Decisions' block with "
+        "records shaped as: Selection=<selected|denied|skipped reason=... dedupe_key=workspace-orchestrator:HAD-...>; "
+        "Execution=<started|skipped reason=live_execution|planning_only|repo_unresolved>; "
+        "Comment=<commented|denied|skipped reason=commented|writeback_skipped>; "
+        "Delegate=<delegated|denied|skipped reason=delegate_allowed|delegate_denied|de_novo_block|human_owned|already_undelegated|writeback_skipped>; "
+        "Assign=<assigned|denied|skipped reason=assign_allowed|assign_denied|de_novo_block|human_owned|writeback_skipped>. "
+        "Keep reason strings terse and stable: de_novo_block, human_owned, explicit_thread_override, already_undelegated, "
+        "repo_unresolved, planning_only, selected, writeback_skipped, delegate_denied, delegate_allowed, assign_denied, assign_allowed. "
+        "Do not create extra Linear comments only for this audit; attach it to the canonical workspace-orchestrator issue comment when a writeback is already being made.]"
+    )
+
+
 def _resolve_origin(job: dict) -> Optional[dict]:
     """Extract origin info from a job, preserving any extra routing metadata."""
     origin = job.get("origin")
@@ -552,6 +576,7 @@ def _build_job_prompt(job: dict) -> str:
     value_surfaces_prefix = _build_value_surfaces_prompt_prefix(job)
     attention_budget_prefix = _build_attention_budget_prompt_prefix(job)
     aggregate_stewardship_prefix = _build_aggregate_stewardship_prompt_prefix(job)
+    ownership_audit_prefix = _build_ownership_audit_prompt_prefix(job)
     prompt = (
         silent_hint
         + (role_prefix + "\n\n" if role_prefix else "")
@@ -561,6 +586,7 @@ def _build_job_prompt(job: dict) -> str:
         + (value_surfaces_prefix + "\n\n" if value_surfaces_prefix else "")
         + (attention_budget_prefix + "\n\n" if attention_budget_prefix else "")
         + (aggregate_stewardship_prefix + "\n\n" if aggregate_stewardship_prefix else "")
+        + (ownership_audit_prefix + "\n\n" if ownership_audit_prefix else "")
         + prompt
     )
     if skills is None:
