@@ -3047,6 +3047,32 @@ def cmd_cron(args):
     cron_command(args)
 
 
+def cmd_self_improvement(args):
+    """Self-improvement reliability utilities."""
+    import json
+    from pathlib import Path
+
+    action = getattr(args, "self_improvement_command", None)
+    if action == "benchmark":
+        from tools.self_improvement_tool import evaluate_self_improvement_benchmark
+
+        benchmark_args = {"persist": not args.no_persist}
+        for attr in ("journal_path", "codex_runs_path", "ctx_bindings_path", "ontology_root", "history_path"):
+            value = getattr(args, attr, None)
+            if value:
+                benchmark_args[attr] = Path(value).expanduser()
+        if args.freshness_hours is not None:
+            benchmark_args["freshness_hours"] = args.freshness_hours
+        if args.active_stale_hours is not None:
+            benchmark_args["active_stale_hours"] = args.active_stale_hours
+
+        benchmark = evaluate_self_improvement_benchmark(**benchmark_args)
+        print(json.dumps(benchmark, indent=2, sort_keys=True))
+        return
+
+    print("Run 'hermes self-improvement --help' for usage.")
+
+
 def cmd_webhook(args):
     """Webhook subscription management."""
     from hermes_cli.webhook import webhook_command
@@ -5258,6 +5284,32 @@ For more help on a command:
     cron_subparsers.add_parser("tick", help="Run due jobs once and exit")
 
     cron_parser.set_defaults(func=cmd_cron)
+
+    # =========================================================================
+    # self-improvement command
+    # =========================================================================
+    self_improvement_parser = subparsers.add_parser(
+        "self-improvement",
+        aliases=["self_improvement"],
+        help="Self-improvement reliability utilities",
+        description="Evaluate the Hermes self-improvement evidence gate and benchmark scorecard",
+    )
+    self_improvement_subparsers = self_improvement_parser.add_subparsers(
+        dest="self_improvement_command"
+    )
+    self_improvement_benchmark = self_improvement_subparsers.add_parser(
+        "benchmark",
+        help="Run the self-improvement reliability benchmark",
+    )
+    self_improvement_benchmark.add_argument("--journal-path", help="Path to journal.json")
+    self_improvement_benchmark.add_argument("--codex-runs-path", help="Path to Codex runs.json")
+    self_improvement_benchmark.add_argument("--ctx-bindings-path", help="Path to ctx session_bindings.json")
+    self_improvement_benchmark.add_argument("--ontology-root", help="Path to ontology artifact root")
+    self_improvement_benchmark.add_argument("--history-path", help="Path for benchmark history JSON")
+    self_improvement_benchmark.add_argument("--freshness-hours", type=int, help="Hours before evidence is stale")
+    self_improvement_benchmark.add_argument("--active-stale-hours", type=int, help="Hours before active runs/bindings are stale")
+    self_improvement_benchmark.add_argument("--no-persist", action="store_true", help="Do not write benchmark history")
+    self_improvement_parser.set_defaults(func=cmd_self_improvement)
 
     # =========================================================================
     # webhook command
