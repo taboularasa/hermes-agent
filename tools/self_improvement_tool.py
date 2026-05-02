@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,6 +33,8 @@ DEFAULT_ACTIVE_STALE_HOURS = 12
 PROVENANCE_CONTRACT_VERSION = "v1"
 BENCHMARK_CONTRACT_VERSION = "v1"
 _BENCHMARK_HISTORY_LIMIT = 200
+_ONTOLOGY_SCAN_SUFFIXES = {".json", ".yaml", ".yml", ".md"}
+_ONTOLOGY_SCAN_PRUNED_DIRS = {".git"}
 
 
 SELF_IMPROVEMENT_EVIDENCE_SCHEMA = {
@@ -280,6 +283,20 @@ def _scan_ontology_file(path: Path) -> tuple[list[datetime], list[str]]:
     return timestamps, alerts
 
 
+def _iter_ontology_files(root: Path) -> Iterable[Path]:
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [
+            dirname
+            for dirname in dirnames
+            if dirname not in _ONTOLOGY_SCAN_PRUNED_DIRS
+        ]
+        current_dir = Path(dirpath)
+        for filename in filenames:
+            path = current_dir / filename
+            if path.suffix.lower() in _ONTOLOGY_SCAN_SUFFIXES:
+                yield path
+
+
 def _summarize_ontology(root: Path, freshness_hours: int, now: datetime) -> dict[str, Any]:
     if not root.exists():
         return {
@@ -292,9 +309,7 @@ def _summarize_ontology(root: Path, freshness_hours: int, now: datetime) -> dict
 
     timestamps: list[datetime] = []
     alerts: list[str] = []
-    for path in root.rglob("*"):
-        if not path.is_file() or path.suffix.lower() not in {".json", ".yaml", ".yml", ".md"}:
-            continue
+    for path in _iter_ontology_files(root):
         file_timestamps, file_alerts = _scan_ontology_file(path)
         timestamps.extend(file_timestamps)
         alerts.extend(file_alerts)
