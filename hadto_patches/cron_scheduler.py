@@ -49,6 +49,7 @@ from cron.jobs import (
 from hadto_patches.recurring_routines import (
     build_routine_governance_prompt_prefix,
     classify_cron_delivery,
+    sanitize_slack_cron_response,
 )
 
 # Sentinel: when a cron agent has nothing new to report, it can start its
@@ -1001,6 +1002,20 @@ def tick(verbose: bool = True) -> int:
                 output_file = save_job_output(job["id"], output)
                 if verbose:
                     logger.info("Output saved to: %s", output_file)
+
+                if should_deliver:
+                    delivery_target = _resolve_delivery_target(job)
+                    if success and delivery_target and str(delivery_target.get("platform", "")).lower() == "slack":
+                        slack_decision = sanitize_slack_cron_response(job, deliver_content)
+                        if slack_decision.get("suppress"):
+                            logger.info(
+                                "Job '%s': Slack cron report %s — skipping delivery",
+                                job["id"],
+                                slack_decision.get("reason", "suppressed"),
+                            )
+                            should_deliver = False
+                        else:
+                            deliver_content = str(slack_decision.get("content") or "")
 
                 if should_deliver:
                     try:

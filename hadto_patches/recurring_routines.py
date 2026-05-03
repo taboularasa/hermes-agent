@@ -50,6 +50,84 @@ ROUTINE_GATE_FIELDS = [
     "systematic_defect_action",
 ]
 
+SLACK_CRON_MAX_REPORT_CHARS = 1200
+SLACK_CRON_MAX_REPORT_LINES = 12
+
+SLACK_CRON_TRIM_NOTE = "[Slack cron report trimmed; full output saved locally.]"
+
+SELF_AUDIT_SECTION_TITLES = (
+    "Trust Contract",
+    "Persistence Ratchet",
+    "Coverage Completion",
+    "Value Surfaces",
+    "Attention Budget",
+    "Aggregate Stewardship",
+    "First Proof Point",
+    "Geometry Shaping",
+)
+
+_SELF_AUDIT_FIELD_LABELS = (
+    "Artifact",
+    "Artifacts",
+    "Attention Cost",
+    "Capability",
+    "Carry-forward",
+    "Channel Opened",
+    "Circulation",
+    "Closure Basis",
+    "Closure Rule",
+    "Commitment",
+    "Contradictions",
+    "Decision Value",
+    "Decisions",
+    "Default Changed",
+    "Dependency Choke Points",
+    "Dignity",
+    "Drift",
+    "Escalate When",
+    "Evidence",
+    "Evidence Coverage",
+    "Fast Loop",
+    "Focus Effect",
+    "Friction Changed",
+    "Imitation Path",
+    "Outcome",
+    "Policy-vs-Path",
+    "Portfolio State",
+    "Protection Assumptions",
+    "Seed Surface",
+    "Shared Artifact",
+    "Shared Provider Concentration",
+    "Slow Loop",
+    "Stale Path Pruned",
+    "Success Signal",
+    "Synchronized Failure Risk",
+    "Trust Posture",
+    "Uncovered Region",
+    "Verification",
+    "Verification Debt",
+    "Viability",
+    "Why First",
+)
+
+_SELF_AUDIT_TITLE_LOOKUP = {title.lower(): title for title in SELF_AUDIT_SECTION_TITLES}
+_USEFUL_SLACK_SIGNAL_RE = re.compile(
+    r"\b("
+    r"HAD-\d+|incident|blocker|blocked|failed|failure|error|needs?\s+david|"
+    r"decision|action|next|fixed|changed|merged|pull request|pr|issue|linear|"
+    r"commit|branch|check|test|deploy|started|completed|running|paused|resumed|"
+    r"approval|auth|token"
+    r")\b",
+    re.IGNORECASE,
+)
+_NO_CHANGE_ONLY_RE = re.compile(
+    r"\b("
+    r"no changes?|nothing new|no material trigger|no new material|status unchanged|"
+    r"unchanged|no operator action|no action needed|no update|no new update"
+    r")\b",
+    re.IGNORECASE,
+)
+
 _GATE_INLINE_KEYS = {
     "material trigger": "material_trigger",
     "material_trigger": "material_trigger",
@@ -256,6 +334,168 @@ def _is_noish(value: str) -> bool:
         "n/a",
         "na",
     } or "no material" in lowered or "unchanged" in lowered or "nothing new" in lowered
+
+
+def _plain_report_line(line: str) -> str:
+    clean = line.strip()
+    clean = re.sub(r"^(?:>\s*)?(?:[-*+]\s*)?(?:\d+[.)]\s*)?(?:#{1,6}\s*)?", "", clean)
+    clean = clean.replace("**", "").replace("__", "").replace("`", "")
+    return clean.strip()
+
+
+def _self_audit_section_title(line: str) -> Optional[str]:
+    clean = _plain_report_line(line).strip(" :\t")
+    lowered = clean.lower()
+    for title_lower, title in _SELF_AUDIT_TITLE_LOOKUP.items():
+        if lowered == title_lower:
+            return title
+        for separator in (":", "-", "=", "->"):
+            if lowered.startswith(f"{title_lower}{separator}") or lowered.startswith(f"{title_lower} {separator}"):
+                return title
+    return None
+
+
+def _is_self_audit_field_line(line: str) -> bool:
+    clean = _plain_report_line(line)
+    lowered = clean.lower()
+    for label in sorted(_SELF_AUDIT_FIELD_LABELS, key=len, reverse=True):
+        if re.match(rf"^{re.escape(label.lower())}\s*(?:[:=<>\-]|$)", lowered):
+            return True
+    return False
+
+
+def _starts_operator_content_section(line: str) -> bool:
+    clean = _plain_report_line(line)
+    return bool(
+        re.match(
+            r"^(summary|incident|blocker|blocked|action|next|result|update|decision|status)\s*:",
+            clean,
+            re.IGNORECASE,
+        )
+        or re.match(r"^[A-Z][A-Za-z0-9 /&-]{2,48}:$", clean)
+        or re.match(r"^HAD-\d+\b", clean, re.IGNORECASE)
+    )
+
+
+def _collapse_report_blank_lines(text: str) -> str:
+    lines = [line.rstrip() for line in (text or "").strip().splitlines()]
+    collapsed: List[str] = []
+    blank_pending = False
+    for line in lines:
+        if not line.strip():
+            blank_pending = True
+            continue
+        if blank_pending and collapsed:
+            collapsed.append("")
+        collapsed.append(line)
+        blank_pending = False
+    return "\n".join(collapsed).strip()
+
+
+def _strip_self_audit_sections(text: str) -> tuple[str, bool]:
+    """Remove known recurring-loop governance sections from Slack reports."""
+    kept: List[str] = []
+    removed_any = False
+    skipping = False
+
+    for line in (text or "").splitlines():
+        if _self_audit_section_title(line):
+            removed_any = True
+            skipping = True
+            continue
+
+        if skipping:
+            if not line.strip():
+                removed_any = True
+                continue
+            if _is_self_audit_field_line(line):
+                removed_any = True
+                continue
+            if _starts_operator_content_section(line):
+                skipping = False
+            else:
+                removed_any = True
+                continue
+
+        kept.append(line)
+
+    return _collapse_report_blank_lines("\n".join(kept)), removed_any
+
+
+def _looks_like_no_change_only(text: str) -> bool:
+    compact = re.sub(r"\s+", " ", (text or "").strip())
+    if not compact:
+        return True
+    if not _NO_CHANGE_ONLY_RE.search(compact):
+        return False
+    return not _USEFUL_SLACK_SIGNAL_RE.search(compact)
+
+
+def _cap_slack_cron_report(text: str) -> tuple[str, bool]:
+    content = _collapse_report_blank_lines(text)
+    trimmed = False
+
+    lines = content.splitlines()
+    if len(lines) > SLACK_CRON_MAX_REPORT_LINES:
+        content_line_limit = max(1, SLACK_CRON_MAX_REPORT_LINES - 2)
+        content = "\n".join(lines[:content_line_limit]).rstrip()
+        trimmed = True
+
+    if len(content) > SLACK_CRON_MAX_REPORT_CHARS:
+        note_budget = len("\n\n") + len(SLACK_CRON_TRIM_NOTE)
+        content_limit = max(1, SLACK_CRON_MAX_REPORT_CHARS - note_budget)
+        truncated = content[:content_limit].rstrip()
+        break_at = max(truncated.rfind("\n"), truncated.rfind(". "), truncated.rfind("; "))
+        if break_at > content_limit // 2:
+            truncated = truncated[:break_at].rstrip()
+        content = truncated.rstrip(" .;:-")
+        trimmed = True
+
+    if trimmed:
+        note_budget = len("\n\n") + len(SLACK_CRON_TRIM_NOTE)
+        content_limit = max(0, SLACK_CRON_MAX_REPORT_CHARS - note_budget)
+        content = content[:content_limit].rstrip()
+        content = f"{content}\n\n{SLACK_CRON_TRIM_NOTE}" if content else SLACK_CRON_TRIM_NOTE
+
+    return content, trimmed
+
+
+def sanitize_slack_cron_response(job: Dict[str, Any], final_response: str) -> Dict[str, Any]:
+    """Prepare a successful cron final response for Slack-facing delivery.
+
+    The original cron output stays in the local cron output file. This gate
+    only controls the attention surface sent to Slack.
+    """
+    del job  # reserved for future job-family-specific Slack report gates
+    original = (final_response or "").strip()
+    if not original:
+        return {"suppress": True, "reason": "empty_response", "content": ""}
+
+    stripped, removed_self_audit = _strip_self_audit_sections(original)
+    if not stripped:
+        return {
+            "suppress": True,
+            "reason": "self_audit_only",
+            "content": "",
+            "removed_self_audit": removed_self_audit,
+        }
+
+    if _looks_like_no_change_only(stripped):
+        return {
+            "suppress": True,
+            "reason": "no_change_only",
+            "content": "",
+            "removed_self_audit": removed_self_audit,
+        }
+
+    capped, capped_report = _cap_slack_cron_report(stripped)
+    return {
+        "suppress": False,
+        "reason": "sanitized" if removed_self_audit else "ok",
+        "content": capped,
+        "removed_self_audit": removed_self_audit,
+        "capped": capped_report,
+    }
 
 
 def _contains_material_trigger(text: str) -> bool:
