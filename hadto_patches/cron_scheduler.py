@@ -238,6 +238,28 @@ def _build_aggregate_stewardship_prompt_prefix(job: dict) -> str:
     )
 
 
+def _build_growth_signals_prompt_prefix(job: dict) -> str:
+    """Return guidance for feeding growth-side evidence into agenda review."""
+    if not should_check_persistence_ratchet(job):
+        return ""
+    role = str(job.get("role") or "").strip().lower()
+    scope = str(job.get("scope") or "").strip().lower()
+    if role != "coordinate" or scope != "global":
+        return ""
+
+    return (
+        "[SYSTEM: Hermes agenda review must price growth-side evidence, not only internal maintenance signals. "
+        "Before selecting backlog work, inspect concrete client-pipeline and social-proof signals from the Slack/Linear/journal evidence available to this run. "
+        "When you report a substantive run, include a compact 'Growth Signals' block with: "
+        "Pipeline Signals=<live demand-side signals such as inbound leads, active proposals, demo requests or scheduled demos, follow-up obligations, stalled deals, or client-blocking unanswered questions>; "
+        "Social Proof Signals=<proof-capture signals such as testimonials, case-study-ready outcomes, before/after artifacts, notable metrics, launch wins, screenshots, quotes, or references worth converting into reusable proof>; "
+        "Evidence Sources=<the exact Slack thread/channel, Linear issue/comment, journal entry, or other durable evidence surface inspected>; "
+        "Priority Effect=<how these signals changed prioritization, especially when time-sensitive contract, proposal, demo, follow-up, or proof-capture work should outrank internal maintenance>; "
+        "Writeback Requirement=<if growth work is selected, the selected Linear issue description or canonical workspace-orchestrator comment must cite the exact pipeline/social-proof signals and source surfaces that justified the choice>. "
+        "If no concrete growth signals are present, say that plainly instead of inventing urgency.]"
+    )
+
+
 def _build_ownership_audit_prompt_prefix(job: dict) -> str:
     """Return guidance for visible backlog selection and ownership mutation reasons."""
     if not should_check_persistence_ratchet(job):
@@ -582,6 +604,7 @@ def _build_job_prompt(job: dict) -> str:
     value_surfaces_prefix = _build_value_surfaces_prompt_prefix(job)
     attention_budget_prefix = _build_attention_budget_prompt_prefix(job)
     aggregate_stewardship_prefix = _build_aggregate_stewardship_prompt_prefix(job)
+    growth_signals_prefix = _build_growth_signals_prompt_prefix(job)
     ownership_audit_prefix = _build_ownership_audit_prompt_prefix(job)
     routine_governance_prefix = build_routine_governance_prompt_prefix(job)
     prompt = (
@@ -594,6 +617,7 @@ def _build_job_prompt(job: dict) -> str:
         + (value_surfaces_prefix + "\n\n" if value_surfaces_prefix else "")
         + (attention_budget_prefix + "\n\n" if attention_budget_prefix else "")
         + (aggregate_stewardship_prefix + "\n\n" if aggregate_stewardship_prefix else "")
+        + (growth_signals_prefix + "\n\n" if growth_signals_prefix else "")
         + (ownership_audit_prefix + "\n\n" if ownership_audit_prefix else "")
         + prompt
     )

@@ -1056,6 +1056,12 @@ class TestBuildJobPromptSilentHint:
         assert "Synchronized Failure Risk=<what could fail many loops at once>" in result
         assert "Portfolio State=<whether the portfolio is locally green but globally fragile, or why it is healthy>" in result
         assert "Shared Artifact=<the durable shared artifact that carries this portfolio view across runs" in result
+        assert "Growth Signals" in result
+        assert "Pipeline Signals=<live demand-side signals such as inbound leads, active proposals, demo requests or scheduled demos, follow-up obligations, stalled deals, or client-blocking unanswered questions>" in result
+        assert "Social Proof Signals=<proof-capture signals such as testimonials, case-study-ready outcomes, before/after artifacts, notable metrics, launch wins, screenshots, quotes, or references worth converting into reusable proof>" in result
+        assert "Evidence Sources=<the exact Slack thread/channel, Linear issue/comment, journal entry, or other durable evidence surface inspected>" in result
+        assert "Priority Effect=<how these signals changed prioritization" in result
+        assert "selected Linear issue description or canonical workspace-orchestrator comment must cite the exact pipeline/social-proof signals and source surfaces" in result
         assert "Ownership Decisions" in result
         assert "Selection=<selected|denied|skipped reason=..." in result
         assert "Execution=<started|skipped reason=live_execution|planning_only|repo_unresolved>" in result

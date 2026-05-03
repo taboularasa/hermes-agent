@@ -68,6 +68,27 @@ def test_capability_work_blocked_when_maintenance_or_growth_unhealthy():
     assert "self_improvement_capability_budget_blocked" in decision.reasons
 
 
+def test_growth_work_blocked_when_reliability_floor_is_degraded():
+    decision = evaluate_self_improvement_policy(
+        SelfImprovementWorkItem(
+            title="Improve proposal follow-up throughput",
+            lane="growth",
+            evidence_sources=["proposal backlog"],
+            verification_target="faster client-facing follow-up",
+        ),
+        portfolio_health=PortfolioHealthSnapshot(
+            reliability_floor_healthy=False,
+            reliability_floor_reason="ctx bindings stale",
+            maintenance_healthy=False,
+            growth_healthy=True,
+        ),
+    )
+
+    assert decision.allowed is False
+    assert decision.reliability_floor_healthy is False
+    assert "self_improvement_reliability_floor_degraded" in decision.reasons
+
+
 def test_healthy_maintenance_item_with_evidence_is_allowed():
     decision = evaluate_self_improvement_policy(
         SelfImprovementWorkItem(
@@ -97,12 +118,16 @@ def test_render_metadata_includes_required_audit_fields():
     assert "- Evidence Sources: HAD-133" in metadata
     assert "- Verification Target: prompt requires guardrail block" in metadata
     assert "- Lane WIP: 0/1" in metadata
+    assert "- Reliability Floor: healthy" in metadata
+    assert "- Reward Hierarchy: reliability_floor > epoch_objective > capability_investment" in metadata
 
 
 def test_writeback_contract_mentions_evidence_wip_and_budget_rules():
     contract = build_self_improvement_writeback_contract()
 
+    assert "reliability floor > epoch objective > capability investment" in contract
     assert "Evidence Source" in contract
     assert "Verification Target" in contract
     assert "lane already has 1 active Hermes-owned self-improvement item" in contract
+    assert "allow only Maintenance work while the reliability floor is degraded" in contract
     assert "maintenance and growth are both healthy" in contract

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,8 +32,11 @@ DEFAULT_ACTIVE_STALE_HOURS = 12
 PROVENANCE_CONTRACT_VERSION = "v1"
 BENCHMARK_CONTRACT_VERSION = "v1"
 _BENCHMARK_HISTORY_LIMIT = 200
-_ONTOLOGY_SCAN_SUFFIXES = {".json", ".yaml", ".yml", ".md"}
-_ONTOLOGY_SCAN_PRUNED_DIRS = {".git"}
+_ONTOLOGY_ARTIFACTS = {
+    "ontology_metrics": Path("evolution/metrics.json"),
+    "ontology_delta_report": Path("evolution/delta_report.json"),
+    "ontology_daily_report": Path("evolution/daily_report.md"),
+}
 
 
 SELF_IMPROVEMENT_EVIDENCE_SCHEMA = {
@@ -116,6 +118,36 @@ def _load_json(path: Path) -> Any:
     except Exception:
         logger.warning("Failed to read JSON evidence file %s", path, exc_info=True)
         return None
+
+
+def _normalize_ctx_bindings_for_evidence(
+    ctx_bindings_path: Path,
+    *,
+    codex_runs_path: Path,
+    now: datetime,
+    active_stale_hours: int,
+) -> None:
+    """Retire stale ctx bindings before treating them as reliability evidence."""
+
+    try:
+        from hermes_cli.ctx_runtime import normalize_ctx_bindings
+    except Exception:
+        logger.debug("Failed to import ctx binding normalization for evidence gate", exc_info=True)
+        return
+
+    try:
+        normalize_ctx_bindings(
+            bindings_path=ctx_bindings_path,
+            codex_runs_path=codex_runs_path,
+            stale_hours=active_stale_hours,
+            now=now,
+        )
+    except Exception:
+        logger.warning(
+            "Failed to normalize ctx bindings at %s before evidence evaluation",
+            ctx_bindings_path,
+            exc_info=True,
+        )
 
 
 def _iter_records(payload: Any, key: str) -> Iterable[dict[str, Any]]:
@@ -245,7 +277,7 @@ def _extract_timestamps_from_text(text: str) -> Iterable[datetime]:
             yield parsed
 
 
-def _scan_ontology_file(path: Path) -> tuple[list[datetime], list[str]]:
+def _scan_ontology_file(path: Path, *, check_status: bool = False) -> tuple[list[datetime], list[str]]:
     timestamps: list[datetime] = []
     alerts: list[str] = []
     try:
@@ -270,31 +302,18 @@ def _scan_ontology_file(path: Path) -> tuple[list[datetime], list[str]]:
                 parsed = _parse_time(payload.get(key))
                 if parsed is not None:
                     timestamps.append(parsed)
-            reliability = payload.get("reliability")
-            status = ""
-            if isinstance(reliability, dict):
-                status = str(reliability.get("status") or "")
-            status = status or str(payload.get("status") or "")
-            if status.strip().lower() in {"degraded", "error", "failed", "missing", "stale"}:
-                alerts.append(f"{path.name} status={status.strip().lower()}")
+            if check_status:
+                reliability = payload.get("reliability")
+                status = ""
+                if isinstance(reliability, dict):
+                    status = str(reliability.get("status") or "")
+                status = status or str(payload.get("status") or "")
+                if status.strip().lower() in {"degraded", "error", "failed", "missing", "stale"}:
+                    alerts.append(f"{path.name} status={status.strip().lower()}")
     else:
         timestamps.extend(_extract_timestamps_from_text(text))
 
     return timestamps, alerts
-
-
-def _iter_ontology_files(root: Path) -> Iterable[Path]:
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [
-            dirname
-            for dirname in dirnames
-            if dirname not in _ONTOLOGY_SCAN_PRUNED_DIRS
-        ]
-        current_dir = Path(dirpath)
-        for filename in filenames:
-            path = current_dir / filename
-            if path.suffix.lower() in _ONTOLOGY_SCAN_SUFFIXES:
-                yield path
 
 
 def _summarize_ontology(root: Path, freshness_hours: int, now: datetime) -> dict[str, Any]:
@@ -307,14 +326,39 @@ def _summarize_ontology(root: Path, freshness_hours: int, now: datetime) -> dict
             "alerts": [],
         }
 
-    timestamps: list[datetime] = []
     alerts: list[str] = []
-    for path in _iter_ontology_files(root):
-        file_timestamps, file_alerts = _scan_ontology_file(path)
-        timestamps.extend(file_timestamps)
-        alerts.extend(file_alerts)
+    reasons: list[str] = []
+    latest: Optional[datetime] = None
+    per_artifact: dict[str, dict[str, Any]] = {}
 
-    latest = _latest_timestamp(timestamps)
+    for artifact_name, relative_path in _ONTOLOGY_ARTIFACTS.items():
+        path = root / relative_path
+        if not path.exists():
+            per_artifact[artifact_name] = {
+                "path": str(path),
+                "status": "missing",
+                "latest_timestamp": None,
+                "age_hours": None,
+            }
+            reasons.append(f"{artifact_name} missing")
+            continue
+
+        file_timestamps, file_alerts = _scan_ontology_file(
+            path,
+            check_status=artifact_name == "ontology_metrics",
+        )
+        artifact_latest = _latest_timestamp(file_timestamps)
+        artifact_summary = _summarize_source(artifact_name, artifact_latest, freshness_hours, now)
+        artifact_summary["path"] = str(path)
+        per_artifact[artifact_name] = artifact_summary
+        alerts.extend(file_alerts)
+        if artifact_latest is not None and (latest is None or artifact_latest > latest):
+            latest = artifact_latest
+        if artifact_summary["status"] == "stale":
+            reasons.append(f"{artifact_name} stale ({artifact_summary.get('age_hours')}h)")
+        elif artifact_summary["status"] == "missing":
+            reasons.append(f"{artifact_name} timestamp missing")
+
     if latest is None:
         return {
             "status": "missing",
@@ -322,22 +366,27 @@ def _summarize_ontology(root: Path, freshness_hours: int, now: datetime) -> dict
             "age_hours": None,
             "reasons": ["ontology intelligence timestamp missing"],
             "alerts": alerts,
+            "artifacts": per_artifact,
         }
 
     age_hours = max(0.0, (now - latest).total_seconds() / 3600)
-    status = "fresh" if age_hours <= freshness_hours else "stale"
-    reasons: list[str] = []
-    if status == "stale":
-        reasons.append(f"ontology_intelligence stale ({round(age_hours, 2)}h)")
+    status = "fresh"
+    if reasons:
+        status = (
+            "missing"
+            if any(data.get("status") == "missing" for data in per_artifact.values())
+            else "stale"
+        )
     if alerts:
         status = "degraded"
-        reasons.extend(alerts)
+        reasons.extend(item for item in alerts if item not in reasons)
     return {
         "status": status,
         "latest_timestamp": latest.isoformat(),
         "age_hours": round(age_hours, 2),
         "reasons": reasons,
         "alerts": alerts,
+        "artifacts": per_artifact,
     }
 
 
@@ -502,6 +551,12 @@ def evaluate_self_improvement_evidence(
     current = now or datetime.now(tz=timezone.utc)
     journal_payload = _load_json(journal_path)
     codex_payload = _load_json(codex_runs_path)
+    _normalize_ctx_bindings_for_evidence(
+        ctx_bindings_path,
+        codex_runs_path=codex_runs_path,
+        now=current,
+        active_stale_hours=active_stale_hours,
+    )
     ctx_payload = _load_json(ctx_bindings_path)
     ontology_summary = _summarize_ontology(ontology_root, freshness_hours, current)
 
@@ -831,36 +886,52 @@ def self_improvement_benchmark(
     return json.dumps({"success": True, "benchmark": benchmark, "task_id": task_id})
 
 
+def _normalize_self_improvement_args(args: Any) -> dict[str, Any]:
+    """Accept runtimes that invoke no-arg tools with ``None`` instead of ``{}``."""
+
+    return args if isinstance(args, dict) else {}
+
+
+def _handle_self_improvement_evidence_gate(args: Any, **kw: Any) -> str:
+    payload = _normalize_self_improvement_args(args)
+    return self_improvement_evidence_gate(
+        journal_path=payload.get("journal_path"),
+        codex_runs_path=payload.get("codex_runs_path"),
+        ctx_bindings_path=payload.get("ctx_bindings_path"),
+        ontology_root=payload.get("ontology_root"),
+        now=payload.get("now"),
+        freshness_hours=payload.get("freshness_hours"),
+        active_stale_hours=payload.get("active_stale_hours"),
+        task_id=kw.get("task_id"),
+    )
+
+
+def _handle_self_improvement_benchmark(args: Any, **kw: Any) -> str:
+    payload = _normalize_self_improvement_args(args)
+    return self_improvement_benchmark(
+        journal_path=payload.get("journal_path"),
+        codex_runs_path=payload.get("codex_runs_path"),
+        ctx_bindings_path=payload.get("ctx_bindings_path"),
+        ontology_root=payload.get("ontology_root"),
+        history_path=payload.get("history_path"),
+        now=payload.get("now"),
+        freshness_hours=payload.get("freshness_hours"),
+        active_stale_hours=payload.get("active_stale_hours"),
+        persist=payload.get("persist"),
+        task_id=kw.get("task_id"),
+    )
+
+
 registry.register(
     name="self_improvement_evidence_gate",
     toolset="self_improvement",
     schema=SELF_IMPROVEMENT_EVIDENCE_SCHEMA,
-    handler=lambda args, **kw: self_improvement_evidence_gate(
-        journal_path=args.get("journal_path"),
-        codex_runs_path=args.get("codex_runs_path"),
-        ctx_bindings_path=args.get("ctx_bindings_path"),
-        ontology_root=args.get("ontology_root"),
-        now=args.get("now"),
-        freshness_hours=args.get("freshness_hours"),
-        active_stale_hours=args.get("active_stale_hours"),
-        task_id=kw.get("task_id"),
-    ),
+    handler=_handle_self_improvement_evidence_gate,
 )
 
 registry.register(
     name="self_improvement_benchmark",
     toolset="self_improvement",
     schema=SELF_IMPROVEMENT_BENCHMARK_SCHEMA,
-    handler=lambda args, **kw: self_improvement_benchmark(
-        journal_path=args.get("journal_path"),
-        codex_runs_path=args.get("codex_runs_path"),
-        ctx_bindings_path=args.get("ctx_bindings_path"),
-        ontology_root=args.get("ontology_root"),
-        history_path=args.get("history_path"),
-        now=args.get("now"),
-        freshness_hours=args.get("freshness_hours"),
-        active_stale_hours=args.get("active_stale_hours"),
-        persist=args.get("persist"),
-        task_id=kw.get("task_id"),
-    ),
+    handler=_handle_self_improvement_benchmark,
 )
