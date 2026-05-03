@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from hermes_constants import get_hermes_home
 from typing import Optional, Dict, List, Any
+from hadto_patches.recurring_routines import inspect_routine_delivery_gate
 
 logger = logging.getLogger("cron.jobs")
 
@@ -521,6 +522,14 @@ def _inspect_ratchet_output(path: Path) -> Dict[str, Any]:
         "has_carry_forward": bool(categories["carry_forward"]),
         "signals": _ratchet_signal_labels(text),
     }
+
+
+def load_recent_job_responses(job_id: str, *, limit: int = RATCHET_WINDOW_RUNS) -> List[str]:
+    """Return recent saved response bodies for a cron job, oldest to newest."""
+    return [
+        _response_text(_read_bounded_output(path))
+        for path in _recent_output_files(job_id, limit=limit)
+    ]
 
 
 _FIRST_PROOF_POINT_INLINE_KEYS = {
@@ -2040,8 +2049,38 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
     value_surface_checks: List[Dict[str, Any]] = []
     attention_budget_checks: List[Dict[str, Any]] = []
     aggregate_stewardship_checks: List[Dict[str, Any]] = []
+    routine_delivery_gates: List[Dict[str, Any]] = []
     trust_contracts: List[Dict[str, Any]] = []
     for job in active_jobs:
+        routine_gate = inspect_routine_delivery_gate(
+            job,
+            load_recent_job_responses(str(job.get("id", "")), limit=RATCHET_WINDOW_RUNS),
+        )
+        if routine_gate["status"] != "not_applicable":
+            routine_delivery_gates.append(routine_gate)
+            if routine_gate["status"] in {
+                "suppressible_noise",
+                "productive_fallback_missing",
+                "durable_action_missing",
+                "missing",
+                "incomplete",
+            }:
+                issues.append(
+                    {
+                        "severity": "warning",
+                        "code": f"routine_delivery_gate_{routine_gate['status']}",
+                        "job_id": job["id"],
+                        "job_name": job.get("name", job["id"]),
+                        "routine_kind": routine_gate.get("routine_kind"),
+                        "fields": routine_gate.get("fields", {}),
+                        "message": (
+                            f"Routine delivery gate {routine_gate['status']} for recurring routine "
+                            f"'{job.get('name', job['id'])}' ({job['id']}): {routine_gate['message']} "
+                            "Suppress no-change Slack circulation and route blocked capacity to productive durable work."
+                        ),
+                    }
+                )
+
         if not should_check_persistence_ratchet(job):
             trust_contracts.append(inspect_trust_contract(job))
             continue
@@ -2217,6 +2256,17 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
                 1 for stewardship in aggregate_stewardship_checks
                 if stewardship["status"] not in {"insufficient_history", "populated"}
             ),
+            "routine_delivery_gate_checked": len(routine_delivery_gates),
+            "routine_delivery_gate_issue_count": sum(
+                1 for gate in routine_delivery_gates
+                if gate["status"] in {
+                    "suppressible_noise",
+                    "productive_fallback_missing",
+                    "durable_action_missing",
+                    "missing",
+                    "incomplete",
+                }
+            ),
             "trust_contract_checked": len(trust_contracts),
             "trust_contract_degraded_count": sum(
                 1 for contract in trust_contracts if contract.get("failed_commitment_visible")
@@ -2232,6 +2282,7 @@ def inspect_job_topology(include_disabled: bool = True) -> Dict[str, Any]:
         "value_surfaces": value_surface_checks,
         "attention_budget": attention_budget_checks,
         "aggregate_stewardship": aggregate_stewardship_checks,
+        "routine_delivery_gates": routine_delivery_gates,
         "aggregate_stewardship_summary": aggregate_stewardship_summary,
         "trust_contracts": trust_contracts,
         "issues": issues,

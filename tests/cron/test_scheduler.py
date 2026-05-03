@@ -7,7 +7,15 @@ from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
-from cron.scheduler import _resolve_origin, _resolve_delivery_target, _deliver_result, run_job, SILENT_MARKER, _build_job_prompt
+from cron.scheduler import (
+    _resolve_origin,
+    _resolve_delivery_target,
+    _deliver_result,
+    run_job,
+    SILENT_MARKER,
+    _build_job_prompt,
+    classify_cron_delivery,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -708,6 +716,101 @@ class TestSilentDelivery:
         save_mock.assert_called_once_with("monitor-job", "# full output")
         deliver_mock.assert_not_called()
 
+    def test_repeated_no_change_hadto_heartbeat_suppresses_delivery(self):
+        """A repeated no-worker/no-proof HAD-445-style heartbeat is Slack noise."""
+        job = {
+            "id": "6342b03b3de2",
+            "name": "hadto-hourly-heartbeat",
+            "deliver": "slack:C0APDPNRGVB",
+            "role": "report",
+            "scope": "global",
+            "schedule": {"kind": "cron", "expr": "0 * * * *"},
+        }
+        previous = "Heartbeat: active 0, selected HAD-445, stale 0, blocked 0, cron failures 0, next no-proof."
+        current = "Heartbeat: active 0, selected HAD-445, stale 0, blocked 0, cron failures 0, next no-proof."
+
+        with patch("cron.scheduler.get_due_jobs", return_value=[job]), \
+             patch("cron.scheduler.load_recent_job_responses", return_value=[previous]), \
+             patch("cron.scheduler.advance_next_run"), \
+             patch("cron.scheduler.run_job", return_value=(True, "# output", current, None)), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md") as save_mock, \
+             patch("cron.scheduler._deliver_result") as deliver_mock, \
+             patch("cron.scheduler.mark_job_run"):
+            from cron.scheduler import tick
+            tick(verbose=False)
+
+        save_mock.assert_called_once_with("6342b03b3de2", "# output")
+        deliver_mock.assert_not_called()
+
+    def test_heartbeat_material_trigger_delivers(self):
+        job = {
+            "id": "6342b03b3de2",
+            "name": "hadto-hourly-heartbeat",
+            "deliver": "slack:C0APDPNRGVB",
+            "role": "report",
+            "scope": "global",
+            "schedule": {"kind": "cron", "expr": "0 * * * *"},
+        }
+        current = (
+            "Routine Delivery Gate: Material Trigger=live worker count changed; Emit=yes; "
+            "Durable Artifact=codex_delegate run list; Circulation=Slack heartbeat; "
+            "Productive Fallback=implementation; Systematic Defect Action=none.\n"
+            "Heartbeat: active 1, selected HAD-445, stale 0, blocked 0, cron failures 0, next worker running."
+        )
+
+        with patch("cron.scheduler.get_due_jobs", return_value=[job]), \
+             patch("cron.scheduler.load_recent_job_responses", return_value=[]), \
+             patch("cron.scheduler.advance_next_run"), \
+             patch("cron.scheduler.run_job", return_value=(True, "# output", current, None)), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result") as deliver_mock, \
+             patch("cron.scheduler.mark_job_run"):
+            from cron.scheduler import tick
+            tick(verbose=False)
+
+        deliver_mock.assert_called_once()
+
+    def test_profile_interview_no_fresh_material_suppresses_delivery(self):
+        job = {
+            "id": "d683949c21a5",
+            "name": "operator-profile-interview-slack",
+            "deliver": "slack",
+            "role": "study",
+            "scope": "hermes",
+            "schedule": {"kind": "interval", "minutes": 60},
+        }
+        current = "Profile interview: no new packet. The reporting preference is already captured; same enforcement miss."
+
+        with patch("cron.scheduler.get_due_jobs", return_value=[job]), \
+             patch("cron.scheduler.load_recent_job_responses", return_value=[]), \
+             patch("cron.scheduler.advance_next_run"), \
+             patch("cron.scheduler.run_job", return_value=(True, "# output", current, None)), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result") as deliver_mock, \
+             patch("cron.scheduler.mark_job_run"):
+            from cron.scheduler import tick
+            tick(verbose=False)
+
+        deliver_mock.assert_not_called()
+
+    def test_classify_outreach_blocked_without_fallback_is_suppressed(self):
+        job = {
+            "id": "outreach",
+            "name": "hadto-outreach",
+            "deliver": "slack",
+            "role": "report",
+            "scope": "global",
+            "schedule": {"kind": "interval", "minutes": 60},
+            "prompt": "Run cold outreach when approval is available.",
+        }
+        decision = classify_cron_delivery(
+            job,
+            "Outreach remains blocked by approval/public-touch constraints, so I audited the policy again.",
+            previous_responses=[],
+        )
+        assert decision["suppress"] is True
+        assert decision["reason"] == "outreach_blocked_without_productive_fallback"
+
 
 class TestBuildJobPromptSilentHint:
     """Verify _build_job_prompt always injects [SILENT] guidance."""
@@ -796,6 +899,55 @@ class TestBuildJobPromptSilentHint:
         assert "Delegate=<delegated|denied|skipped reason=delegate_allowed|delegate_denied|de_novo_block|human_owned|already_undelegated|writeback_skipped>" in result
         assert "workspace-orchestrator:HAD-" in result
         assert "de_novo_block, human_owned, explicit_thread_override" in result
+
+    def test_hadto_heartbeat_injects_routine_delivery_gate(self):
+        job = {
+            "id": "6342b03b3de2",
+            "name": "hadto-hourly-heartbeat",
+            "prompt": "Post David's hourly Hadto heartbeat.",
+            "role": "report",
+            "scope": "global",
+            "deliver": "slack:C0APDPNRGVB",
+            "schedule": {"kind": "cron", "expr": "0 * * * *"},
+        }
+        result = _build_job_prompt(job)
+        assert "Recurring Routine Governance" in result
+        assert "Routine Delivery Gate" in result
+        assert "selected issue changed" in result
+        assert "A no-worker/no-proof/no-change heartbeat must be [SILENT]" in result
+        assert "Durable Artifact=<file/issue/PR/comment/state that compounds>" in result
+
+    def test_profile_interview_injects_fresh_material_silence_guard(self):
+        job = {
+            "id": "d683949c21a5",
+            "name": "operator-profile-interview-slack",
+            "prompt": "Run David's Slack-native operator-profile interview routine.",
+            "role": "study",
+            "scope": "hermes",
+            "deliver": "slack",
+            "schedule": {"kind": "interval", "minutes": 60},
+        }
+        result = _build_job_prompt(job)
+        assert "Profile-interview-specific rule" in result
+        assert "fresh material question or tagged answer" in result
+        assert "Do not report the same enforcement miss to Slack" in result
+
+    def test_outreach_blocked_injects_productive_fallback_lanes(self):
+        job = {
+            "id": "outreach",
+            "name": "hadto-outreach",
+            "prompt": "Cold outreach is blocked on David approval and public-touch constraints.",
+            "role": "report",
+            "scope": "global",
+            "deliver": "slack",
+            "schedule": {"kind": "interval", "minutes": 60},
+        }
+        result = _build_job_prompt(job)
+        assert "Outreach appears approval/public-touch blocked" in result
+        assert "vertical opportunity research" in result
+        assert "source discovery" in result
+        assert "ontology enrichment" in result
+        assert "lead research" in result
 
     def test_one_shot_job_does_not_inject_persistence_ratchet_guidance(self):
         job = {

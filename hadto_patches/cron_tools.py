@@ -194,6 +194,7 @@ def _format_topology(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "inactive_jobs": [_format_job(job) for job in snapshot.get("inactive_jobs", [])],
         "persistence_ratchets": snapshot.get("persistence_ratchets", []),
         "first_proof_points": snapshot.get("first_proof_points", []),
+        "routine_delivery_gates": snapshot.get("routine_delivery_gates", []),
         "trust_contracts": snapshot.get("trust_contracts", []),
         "issues": snapshot.get("issues", []),
     }
