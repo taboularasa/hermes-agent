@@ -15,6 +15,12 @@ from cron.scheduler import (
     SILENT_MARKER,
     _build_job_prompt,
     classify_cron_delivery,
+    sanitize_slack_cron_response,
+)
+from hadto_patches.recurring_routines import (
+    SLACK_CRON_MAX_REPORT_CHARS,
+    SLACK_CRON_MAX_REPORT_LINES,
+    SLACK_CRON_TRIM_NOTE,
 )
 
 
@@ -792,6 +798,163 @@ class TestSilentDelivery:
             tick(verbose=False)
 
         deliver_mock.assert_not_called()
+
+    def test_slack_self_audit_sections_stripped_before_delivery(self):
+        job = {
+            "id": "had-655",
+            "name": "hadto-governance-noise",
+            "deliver": "slack:C0APDPNRGVB",
+            "role": "coordinate",
+            "scope": "global",
+            "schedule": {"kind": "interval", "minutes": 60},
+        }
+        useful = "HAD-655: Slack cron delivery strips governance noise. Next: watch the next scheduled run."
+        noisy = (
+            f"{useful}\n\n"
+            "Trust Contract\n"
+            "Commitment=prove this run was useful\n"
+            "Artifact=cron/output/had-655\n"
+            "Verification=local audit\n"
+            "Outcome=kept\n\n"
+            "Persistence Ratchet\n"
+            "Evidence=same recurring audit text\n"
+            "Decisions=repeat the same governance frame\n"
+            "Artifacts=none\n"
+            "Carry-forward=repeat again\n\n"
+            "Coverage Completion\n"
+            "Evidence Coverage=operator attention consumed\n"
+            "Contradictions=none\n"
+            "Closure Basis=status restatement\n\n"
+            "Value Surfaces\n"
+            "Durable Store=none\n"
+            "Circulation=Slack post\n"
+            "Closure Rule=do not count chatter\n\n"
+            "Attention Budget\n"
+            "Attention Cost=high\n"
+            "Decision Value=low\n"
+            "Focus Effect=report spam\n\n"
+            "Aggregate Stewardship\n"
+            "Shared Provider Concentration=unchanged\n"
+            "Portfolio State=unchanged\n\n"
+            "First Proof Point\n"
+            "Seed Surface=Slack cron\n"
+            "Success Signal=short report\n\n"
+            "Geometry Shaping\n"
+            "Default Changed=none\n"
+            "Policy-vs-Path=restated doctrine"
+        )
+
+        with patch("cron.scheduler.get_due_jobs", return_value=[job]), \
+             patch("cron.scheduler.load_recent_job_responses", return_value=[]), \
+             patch("cron.scheduler.advance_next_run"), \
+             patch("cron.scheduler.run_job", return_value=(True, "# durable output", noisy, None)), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md") as save_mock, \
+             patch("cron.scheduler._deliver_result") as deliver_mock, \
+             patch("cron.scheduler.mark_job_run"):
+            from cron.scheduler import tick
+            tick(verbose=False)
+
+        save_mock.assert_called_once_with("had-655", "# durable output")
+        deliver_mock.assert_called_once_with(job, useful)
+
+    def test_slack_self_audit_only_suppresses_delivery(self):
+        job = {
+            "id": "had-655",
+            "name": "hadto-governance-noise",
+            "deliver": "slack:C0APDPNRGVB",
+            "role": "coordinate",
+            "scope": "global",
+            "schedule": {"kind": "interval", "minutes": 60},
+        }
+        governance_only = (
+            "Trust Contract\n"
+            "Commitment=repeat the control frame\n"
+            "Artifact=cron/output/had-655\n"
+            "Verification=self-audit\n\n"
+            "Attention Budget\n"
+            "Attention Cost=high\n"
+            "Decision Value=none\n"
+            "Focus Effect=low-yield alerting\n\n"
+            "Geometry Shaping\n"
+            "Default Changed=none\n"
+            "Policy-vs-Path=doctrine restated"
+        )
+
+        with patch("cron.scheduler.get_due_jobs", return_value=[job]), \
+             patch("cron.scheduler.load_recent_job_responses", return_value=[]), \
+             patch("cron.scheduler.advance_next_run"), \
+             patch("cron.scheduler.run_job", return_value=(True, "# durable output", governance_only, None)), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md") as save_mock, \
+             patch("cron.scheduler._deliver_result") as deliver_mock, \
+             patch("cron.scheduler.mark_job_run"):
+            from cron.scheduler import tick
+            tick(verbose=False)
+
+        save_mock.assert_called_once_with("had-655", "# durable output")
+        deliver_mock.assert_not_called()
+
+    def test_slack_cron_report_is_hard_capped(self):
+        job = {
+            "id": "had-655",
+            "name": "hadto-long-report",
+            "deliver": "slack:C0APDPNRGVB",
+            "role": "report",
+            "scope": "global",
+            "schedule": {"kind": "interval", "minutes": 60},
+        }
+        long_report = "Update: " + ("HAD-655 dispatch boundary verified. " * 80)
+
+        decision = sanitize_slack_cron_response(job, long_report)
+
+        assert decision["suppress"] is False
+        assert decision["capped"] is True
+        assert len(decision["content"]) <= SLACK_CRON_MAX_REPORT_CHARS
+        assert SLACK_CRON_TRIM_NOTE in decision["content"]
+
+    def test_slack_cron_report_shape_is_hard_capped(self):
+        job = {
+            "id": "had-655",
+            "name": "hadto-many-lines",
+            "deliver": "slack:C0APDPNRGVB",
+            "role": "report",
+            "scope": "global",
+            "schedule": {"kind": "interval", "minutes": 60},
+        }
+        many_lines = "\n".join(f"Update: HAD-655 dispatch line {i}" for i in range(30))
+
+        decision = sanitize_slack_cron_response(job, many_lines)
+
+        assert decision["suppress"] is False
+        assert decision["capped"] is True
+        assert len(decision["content"].splitlines()) <= SLACK_CRON_MAX_REPORT_LINES
+        assert SLACK_CRON_TRIM_NOTE in decision["content"]
+
+    def test_non_slack_delivery_keeps_original_governance_output(self):
+        job = {
+            "id": "had-655",
+            "name": "telegram-governance-output",
+            "deliver": "telegram:123",
+            "role": "coordinate",
+            "scope": "global",
+            "schedule": {"kind": "interval", "minutes": 60},
+        }
+        noisy = (
+            "HAD-655: Telegram delivery is not Slack-gated.\n\n"
+            "Trust Contract\n"
+            "Commitment=preserve non-Slack behavior"
+        )
+
+        with patch("cron.scheduler.get_due_jobs", return_value=[job]), \
+             patch("cron.scheduler.load_recent_job_responses", return_value=[]), \
+             patch("cron.scheduler.advance_next_run"), \
+             patch("cron.scheduler.run_job", return_value=(True, "# durable output", noisy, None)), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result") as deliver_mock, \
+             patch("cron.scheduler.mark_job_run"):
+            from cron.scheduler import tick
+            tick(verbose=False)
+
+        deliver_mock.assert_called_once_with(job, noisy)
 
     def test_classify_outreach_blocked_without_fallback_is_suppressed(self):
         job = {
