@@ -26,8 +26,10 @@ class SelfImprovementWorkItem:
 class PortfolioHealthSnapshot:
     """Health signals used by the capability-work budget gate."""
 
+    reliability_floor_healthy: bool = True
     maintenance_healthy: bool = True
     growth_healthy: bool = True
+    reliability_floor_reason: Optional[str] = None
     maintenance_reason: Optional[str] = None
     growth_reason: Optional[str] = None
 
@@ -59,6 +61,7 @@ class SelfImprovementPolicyDecision:
     kind: str
     active_lane_wip: int
     lane_wip_cap: int
+    reliability_floor_healthy: bool
     budget_rule_applies: bool
     budget_rule_passed: bool
     required_fields: list[str]
@@ -116,6 +119,8 @@ def evaluate_self_improvement_policy(
         reasons.append("self_improvement_verification_target_required")
     if active_lane_wip >= policy.max_active_per_lane:
         reasons.append("self_improvement_lane_wip_cap_reached")
+    if lane != "maintenance" and not health.reliability_floor_healthy:
+        reasons.append("self_improvement_reliability_floor_degraded")
 
     budget_rule_applies = _is_capability_lane(lane, policy)
     budget_rule_passed = True
@@ -130,6 +135,7 @@ def evaluate_self_improvement_policy(
         kind=kind,
         active_lane_wip=active_lane_wip,
         lane_wip_cap=policy.max_active_per_lane,
+        reliability_floor_healthy=health.reliability_floor_healthy,
         budget_rule_applies=budget_rule_applies,
         budget_rule_passed=budget_rule_passed,
         required_fields=required_fields,
@@ -145,11 +151,13 @@ def build_self_improvement_writeback_contract(
     cap_names = ", ".join(policy.capability_lane_names)
     return (
         "Any Hermes-created self-improvement issue or project must satisfy all of these hard guardrails before writeback: "
-        "1) include at least one concrete Evidence Source, "
-        "2) include one explicit Verification Target, "
-        "3) include the target Lane, "
-        f"4) do not create or expand work when that lane already has {policy.max_active_per_lane} active Hermes-owned self-improvement item(s), and "
-        f"5) treat lane(s) [{cap_names}] as capability-budgeted work that may be created only when maintenance and growth are both healthy. "
+        "1) apply the reward hierarchy reliability floor > epoch objective > capability investment, "
+        "2) include at least one concrete Evidence Source, "
+        "3) include one explicit Verification Target, "
+        "4) include the target Lane, "
+        f"5) do not create or expand work when that lane already has {policy.max_active_per_lane} active Hermes-owned self-improvement item(s), "
+        "6) allow only Maintenance work while the reliability floor is degraded, and "
+        f"7) treat lane(s) [{cap_names}] as capability-budgeted work that may be created only when maintenance and growth are both healthy. "
         "If any guardrail fails, do not create the issue/project; instead report the blocking reason and preserve the evidence in the current durable artifact."
     )
 
@@ -174,6 +182,8 @@ def render_self_improvement_metadata(
             f"- Evidence Sources: {', '.join(evidence) if evidence else '[missing]'}",
             f"- Verification Target: {verification_target}",
             f"- Lane WIP: {policy_decision.active_lane_wip}/{policy_decision.lane_wip_cap}",
+            f"- Reliability Floor: {'healthy' if policy_decision.reliability_floor_healthy else 'degraded'}",
+            "- Reward Hierarchy: reliability_floor > epoch_objective > capability_investment",
             f"- Budget Rule: {budget_line}",
         ]
     )
