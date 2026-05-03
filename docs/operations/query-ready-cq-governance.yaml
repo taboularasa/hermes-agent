@@ -1,0 +1,83 @@
+query_ready_cq_governance:
+  version: v1
+  contract_id: prefer-query-ready-competency-question-contracts
+  capability_ids:
+    - capability.ontology.authoring_governance
+  gap_ids:
+    - gap.ontology.implicit_authoring_governance
+  benchmark_ref: benchmark:capability:prefer-query-ready-competency-question-contracts
+  source_issue_refs:
+    - HAD-342
+    - ONT-010
+  target_surface: Hermes ontology planning, prompt-building, and self-improvement prompts
+  hermes_surface:
+    citation_path: docs/operations/query-ready-cq-governance.yaml
+    prompt_helper: agent/ontology_cq_governance.py::build_query_ready_cq_governance_prompt
+    completion_gate: agent/ontology_cq_governance.py::evaluate_query_ready_cq_completion
+    runtime_injection: hadto_patches/agent_runner.py::run_conversation
+  ontology_guidance_sources:
+    canonical_contract:
+      repo: smb-ontology-platform
+      branch: hygiene/preserve-root-dirty-20260419T0138Z-cq-authoring-provider-coverage
+      commit: 73f2277
+      path: docs/operations/cq-authoring-contract.yaml
+    canonical_runbook:
+      repo: smb-ontology-platform
+      branch: hygiene/preserve-root-dirty-20260419T0138Z-cq-authoring-provider-coverage
+      commit: 73f2277
+      path: docs/operations/cq-authoring-runbook.md
+    provider_coverage:
+      repo: smb-ontology-platform
+      branch: hygiene/preserve-root-dirty-20260419T0138Z-cq-authoring-provider-coverage
+      commit: 73f2277
+      path: docs/operations/ontology-research-provider-coverage.yaml
+  policy:
+    free_form_cqs_are_incomplete: true
+    require_supported_template_before_commit: true
+    require_query_contract_before_commit: true
+    point_back_to_ontology_guidance_surfaces: true
+  supported_template_ids:
+    - field_value_lookup
+    - related_entity_lookup
+    - subclass_enumeration
+  supported_templates:
+    - template_id: field_value_lookup
+      template_category: retrieval
+      query_family: path_lookup
+      prompt_form: What is the {field} of a {entity}?
+    - template_id: related_entity_lookup
+      template_category: retrieval
+      query_family: path_lookup
+      prompt_form: Which {related_entity} is associated with a {entity}?
+    - template_id: subclass_enumeration
+      template_category: retrieval
+      query_family: subclass_lookup
+      prompt_form: What types of {parent_class} exist?
+  query_ready_minimum:
+    required_cq_fields:
+      - template_id
+      - template_category
+      - query_contract
+    required_query_contract_fields:
+      - query_family
+      - focus_entity
+      - projection
+      - path_pattern
+      - executable_forms
+    required_executable_forms:
+      - dl
+      - sparql
+  review_rules:
+    - id: cq-template-boundary
+      rule: Treat every free-form competency question as incomplete until it is rewritten into one supported template family.
+      citation: docs/operations/query-ready-cq-governance.yaml
+      ontology_source: docs/operations/cq-authoring-contract.yaml
+    - id: cq-query-contract-boundary
+      rule: Treat template/category metadata as incomplete unless query_contract preserves query_family, focus_entity, projection, path_pattern, and executable DL/SPARQL forms.
+      citation: docs/operations/query-ready-cq-governance.yaml
+      ontology_source: docs/operations/cq-authoring-contract.yaml
+    - id: cq-runbook-boundary
+      rule: When Hermes needs more detail than the mirrored contract provides, it should cite ontology-side runbook guidance instead of inventing a free-form CQ artifact.
+      citation: docs/operations/query-ready-cq-governance.yaml
+      ontology_source: docs/operations/cq-authoring-runbook.md
+  verification_target: Future Hermes ontology planning or self-improvement prompts can cite this contract directly when checking that free-form competency questions are not treated as durable CQ artifacts until template-backed and query-ready.

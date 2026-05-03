@@ -95,6 +95,10 @@ from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY, PLATFORM_HINTS,
     MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE, SKILLS_GUIDANCE,
 )
+from agent.ontology_cq_governance import (
+    build_query_ready_cq_governance_prompt,
+    should_apply_query_ready_cq_governance,
+)
 from agent.model_metadata import (
     fetch_model_metadata,
     estimate_tokens_rough, estimate_messages_tokens_rough, estimate_request_tokens_rough,
@@ -7760,6 +7764,15 @@ class AIAgent:
         # that will be appended to the ephemeral system prompt for every
         # API call in this turn (not persisted to session DB or cache).
         _plugin_turn_context = ""
+        _query_ready_cq_turn_context = ""
+        try:
+            _context_cwd = get_task_cwd(self.session_id, None)
+            if should_apply_query_ready_cq_governance(original_user_message):
+                _query_ready_cq_turn_context = build_query_ready_cq_governance_prompt(
+                    cwd=_context_cwd
+                )
+        except Exception as exc:
+            logger.debug("query-ready CQ governance prompt build failed: %s", exc)
         try:
             from hermes_cli.plugins import invoke_hook as _invoke_hook
             _pre_results = _invoke_hook(
@@ -7888,6 +7901,10 @@ class AIAgent:
             effective_system = active_system_prompt or ""
             if self.ephemeral_system_prompt:
                 effective_system = (effective_system + "\n\n" + self.ephemeral_system_prompt).strip()
+            if _query_ready_cq_turn_context:
+                effective_system = (
+                    effective_system + "\n\n" + _query_ready_cq_turn_context
+                ).strip()
             # Plugin context from pre_llm_call hooks — ephemeral, not cached.
             if _plugin_turn_context:
                 effective_system = (effective_system + "\n\n" + _plugin_turn_context).strip()
