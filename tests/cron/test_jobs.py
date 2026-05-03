@@ -29,9 +29,11 @@ from cron.jobs import (
     inspect_value_surfaces,
     inspect_attention_budget,
     inspect_aggregate_stewardship,
+    inspect_routine_delivery_gate,
     inspect_trust_contract,
     save_job_output,
 )
+from hadto_patches.recurring_routines import productive_fallback_selection
 
 
 # =========================================================================
@@ -1101,6 +1103,48 @@ Geometry Shaping:
         evidence = issue["compact_evidence"]
         assert issue["ratchet_status"] == "drift"
         assert evidence["repeated_signals"] == ["cleanup_drift", "repeated_rediscovery"]
+
+    def test_routine_delivery_gate_warns_on_repeated_hadto_heartbeat_noise(self, tmp_cron_dir):
+        job = create_job(
+            prompt="You are Hermes posting David's hourly Hadto heartbeat.",
+            schedule="every 1h",
+            name="hadto-hourly-heartbeat",
+            role="report",
+            scope="global",
+            deliver="slack:C0APDPNRGVB",
+        )
+        heartbeat = "Heartbeat: active 0, selected HAD-445, stale 0, blocked 0, cron failures 0, next no-proof."
+        self._write_output(job["id"], "2026-04-21_10-00-00.md", heartbeat)
+        self._write_output(job["id"], "2026-04-21_11-00-00.md", heartbeat)
+
+        gate = inspect_routine_delivery_gate(get_job(job["id"]), [heartbeat, heartbeat])
+        snapshot = inspect_job_topology(include_disabled=True)
+
+        issue = next(issue for issue in snapshot["issues"] if issue["code"] == "routine_delivery_gate_suppressible_noise")
+        assert gate["status"] == "suppressible_noise"
+        assert gate["decision_reason"] == "heartbeat_no_change_no_worker"
+        assert issue["job_id"] == job["id"]
+        assert snapshot["summary"]["routine_delivery_gate_checked"] == 1
+        assert snapshot["summary"]["routine_delivery_gate_issue_count"] == 1
+
+    def test_productive_fallback_selected_when_outreach_is_approval_blocked(self):
+        job = {
+            "name": "hadto-outreach-surplus",
+            "prompt": "Cold outreach is blocked by David approval and public-touch constraints; avoid self-audit.",
+            "schedule": {"kind": "interval", "minutes": 60},
+            "role": "report",
+            "scope": "global",
+            "deliver": "slack",
+        }
+
+        fallback = productive_fallback_selection(job)
+
+        assert fallback["outreach_blocked"] is True
+        assert fallback["selected"] == "vertical opportunity research"
+        assert "source discovery" in fallback["lanes"]
+        assert "book-study continuation" in fallback["lanes"]
+        assert "ontology enrichment" in fallback["lanes"]
+        assert "implementation" in fallback["lanes"]
 
 
 class TestSaveJobOutput:

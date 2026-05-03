@@ -41,9 +41,14 @@ from cron.jobs import (
     RATCHET_WINDOW_RUNS,
     advance_next_run,
     get_due_jobs,
+    load_recent_job_responses,
     mark_job_run,
     save_job_output,
     should_check_persistence_ratchet,
+)
+from hadto_patches.recurring_routines import (
+    build_routine_governance_prompt_prefix,
+    classify_cron_delivery,
 )
 
 # Sentinel: when a cron agent has nothing new to report, it can start its
@@ -577,8 +582,10 @@ def _build_job_prompt(job: dict) -> str:
     attention_budget_prefix = _build_attention_budget_prompt_prefix(job)
     aggregate_stewardship_prefix = _build_aggregate_stewardship_prompt_prefix(job)
     ownership_audit_prefix = _build_ownership_audit_prompt_prefix(job)
+    routine_governance_prefix = build_routine_governance_prompt_prefix(job)
     prompt = (
         silent_hint
+        + (routine_governance_prefix + "\n\n" if routine_governance_prefix else "")
         + (role_prefix + "\n\n" if role_prefix else "")
         + (ratchet_prefix + "\n\n" if ratchet_prefix else "")
         + (trust_prefix + "\n\n" if trust_prefix else "")
@@ -966,22 +973,34 @@ def tick(verbose: bool = True) -> int:
                 # next future occurrence BEFORE execution.  This way, if the
                 # process crashes mid-run, the job won't re-fire on restart.
                 # One-shot jobs are left alone so they can retry on restart.
+                previous_responses = load_recent_job_responses(job["id"], limit=RATCHET_WINDOW_RUNS)
                 advance_next_run(job["id"])
 
                 success, output, final_response, error = run_job(job)
 
+                # Decide delivery before saving the new output so no-change
+                # gates compare against prior runs only. Output is still saved
+                # locally below, even when delivery is suppressed.
+                deliver_content = final_response if success else f"⚠️ Cron job '{job.get('name', job['id'])}' failed:\n{error}"
+                should_deliver = bool(deliver_content)
+                if should_deliver and success:
+                    delivery_decision = classify_cron_delivery(
+                        job,
+                        deliver_content,
+                        previous_responses=previous_responses,
+                        now=_hermes_now(),
+                    )
+                    if delivery_decision.get("suppress"):
+                        logger.info(
+                            "Job '%s': %s — skipping delivery",
+                            job["id"],
+                            delivery_decision.get("message", "delivery suppressed"),
+                        )
+                        should_deliver = False
+
                 output_file = save_job_output(job["id"], output)
                 if verbose:
                     logger.info("Output saved to: %s", output_file)
-
-                # Deliver the final response to the origin/target chat.
-                # If the agent responded with [SILENT], skip delivery (but
-                # output is already saved above).  Failed jobs always deliver.
-                deliver_content = final_response if success else f"⚠️ Cron job '{job.get('name', job['id'])}' failed:\n{error}"
-                should_deliver = bool(deliver_content)
-                if should_deliver and success and deliver_content.strip().upper().startswith(SILENT_MARKER):
-                    logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
-                    should_deliver = False
 
                 if should_deliver:
                     try:

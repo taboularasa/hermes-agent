@@ -220,6 +220,24 @@ def cron_topology(show_all: bool = False):
         print(f"    Portfolio: {portfolio}")
         print()
 
+    routine_gates = snapshot.get("routine_delivery_gates", [])
+    if routine_gates:
+        print(color("  Routine Delivery Gates", Colors.YELLOW))
+        for gate in routine_gates:
+            fields = gate.get("fields") or {}
+            print(
+                f"    - {gate.get('name', gate.get('job_id'))} "
+                f"({str(gate.get('job_id', '?'))[:8]}): "
+                f"{gate.get('status')} / {gate.get('routine_kind', '-')}"
+            )
+            if fields:
+                print(f"      Trigger: {fields.get('material_trigger', '-')}")
+                print(f"      Durable: {fields.get('durable_artifact', '-')}")
+                print(f"      Fallback: {fields.get('productive_fallback', '-')}")
+            else:
+                print(f"      {gate.get('message', '-')}")
+        print()
+
     trust_contracts = snapshot.get("trust_contracts", [])
     if trust_contracts:
         print(color("  Trust Contracts", Colors.YELLOW))
