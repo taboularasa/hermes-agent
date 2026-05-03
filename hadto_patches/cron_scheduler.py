@@ -102,6 +102,54 @@ def _build_role_prompt_prefix(job: dict) -> str:
     )
 
 
+def _build_control_mode_prompt_prefix(job: dict) -> str:
+    """Return recurring-loop control-surface guidance when a control mode is set."""
+    control_mode = str(job.get("control_mode") or "").strip().lower()
+    if not control_mode:
+        return ""
+
+    bridge_conditions = [
+        str(item).strip()
+        for item in (job.get("bridge_conditions") or [])
+        if str(item).strip()
+    ]
+    bridge_text = (
+        " Bridge conditions: " + "; ".join(bridge_conditions) + "."
+        if bridge_conditions
+        else ""
+    )
+
+    base = (
+        "[SYSTEM: Recurring-loop control contract: keep discovery, bridge, and execution distinct. "
+        f"This run is explicitly operating in control_mode={control_mode}."
+    )
+    if control_mode == "discovery":
+        return (
+            base
+            + " Discovery mode means scan, compare, gather alternatives, identify contradictions, and preserve multiple candidate paths before narrowing to one. "
+            + "Do not silently collapse explored options into a single committed plan. In the final report, state what was explored, which alternatives remain open, and what evidence would justify promotion into bridge or execution mode."
+            + bridge_text
+            + "]"
+        )
+    if control_mode == "bridge":
+        return (
+            base
+            + " Bridge mode means evaluate whether discovery evidence is strong enough to promote one candidate into execution. "
+            + "Make the threshold explicit: state what was explored, what was chosen for promotion, what evidence justifies the choice, and what remains unproven."
+            + bridge_text
+            + "]"
+        )
+    if control_mode == "execution":
+        return (
+            base
+            + " Execution mode means commit to one path, spend resources on that path, verify concrete outcomes, and report what was chosen versus what was merely explored earlier. "
+            + "Do not reopen broad discovery unless new contradiction evidence forces it."
+            + bridge_text
+            + "]"
+        )
+    return ""
+
+
 def _build_persistence_ratchet_prompt_prefix(job: dict) -> str:
     """Return recurring-loop guidance for preserving useful state across runs."""
     if not should_check_persistence_ratchet(job):
@@ -575,6 +623,7 @@ def _build_job_prompt(job: dict) -> str:
         "findings normally, or say [SILENT] and nothing more.]\n\n"
     )
     role_prefix = _build_role_prompt_prefix(job)
+    control_mode_prefix = _build_control_mode_prompt_prefix(job)
     ratchet_prefix = _build_persistence_ratchet_prompt_prefix(job)
     trust_prefix = _build_trust_contract_prompt_prefix(job)
     coverage_prefix = _build_coverage_completion_prompt_prefix(job)
@@ -587,6 +636,7 @@ def _build_job_prompt(job: dict) -> str:
         silent_hint
         + (routine_governance_prefix + "\n\n" if routine_governance_prefix else "")
         + (role_prefix + "\n\n" if role_prefix else "")
+        + (control_mode_prefix + "\n\n" if control_mode_prefix else "")
         + (ratchet_prefix + "\n\n" if ratchet_prefix else "")
         + (trust_prefix + "\n\n" if trust_prefix else "")
         + (coverage_prefix + "\n\n" if coverage_prefix else "")
