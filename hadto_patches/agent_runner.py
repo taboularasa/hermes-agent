@@ -986,11 +986,11 @@ class AIAgent:
             if api_key or base_url:
                 # Explicit credentials from CLI/gateway — construct directly.
                 # The runtime provider resolver already handled auth for us.
-                client_kwargs = {"api_key": api_key or "", "base_url": base_url or self.base_url}
+                effective_base = base_url or self.base_url
+                client_kwargs = {"api_key": api_key or "", "base_url": effective_base}
                 if self.provider == "copilot-acp":
                     client_kwargs["command"] = self.acp_command
                     client_kwargs["args"] = self.acp_args
-                effective_base = base_url or self.base_url
                 if "openrouter" in effective_base.lower():
                     client_kwargs["default_headers"] = {
                         "HTTP-Referer": "https://hermes-agent.nousresearch.com",
