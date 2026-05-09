@@ -113,6 +113,68 @@ def test_web_extract_passes_firecrawl_scrape_kwargs_without_live_api():
     }
 
 
+def test_web_extract_returns_requested_links_images_and_screenshot_content():
+    from tools.web_tools import web_extract_tool
+
+    for requested_format, payload, expected in [
+        ("links", {"links": ["https://example.com/a", "https://example.com/b"]}, "https://example.com/a"),
+        ("images", {"images": [{"url": "https://example.com/image.png", "alt": "Example"}]}, "image.png"),
+        ("screenshot", {"screenshot": "data:image/png;base64,AAAA"}, "[BASE64_IMAGE_REMOVED]"),
+    ]:
+        client = MagicMock()
+        client.scrape.return_value = {
+            **payload,
+            "metadata": {"sourceURL": "https://example.com", "title": "Example"},
+        }
+
+        with patch("tools.web_tools._get_backend", return_value="firecrawl"), \
+             patch("tools.web_tools._get_firecrawl_client", return_value=client), \
+             patch("tools.web_tools.is_safe_url", return_value=True), \
+             patch("tools.web_tools.check_website_access", return_value=None), \
+             patch("tools.interrupt.is_interrupted", return_value=False):
+            result = json.loads(_run(web_extract_tool(
+                ["https://example.com"],
+                format=requested_format,
+                use_llm_processing=False,
+            )))
+
+        content = result["results"][0]["content"]
+        assert f"Firecrawl {requested_format}" in content
+        assert expected in content
+        assert client.scrape.call_args.kwargs["formats"] == [requested_format]
+
+
+def test_web_crawl_returns_requested_nested_links_content():
+    client = MagicMock()
+    client.crawl.return_value = SimpleNamespace(
+        status="completed",
+        data=[
+            {
+                "links": ["https://example.com/docs/api"],
+                "metadata": {"sourceURL": "https://example.com/docs", "title": "Docs"},
+            }
+        ],
+    )
+
+    with patch("tools.web_tools._get_backend", return_value="firecrawl"), \
+         patch.dict("os.environ", {"FIRECRAWL_API_KEY": "fc-test"}), \
+         patch("tools.web_tools._get_firecrawl_client", return_value=client), \
+         patch("tools.web_tools.is_safe_url", return_value=True), \
+         patch("tools.web_tools.check_website_access", return_value=None), \
+         patch("tools.interrupt.is_interrupted", return_value=False):
+        from tools.web_tools import web_crawl_tool
+
+        result = json.loads(_run(web_crawl_tool(
+            "https://example.com",
+            scrape_options={"format": "links"},
+            use_llm_processing=False,
+        )))
+
+    assert "Firecrawl links" in result["results"][0]["content"]
+    assert "https://example.com/docs/api" in result["results"][0]["content"]
+    assert client.crawl.call_args.kwargs["scrape_options"] == {"formats": ["links"]}
+
+
 def test_build_firecrawl_crawl_kwargs_uses_prompt_and_safe_options():
     from tools.web_tools import _build_firecrawl_crawl_kwargs
 

@@ -254,6 +254,62 @@ def _build_firecrawl_formats(
     return _unique_in_order(normalized)
 
 
+
+
+def _get_firecrawl_result_value(obj: Any, *names: str) -> Any:
+    """Read a Firecrawl response field from dicts or SDK objects."""
+    if obj is None:
+        return None
+    if hasattr(obj, "model_dump"):
+        try:
+            obj = obj.model_dump()
+        except Exception:
+            pass
+    for name in names:
+        if isinstance(obj, dict) and name in obj:
+            return obj.get(name)
+        if hasattr(obj, name):
+            return getattr(obj, name)
+    return None
+
+
+def _compact_firecrawl_aux_content(format_name: str, value: Any) -> str:
+    """Serialize non-text Firecrawl formats into compact, safe text content."""
+    if value in (None, "", [], {}):
+        return ""
+    if isinstance(value, str):
+        return clean_base64_images(f"## Firecrawl {format_name}\n\n{value}")
+    try:
+        serialized = json.dumps(value, ensure_ascii=False, indent=2)
+    except TypeError:
+        serialized = json.dumps(str(value), ensure_ascii=False)
+    return clean_base64_images(f"## Firecrawl {format_name}\n\n```json\n{serialized}\n```")
+
+
+def _choose_firecrawl_content(content_by_format: Dict[str, Any], preferred_formats: List[str]) -> str:
+    """Pick requested Firecrawl content, including compact non-text formats."""
+    if not preferred_formats:
+        preferred_formats = ["markdown", "html"]
+    for preferred in preferred_formats:
+        value = content_by_format.get(preferred)
+        if not value:
+            continue
+        if preferred in {"links", "images", "screenshot"}:
+            compact = _compact_firecrawl_aux_content(preferred, value)
+            if compact:
+                return compact
+        elif isinstance(value, str):
+            return value
+        else:
+            compact = _compact_firecrawl_aux_content(preferred, value)
+            if compact:
+                return compact
+    for fallback in ("markdown", "html", "rawHtml", "summary", "links", "images", "screenshot"):
+        value = content_by_format.get(fallback)
+        if value:
+            return _compact_firecrawl_aux_content(fallback, value) if fallback in {"links", "images", "screenshot"} else value
+    return ""
+
 def _sanitize_firecrawl_actions(actions: Any) -> List[Dict[str, Any]]:
     """Allow low-risk browser setup actions, but not text entry, JS, or PDF generation."""
     if not isinstance(actions, list):
@@ -1732,6 +1788,9 @@ async def web_extract_tool(
                         content_html = None
                         content_raw_html = None
                         content_summary = None
+                        content_links = None
+                        content_images = None
+                        content_screenshot = None
 
                         # Extract data from the scrape result
                         if hasattr(scrape_result, 'model_dump'):
@@ -1741,6 +1800,9 @@ async def web_extract_tool(
                             content_html = result_dict.get('html')
                             content_raw_html = result_dict.get('rawHtml') or result_dict.get('raw_html')
                             content_summary = result_dict.get('summary')
+                            content_links = result_dict.get('links')
+                            content_images = result_dict.get('images')
+                            content_screenshot = result_dict.get('screenshot')
                             metadata = result_dict.get('metadata', {})
                         elif hasattr(scrape_result, '__dict__'):
                             # Regular object with attributes
@@ -1748,6 +1810,9 @@ async def web_extract_tool(
                             content_html = getattr(scrape_result, 'html', None)
                             content_raw_html = getattr(scrape_result, 'rawHtml', None) or getattr(scrape_result, 'raw_html', None)
                             content_summary = getattr(scrape_result, 'summary', None)
+                            content_links = getattr(scrape_result, 'links', None)
+                            content_images = getattr(scrape_result, 'images', None)
+                            content_screenshot = getattr(scrape_result, 'screenshot', None)
 
                             # Handle metadata - convert to dict if it's an object
                             metadata_obj = getattr(scrape_result, 'metadata', {})
@@ -1765,6 +1830,9 @@ async def web_extract_tool(
                             content_html = scrape_result.get('html')
                             content_raw_html = scrape_result.get('rawHtml') or scrape_result.get('raw_html')
                             content_summary = scrape_result.get('summary')
+                            content_links = scrape_result.get('links')
+                            content_images = scrape_result.get('images')
+                            content_screenshot = scrape_result.get('screenshot')
                             metadata = scrape_result.get('metadata', {})
 
                         # Ensure metadata is a dict (not an object)
@@ -1800,14 +1868,11 @@ async def web_extract_tool(
                             "html": content_html,
                             "rawHtml": content_raw_html,
                             "summary": content_summary,
+                            "links": content_links,
+                            "images": content_images,
+                            "screenshot": content_screenshot,
                         }
-                        chosen_content = ""
-                        for preferred in preferred_formats:
-                            if content_by_format.get(preferred):
-                                chosen_content = content_by_format[preferred]
-                                break
-                        if not chosen_content:
-                            chosen_content = content_markdown or content_html or content_raw_html or content_summary or ""
+                        chosen_content = _choose_firecrawl_content(content_by_format, preferred_formats)
 
                         results.append({
                             "url": final_url,
@@ -2207,6 +2272,11 @@ async def web_crawl_tool(
             title = ""
             content_markdown = None
             content_html = None
+            content_raw_html = None
+            content_summary = None
+            content_links = None
+            content_images = None
+            content_screenshot = None
             metadata = {}
             
             # Extract data from the item
@@ -2215,11 +2285,21 @@ async def web_crawl_tool(
                 item_dict = item.model_dump()
                 content_markdown = item_dict.get('markdown')
                 content_html = item_dict.get('html')
+                content_raw_html = item_dict.get('rawHtml') or item_dict.get('raw_html')
+                content_summary = item_dict.get('summary')
+                content_links = item_dict.get('links')
+                content_images = item_dict.get('images')
+                content_screenshot = item_dict.get('screenshot')
                 metadata = item_dict.get('metadata', {})
             elif hasattr(item, '__dict__'):
                 # Regular object with attributes
                 content_markdown = getattr(item, 'markdown', None)
                 content_html = getattr(item, 'html', None)
+                content_raw_html = getattr(item, 'rawHtml', None) or getattr(item, 'raw_html', None)
+                content_summary = getattr(item, 'summary', None)
+                content_links = getattr(item, 'links', None)
+                content_images = getattr(item, 'images', None)
+                content_screenshot = getattr(item, 'screenshot', None)
                 
                 # Handle metadata - convert to dict if it's an object
                 metadata_obj = getattr(item, 'metadata', {})
@@ -2235,6 +2315,11 @@ async def web_crawl_tool(
                 # Already a dictionary
                 content_markdown = item.get('markdown')
                 content_html = item.get('html')
+                content_raw_html = item.get('rawHtml') or item.get('raw_html')
+                content_summary = item.get('summary')
+                content_links = item.get('links')
+                content_images = item.get('images')
+                content_screenshot = item.get('screenshot')
                 metadata = item.get('metadata', {})
             
             # Ensure metadata is a dict (not an object)
@@ -2261,8 +2346,19 @@ async def web_crawl_tool(
                 })
                 continue
 
-            # Choose content (prefer markdown)
-            content = content_markdown or content_html or ""
+            # Choose content based on nested scrape options, falling back to markdown.
+            crawl_preferred_formats = []
+            if isinstance(crawl_params.get("scrape_options"), dict):
+                crawl_preferred_formats = crawl_params["scrape_options"].get("formats", []) or []
+            content = _choose_firecrawl_content({
+                "markdown": content_markdown,
+                "html": content_html,
+                "rawHtml": content_raw_html,
+                "summary": content_summary,
+                "links": content_links,
+                "images": content_images,
+                "screenshot": content_screenshot,
+            }, crawl_preferred_formats)
             
             pages.append({
                 "url": page_url,
