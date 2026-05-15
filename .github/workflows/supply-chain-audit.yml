@@ -28,7 +28,7 @@ permissions:
 
 jobs:
   scan:
-    name: Scan PR for critical supply chain risks
+    name: Scan PR for supply chain risks
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
