@@ -1,4 +1,3 @@
-# HADTO-PATCH: security
 """Regex-based secret redaction for logs and tool output.
 
 Applies pattern matching to mask API keys, tokens, and credentials
@@ -14,9 +13,58 @@ import re
 
 logger = logging.getLogger(__name__)
 
+# Sensitive query-string parameter names (case-insensitive exact match).
+# Ported from nearai/ironclaw#2529 — catches tokens whose values don't match
+# any known vendor prefix regex (e.g. opaque tokens, short OAuth codes).
+_SENSITIVE_QUERY_PARAMS = frozenset({
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "token",
+    "api_key",
+    "apikey",
+    "client_secret",
+    "password",
+    "auth",
+    "jwt",
+    "session",
+    "secret",
+    "key",
+    "code",           # OAuth authorization codes
+    "signature",      # pre-signed URL signatures
+    "x-amz-signature",
+})
+
+# Sensitive form-urlencoded / JSON body key names (case-insensitive exact match).
+# Exact match, NOT substring — "token_count" and "session_id" must NOT match.
+# Ported from nearai/ironclaw#2529.
+_SENSITIVE_BODY_KEYS = frozenset({
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "token",
+    "api_key",
+    "apikey",
+    "client_secret",
+    "password",
+    "auth",
+    "jwt",
+    "secret",
+    "private_key",
+    "authorization",
+    "key",
+})
+
 # Snapshot at import time so runtime env mutations (e.g. LLM-generated
-# `export HERMES_REDACT_SECRETS=false`) cannot disable redaction mid-session.
-_REDACT_ENABLED = os.getenv("HERMES_REDACT_SECRETS", "").lower() not in ("0", "false", "no", "off")
+# `export HERMES_REDACT_SECRETS=false`) cannot disable redaction
+# mid-session.  ON by default — secure default per issue #17691. Users who
+# need raw credential values in tool output (e.g. working on the redactor
+# itself) can opt out via `security.redact_secrets: false` in config.yaml
+# (bridged to this env var in hermes_cli/main.py, gateway/run.py, and
+# cli.py) or `HERMES_REDACT_SECRETS=false` in ~/.hermes/.env. An opt-out
+# warning is logged at gateway and CLI startup so operators see the
+# downgrade — see `_log_redaction_status()` in gateway/run.py and cli.py.
+_REDACT_ENABLED = os.getenv("HERMES_REDACT_SECRETS", "true").lower() in {"1", "true", "yes", "on"}
 
 # Known API key prefixes -- match the prefix + contiguous token chars
 _PREFIX_PATTERNS = [
@@ -105,79 +153,198 @@ _JWT_RE = re.compile(
 # Snowflake IDs are 17-20 digit integers that resolve to specific Discord accounts.
 _DISCORD_MENTION_RE = re.compile(r"<@!?(\d{17,20})>")
 
-# Generic long hex secrets in assignment context (40+ hex chars)
-_GENERIC_HEX_SECRET_RE = re.compile(
-    r'(?:token|secret|key|password|credential)[\s]*[=:]\s*["\']?([a-fA-F0-9]{40,})["\']?',
-    re.IGNORECASE,
-)
-
-# AWS Access Key ID (critical credential)
-_AWS_KEY_RE = re.compile(r"(?<![A-Za-z0-9_-])AKIA[A-Z0-9]{16}(?![A-Za-z0-9_-])")
-
 # E.164 phone numbers: +<country><number>, 7-15 digits
 # Negative lookahead prevents matching hex strings or identifiers
 _SIGNAL_PHONE_RE = re.compile(r"(\+[1-9]\d{6,14})(?![A-Za-z0-9])")
+
+# URLs containing query strings — matches `scheme://...?...[# or end]`.
+# Used to scan text for URLs whose query params may contain secrets.
+# Ported from nearai/ironclaw#2529.
+_URL_WITH_QUERY_RE = re.compile(
+    r"(https?|wss?|ftp)://"          # scheme
+    r"([^\s/?#]+)"                    # authority (may include userinfo)
+    r"([^\s?#]*)"                     # path
+    r"\?([^\s#]+)"                    # query (required)
+    r"(#\S*)?",                       # optional fragment
+)
+
+# URLs containing userinfo — `scheme://user:password@host` for ANY scheme
+# (not just DB protocols already covered by _DB_CONNSTR_RE above).
+# Catches things like `https://user:token@api.example.com/v1/foo`.
+_URL_USERINFO_RE = re.compile(
+    r"(https?|wss?|ftp)://([^/\s:@]+):([^/\s@]+)@",
+)
+
+# Form-urlencoded body detection: conservative — only applies when the entire
+# text looks like a query string (k=v&k=v pattern with no newlines).
+_FORM_BODY_RE = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_.-]*=[^&\s]*(?:&[A-Za-z_][A-Za-z0-9_.-]*=[^&\s]*)+$"
+)
 
 # Compile known prefix patterns into one alternation
 _PREFIX_RE = re.compile(
     r"(?<![A-Za-z0-9_-])(" + "|".join(_PREFIX_PATTERNS) + r")(?![A-Za-z0-9_-])"
 )
 
-_STANDARD_REDACTION_DISABLED_WARNED = False
+
+def mask_secret(
+    value: str,
+    *,
+    head: int = 4,
+    tail: int = 4,
+    floor: int = 12,
+    placeholder: str = "***",
+    empty: str = "",
+) -> str:
+    """Mask a secret for display, preserving ``head`` and ``tail`` characters.
+
+    Canonical helper for display-time redaction across Hermes — used by
+    ``hermes config``, ``hermes status``, ``hermes dump``, and anywhere
+    a secret needs to be shown truncated for debuggability while still
+    keeping the bulk hidden.
+
+    Args:
+        value:       The secret to mask. ``None``/empty returns ``empty``.
+        head:        Leading characters to preserve. Default 4.
+        tail:        Trailing characters to preserve. Default 4.
+        floor:       Values shorter than ``head + tail + floor_margin`` are
+                     fully masked (returns ``placeholder``). Default 12 —
+                     matches the existing config/status/dump convention.
+        placeholder: Value returned for too-short inputs. Default ``"***"``.
+        empty:       Value returned when ``value`` is falsy (None, ""). The
+                     caller can override this to e.g. ``color("(not set)",
+                     Colors.DIM)`` for user-facing display.
+
+    Examples:
+        >>> mask_secret("sk-proj-abcdef1234567890")
+        'sk-p...7890'
+        >>> mask_secret("short")                         # fully masked
+        '***'
+        >>> mask_secret("")                              # empty default
+        ''
+        >>> mask_secret("", empty="(not set)")           # empty override
+        '(not set)'
+        >>> mask_secret("long-token", head=6, tail=4, floor=18)
+        '***'
+    """
+    if not value:
+        return empty
+    if len(value) < floor:
+        return placeholder
+    return f"{value[:head]}...{value[-tail:]}"
 
 
 def _mask_token(token: str) -> str:
-    """Mask a token, preserving prefix for long tokens."""
-    if len(token) < 18:
+    """Mask a log token — conservative 18-char floor, preserves 6 prefix / 4 suffix."""
+    # Empty input: historically this returned "***" rather than "". Preserve.
+    if not token:
         return "***"
-    return f"{token[:6]}...{token[-4:]}"
+    return mask_secret(token, head=6, tail=4, floor=18)
 
 
-def _apply_critical_redaction(text: str) -> str:
-    """Apply redaction patterns that must stay active even when standard masking is disabled."""
-    text = _PRIVATE_KEY_RE.sub("[REDACTED PRIVATE KEY]", text)
-    text = _DB_CONNSTR_RE.sub(lambda m: f"{m.group(1)}***{m.group(3)}", text)
-    text = _AWS_KEY_RE.sub(lambda m: _mask_token(m.group(0)), text)
-    return text
+def _redact_query_string(query: str) -> str:
+    """Redact sensitive parameter values in a URL query string.
+
+    Handles `k=v&k=v` format. Sensitive keys (case-insensitive) have values
+    replaced with `***`. Non-sensitive keys pass through unchanged.
+    Empty or malformed pairs are preserved as-is.
+    """
+    if not query:
+        return query
+    parts = []
+    for pair in query.split("&"):
+        if "=" not in pair:
+            parts.append(pair)
+            continue
+        key, _, value = pair.partition("=")
+        if key.lower() in _SENSITIVE_QUERY_PARAMS:
+            parts.append(f"{key}=***")
+        else:
+            parts.append(pair)
+    return "&".join(parts)
 
 
-def redact_sensitive_text(text: str) -> str:
+def _redact_url_query_params(text: str) -> str:
+    """Scan text for URLs with query strings and redact sensitive params.
+
+    Catches opaque tokens that don't match vendor prefix regexes, e.g.
+    `https://example.com/cb?code=ABC123&state=xyz` → `...?code=***&state=xyz`.
+    """
+    def _sub(m: re.Match) -> str:
+        scheme = m.group(1)
+        authority = m.group(2)
+        path = m.group(3)
+        query = _redact_query_string(m.group(4))
+        fragment = m.group(5) or ""
+        return f"{scheme}://{authority}{path}?{query}{fragment}"
+    return _URL_WITH_QUERY_RE.sub(_sub, text)
+
+
+def _redact_url_userinfo(text: str) -> str:
+    """Strip `user:password@` from HTTP/WS/FTP URLs.
+
+    DB protocols (postgres, mysql, mongodb, redis, amqp) are handled
+    separately by `_DB_CONNSTR_RE`.
+    """
+    return _URL_USERINFO_RE.sub(
+        lambda m: f"{m.group(1)}://{m.group(2)}:***@",
+        text,
+    )
+
+
+def _redact_form_body(text: str) -> str:
+    """Redact sensitive values in a form-urlencoded body.
+
+    Only applies when the entire input looks like a pure form body
+    (k=v&k=v with no newlines, no other text). Single-line non-form
+    text passes through unchanged. This is a conservative pass — the
+    `_redact_url_query_params` function handles embedded query strings.
+    """
+    if not text or "\n" in text or "&" not in text:
+        return text
+    # The body-body form check is strict: only trigger on clean k=v&k=v.
+    if not _FORM_BODY_RE.match(text.strip()):
+        return text
+    return _redact_query_string(text.strip())
+
+
+def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = False) -> str:
     """Apply all redaction patterns to a block of text.
 
     Safe to call on any string -- non-matching text passes through unchanged.
-    Critical patterns stay enabled even when standard redaction is disabled.
-    """
-    global _STANDARD_REDACTION_DISABLED_WARNED
+    Disabled by default — enable via security.redact_secrets: true in config.yaml.
+    Set force=True for safety boundaries that must never return raw secrets
+    regardless of the user's global logging redaction preference.
 
+    Set code_file=True to skip the ENV-assignment and JSON-field regex
+    patterns when the text is known to be source code (e.g. MAX_TOKENS=***
+    constants, "apiKey": "test" fixtures). Prefix patterns, auth headers,
+    private keys, DB connstrings, JWTs, and URL secrets are still redacted.
+    """
     if text is None:
         return None
     if not isinstance(text, str):
         text = str(text)
     if not text:
         return text
-    text = _apply_critical_redaction(text)
-    if not _REDACT_ENABLED:
-        if not _STANDARD_REDACTION_DISABLED_WARNED:
-            logger.warning(
-                "Secret redaction partially disabled; critical patterns remain protected"
-            )
-            _STANDARD_REDACTION_DISABLED_WARNED = True
+    if not (force or _REDACT_ENABLED):
         return text
 
     # Known prefixes (sk-, ghp_, etc.)
     text = _PREFIX_RE.sub(lambda m: _mask_token(m.group(1)), text)
 
-    # ENV assignments: OPENAI_API_KEY=sk-abc...
-    def _redact_env(m):
-        name, quote, value = m.group(1), m.group(2), m.group(3)
-        return f"{name}={quote}{_mask_token(value)}{quote}"
-    text = _ENV_ASSIGN_RE.sub(_redact_env, text)
+    # ENV assignments: OPENAI_API_KEY=***  (skip for code files — false positives)
+    if not code_file:
+        def _redact_env(m):
+            name, quote, value = m.group(1), m.group(2), m.group(3)
+            return f"{name}={quote}{_mask_token(value)}{quote}"
+        text = _ENV_ASSIGN_RE.sub(_redact_env, text)
 
-    # JSON fields: "apiKey": "value"
-    def _redact_json(m):
-        key, value = m.group(1), m.group(2)
-        return f'{key}: "{_mask_token(value)}"'
-    text = _JSON_FIELD_RE.sub(_redact_json, text)
+        # JSON fields: "apiKey": "***"  (skip for code files — false positives)
+        def _redact_json(m):
+            key, value = m.group(1), m.group(2)
+            return f'{key}: "{_mask_token(value)}"'
+        text = _JSON_FIELD_RE.sub(_redact_json, text)
 
     # Authorization headers
     text = _AUTH_HEADER_RE.sub(
@@ -201,13 +368,15 @@ def redact_sensitive_text(text: str) -> str:
     # JWT tokens (eyJ... — base64-encoded JSON headers)
     text = _JWT_RE.sub(lambda m: _mask_token(m.group(0)), text)
 
-    # Generic long hex secrets in assignment context
-    def _redact_hex_secret(m):
-        full = m.group(0)
-        secret = m.group(1)
-        return full.replace(secret, _mask_token(secret))
+    # URL userinfo (http(s)://user:pass@host) — redact for non-DB schemes.
+    # DB schemes are handled above by _DB_CONNSTR_RE.
+    text = _redact_url_userinfo(text)
 
-    text = _GENERIC_HEX_SECRET_RE.sub(_redact_hex_secret, text)
+    # URL query params containing opaque tokens (?access_token=…&code=…)
+    text = _redact_url_query_params(text)
+
+    # Form-urlencoded bodies (only triggers on clean k=v&k=v inputs).
+    text = _redact_form_body(text)
 
     # Discord user/role mentions (<@snowflake_id>)
     text = _DISCORD_MENTION_RE.sub(lambda m: f"<@{'!' if '!' in m.group(0) else ''}***>", text)

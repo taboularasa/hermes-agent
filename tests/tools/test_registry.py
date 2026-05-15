@@ -5,7 +5,7 @@ import threading
 from pathlib import Path
 from unittest.mock import patch
 
-from tools.registry import ToolRegistry, discover_builtin_tools
+from tools.registry import ToolRegistry, _module_registers_tools, discover_builtin_tools
 
 
 def _dummy_handler(args, **kwargs):
@@ -46,21 +46,6 @@ class TestRegisterAndDispatch:
         )
         result = json.loads(reg.dispatch("echo", {"msg": "hi"}))
         assert result == {"msg": "hi"}
-
-    def test_dispatch_coerces_none_args_to_empty_dict(self):
-        reg = ToolRegistry()
-
-        def echo_handler(args, **kw):
-            return json.dumps(args)
-
-        reg.register(
-            name="echo_none",
-            toolset="core",
-            schema=_make_schema("echo_none"),
-            handler=echo_handler,
-        )
-        result = json.loads(reg.dispatch("echo_none", None))
-        assert result == {}
 
 
 class TestGetDefinitions:
@@ -304,37 +289,19 @@ class TestCheckFnExceptionHandling:
 
 
 class TestBuiltinDiscovery:
-    def test_matches_previous_manual_builtin_tool_set(self):
-        expected = {
-            "tools.browser_tool",
-            "tools.clarify_tool",
-            "tools.code_execution_tool",
-            "tools.cronjob_tools",
-            "tools.delegate_tool",
-            "tools.file_tools",
-            "tools.homeassistant_tool",
-            "tools.hubspot_tool",
-            "tools.image_generation_tool",
-            "tools.memory_tool",
-            "tools.mixture_of_agents_tool",
-            "tools.process_registry",
-            "tools.rl_training_tool",
-            "tools.self_improvement_tool",
-            "tools.send_message_tool",
-            "tools.session_search_tool",
-            "tools.skill_manager_tool",
-            "tools.skills_tool",
-            "tools.terminal_tool",
-            "tools.todo_tool",
-            "tools.tts_tool",
-            "tools.vision_tools",
-            "tools.web_tools",
-        }
+    def test_discovers_all_real_self_registering_builtin_tool_modules(self):
+        tools_dir = Path(__file__).resolve().parents[2] / "tools"
+        expected = [
+            f"tools.{path.stem}"
+            for path in sorted(tools_dir.glob("*.py"))
+            if path.name not in {"__init__.py", "registry.py", "mcp_tool.py"}
+            and _module_registers_tools(path)
+        ]
 
         with patch("tools.registry.importlib.import_module"):
-            imported = discover_builtin_tools(Path(__file__).resolve().parents[2] / "tools")
+            imported = discover_builtin_tools(tools_dir)
 
-        assert set(imported) == expected
+        assert imported == expected
 
     def test_imports_only_self_registering_modules(self, tmp_path):
         tools_dir = tmp_path / "tools"

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# HADTO-PATCH: todo behavior
 """
 Todo Tool Module - Planning & Task Management
 
@@ -110,7 +109,7 @@ class TodoStore:
         # cause the model to re-do finished work after compression.
         active_items = [
             item for item in self._items
-            if item["status"] in ("pending", "in_progress")
+            if item["status"] in {"pending", "in_progress"}
         ]
         if not active_items:
             return None

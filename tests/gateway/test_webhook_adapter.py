@@ -32,13 +32,6 @@ from gateway.platforms.webhook import (
     _INSECURE_NO_AUTH,
     check_webhook_requirements,
 )
-from hadto_patches.denovo_slack_notification import (
-    AVAILABILITY_PLANE,
-    EXECUTION_ENGINE,
-    INGRESS_CONVENTION,
-    SLACK_BOT_MESSAGE_SUBTYPE,
-    SLACK_METADATA_EVENT,
-)
 
 
 # ---------------------------------------------------------------------------
@@ -105,36 +98,6 @@ def _github_signature(body: bytes, secret: str) -> str:
 def _generic_signature(body: bytes, secret: str) -> str:
     """Compute X-Webhook-Signature (plain HMAC-SHA256 hex) for *body*."""
     return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-
-
-def _denovo_slack_wakeup_payload(**overrides):
-    payload = {
-        "signalId": "signal-had-546",
-        "sourceRequestId": "request-had-546",
-        "targetAgentId": "hermes",
-        "availabilityPlane": AVAILABILITY_PLANE,
-        "ingressConvention": INGRESS_CONVENTION,
-        "executionEngine": EXECUTION_ENGINE,
-        "webhookInfraOnly": True,
-        "usesDeNovoExecutionKernel": False,
-        "messageIdentity": {
-            "teamId": "T123ABC",
-            "channelId": "C123ABC",
-            "messageTs": "1714060000.123456",
-            "threadTs": "1714060000.000001",
-            "appId": "A123ABC",
-            "botId": "B123ABC",
-            "messageSubtype": SLACK_BOT_MESSAGE_SUBTYPE,
-            "metadataEvent": SLACK_METADATA_EVENT,
-            "idempotencyKey": "denovo:C123ABC:1714060000.123456",
-            "contextSha256": ["a" * 64],
-        },
-    }
-    identity = overrides.pop("messageIdentity", None)
-    if identity:
-        payload["messageIdentity"].update(identity)
-    payload.update(overrides)
-    return payload
 
 
 # ===================================================================
@@ -389,7 +352,7 @@ class TestHTTPHandling:
     async def test_connect_starts_server(self):
         """connect() starts the HTTP listener and marks adapter as connected."""
         routes = {"r1": {"secret": _INSECURE_NO_AUTH, "prompt": "x"}}
-        adapter = _make_adapter(routes=routes, port=0)
+        adapter = _make_adapter(routes=routes, host="127.0.0.1", port=0)
         # Use port 0 — the OS picks a free port, but aiohttp requires a real bind.
         # We just test that the method completes and marks connected.
         # Need to mock TCPSite to avoid actual binding.
@@ -421,322 +384,6 @@ class TestHTTPHandling:
         mock_runner.cleanup.assert_awaited_once()
         assert adapter._runner is None
         assert not adapter.is_connected
-
-
-# ===================================================================
-# De Novo Slack wake-up route
-# ===================================================================
-
-
-class TestDeNovoSlackWakeupRoute:
-    @pytest.mark.asyncio
-    async def test_denovo_slack_wakeup_dispatches_to_slack_adapter(self):
-        routes = {
-            "denovo": {
-                "secret": _INSECURE_NO_AUTH,
-                "handler": "denovo_slack_thread_wakeup",
-            },
-        }
-        adapter = _make_adapter(routes=routes)
-        slack_adapter = MagicMock()
-        slack_adapter.handle_message = AsyncMock()
-        slack_adapter.fetch_denovo_wakeup_thread_context = AsyncMock(
-            return_value="[Thread context]\nDe Novo: What should Hermes answer?",
-        )
-        adapter.gateway_runner = MagicMock(
-            adapters={Platform.SLACK: slack_adapter},
-        )
-
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            resp = await cli.post(
-                "/webhooks/denovo",
-                json=_denovo_slack_wakeup_payload(),
-                headers={"X-Request-ID": "req-1"},
-            )
-            data = await resp.json()
-
-        assert resp.status == 202
-        assert data["status"] == "accepted"
-        assert data["idempotency_key"] == "denovo:C123ABC:1714060000.123456"
-        assert data["proof"]["status"] == "accepted"
-        assert data["proof"]["thread_context_fetched"] is True
-        assert data["proof"]["raw_context_logged"] is False
-        slack_adapter.handle_message.assert_awaited_once()
-        event = slack_adapter.handle_message.await_args.args[0]
-        assert event.source.platform == Platform.SLACK
-        assert event.source.chat_id == "C123ABC"
-        assert event.source.thread_id == "1714060000.000001"
-        assert event.message_id == "1714060000.123456"
-        assert event.raw_message["type"] == "de_novo_slack_thread_wakeup"
-        assert "What should Hermes answer?" in event.text
-        slack_adapter.fetch_denovo_wakeup_thread_context.assert_awaited_once_with(
-            channel_id="C123ABC",
-            thread_ts="1714060000.000001",
-            message_ts="1714060000.123456",
-            team_id="T123ABC",
-            sender_bot_id="B123ABC",
-            sender_app_id="A123ABC",
-        )
-
-    @pytest.mark.asyncio
-    async def test_denovo_book_study_wakeup_dispatches_task_shaped_slack_event(self):
-        routes = {
-            "denovo": {
-                "secret": _INSECURE_NO_AUTH,
-                "handler": "denovo_slack_thread_wakeup",
-            },
-        }
-        adapter = _make_adapter(routes=routes)
-        slack_adapter = MagicMock()
-        slack_adapter.handle_message = AsyncMock()
-        slack_adapter.fetch_denovo_wakeup_thread_context = AsyncMock(
-            return_value=(
-                "[Thread context]\n"
-                "De Novo: What did Hermes learn from this chapter?\n"
-                "De Novo: raw chapter text: private paragraph"
-            ),
-        )
-        adapter.gateway_runner = MagicMock(
-            adapters={Platform.SLACK: slack_adapter},
-        )
-
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            resp = await cli.post(
-                "/webhooks/denovo",
-                json=_denovo_slack_wakeup_payload(requestKind="book-study"),
-            )
-            data = await resp.json()
-
-        assert resp.status == 202
-        assert data["status"] == "accepted"
-        assert data["proof"]["request_kind"] == "book-study"
-        assert data["proof"]["thread_context_fetched"] is True
-        slack_adapter.handle_message.assert_awaited_once()
-        event = slack_adapter.handle_message.await_args.args[0]
-        assert event.source.platform == Platform.SLACK
-        assert event.source.thread_id == "1714060000.000001"
-        assert "De Novo is asking Hermes for book-study context in Slack." in event.text
-        assert "What did Hermes learn from this chapter?" in event.text
-        assert "raw chapter text: private paragraph" not in event.text
-        assert "[redacted unsafe book-study context line sha256=" in event.text
-        assert "webhook:" not in event.text
-
-    @pytest.mark.asyncio
-    async def test_denovo_book_study_wakeup_without_thread_context_has_no_context_path(self):
-        routes = {
-            "denovo": {
-                "secret": _INSECURE_NO_AUTH,
-                "handler": "denovo_slack_thread_wakeup",
-            },
-        }
-        adapter = _make_adapter(routes=routes)
-        slack_adapter = MagicMock()
-        slack_adapter.handle_message = AsyncMock()
-        slack_adapter.fetch_denovo_wakeup_thread_context = AsyncMock(return_value="")
-        adapter.gateway_runner = MagicMock(
-            adapters={Platform.SLACK: slack_adapter},
-        )
-
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            resp = await cli.post(
-                "/webhooks/denovo",
-                json=_denovo_slack_wakeup_payload(
-                    requestKind="book-study",
-                    messageIdentity={
-                        "idempotencyKey": "denovo:C123ABC:1714060000.223344",
-                        "messageTs": "1714060000.223344",
-                    },
-                ),
-            )
-            data = await resp.json()
-
-        assert resp.status == 202
-        assert data["proof"]["thread_context_fetched"] is False
-        event = slack_adapter.handle_message.await_args.args[0]
-        assert "No Slack thread context was available" in event.text
-        assert "no-context response" in event.text
-
-    @pytest.mark.asyncio
-    async def test_denovo_slack_wakeup_suppresses_duplicate_semantic_delivery(self):
-        routes = {
-            "denovo": {
-                "secret": _INSECURE_NO_AUTH,
-                "handler": "denovo_slack_thread_wakeup",
-            },
-        }
-        adapter = _make_adapter(routes=routes)
-        slack_adapter = MagicMock()
-        slack_adapter.handle_message = AsyncMock()
-        slack_adapter.fetch_denovo_wakeup_thread_context = AsyncMock(return_value="")
-        adapter.gateway_runner = MagicMock(
-            adapters={Platform.SLACK: slack_adapter},
-        )
-
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            first = await cli.post(
-                "/webhooks/denovo",
-                json=_denovo_slack_wakeup_payload(),
-                headers={"X-Request-ID": "req-1"},
-            )
-            second = await cli.post(
-                "/webhooks/denovo",
-                json=_denovo_slack_wakeup_payload(),
-                headers={"X-Request-ID": "req-2"},
-            )
-            data = await second.json()
-
-        assert first.status == 202
-        assert second.status == 200
-        assert data["status"] == "duplicate"
-        assert data["channel_id"] == "C123ABC"
-        assert data["proof"]["duplicate"] is True
-        assert slack_adapter.handle_message.await_count == 1
-
-    @pytest.mark.asyncio
-    async def test_denovo_slack_wakeup_suppresses_duplicate_channel_message_ts(self):
-        routes = {
-            "denovo": {
-                "secret": _INSECURE_NO_AUTH,
-                "handler": "denovo_slack_thread_wakeup",
-            },
-        }
-        adapter = _make_adapter(routes=routes)
-        slack_adapter = MagicMock()
-        slack_adapter.handle_message = AsyncMock()
-        slack_adapter.fetch_denovo_wakeup_thread_context = AsyncMock(return_value="")
-        adapter.gateway_runner = MagicMock(
-            adapters={Platform.SLACK: slack_adapter},
-        )
-
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            first = await cli.post(
-                "/webhooks/denovo",
-                json=_denovo_slack_wakeup_payload(),
-            )
-            second = await cli.post(
-                "/webhooks/denovo",
-                json=_denovo_slack_wakeup_payload(
-                    messageIdentity={"idempotencyKey": "denovo:different-key"},
-                ),
-            )
-            data = await second.json()
-
-        assert first.status == 202
-        assert second.status == 200
-        assert data["status"] == "duplicate"
-        assert data["message_ts"] == "1714060000.123456"
-        assert slack_adapter.handle_message.await_count == 1
-
-    @pytest.mark.asyncio
-    async def test_denovo_slack_wakeup_accepts_when_thread_context_fetch_fails(self):
-        routes = {
-            "denovo": {
-                "secret": _INSECURE_NO_AUTH,
-                "handler": "denovo_slack_thread_wakeup",
-            },
-        }
-        adapter = _make_adapter(routes=routes)
-        slack_adapter = MagicMock()
-        slack_adapter.handle_message = AsyncMock()
-        slack_adapter.fetch_denovo_wakeup_thread_context = AsyncMock(
-            side_effect=RuntimeError("slack rate limit"),
-        )
-        adapter.gateway_runner = MagicMock(
-            adapters={Platform.SLACK: slack_adapter},
-        )
-
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            resp = await cli.post(
-                "/webhooks/denovo",
-                json=_denovo_slack_wakeup_payload(
-                    messageIdentity={
-                        "idempotencyKey": "denovo:C123ABC:1714060000.654321",
-                        "messageTs": "1714060000.654321",
-                    },
-                ),
-            )
-            data = await resp.json()
-
-        assert resp.status == 202
-        assert data["status"] == "accepted"
-        assert data["proof"]["thread_context_fetched"] is False
-        assert "slack rate limit" not in repr(data).lower()
-        slack_adapter.handle_message.assert_awaited_once()
-        event = slack_adapter.handle_message.await_args.args[0]
-        assert "slack rate limit" not in event.text
-        assert "Use Hermes' Slack credentials" in event.text
-
-    @pytest.mark.asyncio
-    async def test_denovo_slack_wakeup_missing_slack_adapter_returns_retryable_error(self):
-        routes = {
-            "denovo": {
-                "secret": _INSECURE_NO_AUTH,
-                "handler": "denovo_slack_thread_wakeup",
-            },
-        }
-        adapter = _make_adapter(routes=routes)
-        adapter.gateway_runner = MagicMock(adapters={})
-
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            resp = await cli.post(
-                "/webhooks/denovo",
-                json=_denovo_slack_wakeup_payload(),
-            )
-            data = await resp.json()
-
-        assert resp.status == 503
-        assert data["error"] == "slack_adapter_unavailable"
-
-    @pytest.mark.asyncio
-    async def test_denovo_slack_wakeup_rejects_invalid_payload(self):
-        routes = {
-            "denovo": {
-                "secret": _INSECURE_NO_AUTH,
-                "handler": "denovo_slack_thread_wakeup",
-            },
-        }
-        adapter = _make_adapter(routes=routes)
-        adapter.gateway_runner = MagicMock(adapters={Platform.SLACK: MagicMock()})
-
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            resp = await cli.post(
-                "/webhooks/denovo",
-                json=_denovo_slack_wakeup_payload(
-                    messageIdentity={"messageTs": "bad-ts"},
-                ),
-            )
-            data = await resp.json()
-
-        assert resp.status == 400
-        assert data["error"] == "invalid_de_novo_slack_wakeup"
-
-    @pytest.mark.asyncio
-    async def test_denovo_slack_wakeup_still_requires_route_hmac(self):
-        routes = {
-            "denovo": {
-                "secret": "real-secret",
-                "handler": "denovo_slack_thread_wakeup",
-            },
-        }
-        adapter = _make_adapter(routes=routes)
-        adapter.gateway_runner = MagicMock(adapters={Platform.SLACK: MagicMock()})
-
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            resp = await cli.post(
-                "/webhooks/denovo",
-                json=_denovo_slack_wakeup_payload(),
-            )
-
-        assert resp.status == 401
 
 
 # ===================================================================
@@ -1111,3 +758,79 @@ class TestDeliverCrossPlatformThreadId:
         mock_target.send.assert_awaited_once_with(
             "12345", "hello", metadata=None
         )
+
+
+class TestInsecureNoAuthSafetyRail:
+    """connect() refuses to start when INSECURE_NO_AUTH is combined with a
+    non-loopback bind. Guards against accidentally exposing an unauthenticated
+    webhook endpoint on a public interface."""
+
+    @pytest.mark.asyncio
+    async def test_connect_rejects_insecure_no_auth_on_public_bind(self):
+        """INSECURE_NO_AUTH + 0.0.0.0 is refused before the server starts."""
+        routes = {"r1": {"secret": _INSECURE_NO_AUTH, "prompt": "x"}}
+        adapter = _make_adapter(routes=routes, host="0.0.0.0", port=0)
+        with pytest.raises(ValueError, match="INSECURE_NO_AUTH"):
+            await adapter.connect()
+
+    @pytest.mark.asyncio
+    async def test_connect_rejects_insecure_no_auth_on_lan_ip(self):
+        """A LAN IP is treated as public."""
+        routes = {"r1": {"secret": _INSECURE_NO_AUTH, "prompt": "x"}}
+        adapter = _make_adapter(routes=routes, host="192.168.1.50", port=0)
+        with pytest.raises(ValueError, match="non-loopback"):
+            await adapter.connect()
+
+    @pytest.mark.asyncio
+    async def test_connect_rejects_insecure_no_auth_on_empty_host(self):
+        """Empty host is conservatively treated as non-loopback."""
+        routes = {"r1": {"secret": _INSECURE_NO_AUTH, "prompt": "x"}}
+        adapter = _make_adapter(routes=routes, host="", port=0)
+        with pytest.raises(ValueError, match="INSECURE_NO_AUTH"):
+            await adapter.connect()
+
+    @pytest.mark.parametrize(
+        "host",
+        ["127.0.0.1", "localhost"],
+    )
+    @pytest.mark.asyncio
+    async def test_connect_allows_insecure_no_auth_on_loopback(self, host):
+        """Recognised loopback hosts are permitted with INSECURE_NO_AUTH."""
+        routes = {"r1": {"secret": _INSECURE_NO_AUTH, "prompt": "x"}}
+        adapter = _make_adapter(routes=routes, host=host, port=0)
+        try:
+            with patch.object(adapter, "_reload_dynamic_routes"):
+                result = await adapter.connect()
+            assert result is True
+        finally:
+            await adapter.disconnect()
+
+    @pytest.mark.parametrize(
+        "host",
+        ["127.0.0.1", "localhost", "Localhost", "::1", "ip6-localhost", "ip6-loopback"],
+    )
+    def test_is_loopback_host_accepts(self, host):
+        """_is_loopback_host covers all documented loopback spellings."""
+        from gateway.platforms.webhook import _is_loopback_host
+        assert _is_loopback_host(host) is True
+
+    @pytest.mark.parametrize(
+        "host",
+        ["0.0.0.0", "192.168.1.5", "10.0.0.1", "example.com", "", None],
+    )
+    def test_is_loopback_host_rejects(self, host):
+        """_is_loopback_host treats public/LAN/empty as non-loopback."""
+        from gateway.platforms.webhook import _is_loopback_host
+        assert _is_loopback_host(host) is False
+
+    @pytest.mark.asyncio
+    async def test_connect_allows_real_secret_on_public_bind(self):
+        """A real HMAC secret bound to 0.0.0.0 is the normal production case."""
+        routes = {"r1": {"secret": "real-secret-abc123", "prompt": "x"}}
+        adapter = _make_adapter(routes=routes, host="0.0.0.0", port=0)
+        try:
+            with patch.object(adapter, "_reload_dynamic_routes"):
+                result = await adapter.connect()
+            assert result is True
+        finally:
+            await adapter.disconnect()
