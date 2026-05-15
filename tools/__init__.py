@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# HADTO-PATCH: env
 """Tools package namespace.
 
 Keep package import side effects minimal. Importing ``tools`` should not
@@ -14,17 +13,6 @@ Callers should import concrete submodules directly, for example:
 Python will resolve those submodules via the package path without needing them
 to be re-exported here.
 """
-
-from pathlib import Path
-
-from hermes_constants import get_hermes_home
-from hermes_cli.env_loader import load_hermes_dotenv
-
-load_hermes_dotenv(
-    hermes_home=get_hermes_home(),
-    project_env=Path(__file__).resolve().parent.parent / ".env",
-    strict=False,
-)
 
 
 def check_file_requirements():

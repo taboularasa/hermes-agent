@@ -1,6 +1,7 @@
 """Tests for cron/jobs.py — schedule parsing, job CRUD, and due-job detection."""
 
 import json
+import threading
 import pytest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,18 +23,8 @@ from cron.jobs import (
     mark_job_run,
     advance_next_run,
     get_due_jobs,
-    inspect_job_topology,
-    inspect_persistence_ratchet,
-    inspect_first_proof_point,
-    inspect_geometry_shaping,
-    inspect_value_surfaces,
-    inspect_attention_budget,
-    inspect_aggregate_stewardship,
-    inspect_routine_delivery_gate,
-    inspect_trust_contract,
     save_job_output,
 )
-from hadto_patches.recurring_routines import productive_fallback_selection
 
 
 # =========================================================================
@@ -216,6 +207,26 @@ class TestJobCRUD:
         jobs = list_jobs()
         assert len(jobs) == 2
 
+    def test_list_jobs_normalizes_partial_legacy_records(self, tmp_cron_dir):
+        save_jobs([
+            {
+                "id": "abc123deadbe",
+                "name": None,
+                "prompt": None,
+                "schedule_display": None,
+                "schedule": {"kind": "interval", "minutes": 60, "display": "every 60m"},
+                "enabled": True,
+            }
+        ])
+
+        jobs = list_jobs()
+
+        assert jobs[0]["id"] == "abc123deadbe"
+        assert jobs[0]["name"] == "abc123deadbe"
+        assert jobs[0]["prompt"] == ""
+        assert jobs[0]["schedule_display"] == "every 60m"
+        assert jobs[0]["state"] == "scheduled"
+
     def test_remove_job(self, tmp_cron_dir):
         job = create_job(prompt="Temp job", schedule="30m")
         assert remove_job(job["id"]) is True
@@ -242,17 +253,6 @@ class TestJobCRUD:
     def test_default_delivery_local_no_origin(self, tmp_cron_dir):
         job = create_job(prompt="Test", schedule="30m")
         assert job["deliver"] == "local"
-
-    def test_create_persists_role_and_scope(self, tmp_cron_dir):
-        job = create_job(
-            prompt="Ship work",
-            schedule="every 1h",
-            role="Implement",
-            scope="Ontology Workbench",
-        )
-        fetched = get_job(job["id"])
-        assert fetched["role"] == "implement"
-        assert fetched["scope"] == "ontology-workbench"
 
 
 class TestUpdateJob:
@@ -300,12 +300,6 @@ class TestUpdateJob:
         result = update_job("nonexistent_id", {"name": "X"})
         assert result is None
 
-    def test_update_role_and_scope_normalizes_values(self, tmp_cron_dir):
-        job = create_job(prompt="Check server status", schedule="every 1h")
-        updated = update_job(job["id"], {"role": "Report", "scope": "Global Ops"})
-        assert updated["role"] == "report"
-        assert updated["scope"] == "global-ops"
-
 
 class TestPauseResumeJob:
     def test_pause_sets_state(self, tmp_cron_dir):
@@ -325,6 +319,93 @@ class TestPauseResumeJob:
         assert resumed["state"] == "scheduled"
         assert resumed["paused_at"] is None
         assert resumed["paused_reason"] is None
+
+
+class TestResolveJobRef:
+    """Name-based job lookup for CLI/tool callers (PR #2627, @buntingszn)."""
+
+    def test_resolve_by_exact_id(self, tmp_cron_dir):
+        from cron.jobs import resolve_job_ref
+
+        job = create_job(prompt="A", schedule="1h", name="alpha")
+        assert resolve_job_ref(job["id"])["id"] == job["id"]
+
+    def test_resolve_by_name(self, tmp_cron_dir):
+        from cron.jobs import resolve_job_ref
+
+        job = create_job(prompt="A", schedule="1h", name="alpha")
+        assert resolve_job_ref("alpha")["id"] == job["id"]
+
+    def test_resolve_by_name_case_insensitive(self, tmp_cron_dir):
+        from cron.jobs import resolve_job_ref
+
+        job = create_job(prompt="A", schedule="1h", name="MyJob")
+        assert resolve_job_ref("myjob")["id"] == job["id"]
+        assert resolve_job_ref("MYJOB")["id"] == job["id"]
+
+    def test_resolve_returns_none_when_not_found(self, tmp_cron_dir):
+        from cron.jobs import resolve_job_ref
+
+        create_job(prompt="A", schedule="1h", name="alpha")
+        assert resolve_job_ref("does-not-exist") is None
+        assert resolve_job_ref("") is None
+
+    def test_resolve_id_wins_over_name(self, tmp_cron_dir):
+        """If a job's name happens to equal another job's ID, ID match wins."""
+        from cron.jobs import resolve_job_ref
+
+        j1 = create_job(prompt="A", schedule="1h")
+        # Create a second job whose name is j1's ID
+        j2 = create_job(prompt="B", schedule="1h", name=j1["id"])
+        # Looking up j1["id"] must return j1, not the colliding-name job j2
+        assert resolve_job_ref(j1["id"])["id"] == j1["id"]
+        assert resolve_job_ref(j1["id"])["id"] != j2["id"]
+
+    def test_resolve_ambiguous_name_raises(self, tmp_cron_dir):
+        """Two jobs sharing a name → refuse to pick, surface both IDs."""
+        from cron.jobs import AmbiguousJobReference, resolve_job_ref
+
+        j1 = create_job(prompt="A", schedule="1h", name="dup")
+        j2 = create_job(prompt="B", schedule="1h", name="dup")
+        with pytest.raises(AmbiguousJobReference) as exc_info:
+            resolve_job_ref("dup")
+        ids = {m["id"] for m in exc_info.value.matches}
+        assert ids == {j1["id"], j2["id"]}
+        # Error message mentions both IDs so the user can pick one
+        assert j1["id"] in str(exc_info.value)
+        assert j2["id"] in str(exc_info.value)
+
+    def test_trigger_by_name(self, tmp_cron_dir):
+        from cron.jobs import trigger_job
+
+        job = create_job(prompt="A", schedule="1h", name="alpha")
+        result = trigger_job("alpha")
+        assert result is not None
+        assert result["id"] == job["id"]
+
+    def test_pause_by_name(self, tmp_cron_dir):
+        job = create_job(prompt="A", schedule="1h", name="alpha")
+        result = pause_job("alpha", reason="manual")
+        assert result is not None
+        assert result["id"] == job["id"]
+        assert result["state"] == "paused"
+
+    def test_remove_by_name(self, tmp_cron_dir):
+        job = create_job(prompt="A", schedule="1h", name="alpha")
+        assert remove_job("alpha") is True
+        assert get_job(job["id"]) is None
+
+    def test_mutations_refuse_ambiguous_name(self, tmp_cron_dir):
+        """pause/resume/trigger/remove must refuse to act on an ambiguous name."""
+        from cron.jobs import AmbiguousJobReference, trigger_job
+
+        create_job(prompt="A", schedule="1h", name="dup")
+        create_job(prompt="B", schedule="1h", name="dup")
+        for fn in (pause_job, resume_job, trigger_job):
+            with pytest.raises(AmbiguousJobReference):
+                fn("dup")
+        with pytest.raises(AmbiguousJobReference):
+            remove_job("dup")
 
 
 class TestMarkJobRun:
@@ -395,6 +476,88 @@ class TestMarkJobRun:
         assert updated["last_status"] == "error"
         assert updated["last_error"] == "model timeout"
         assert updated["last_delivery_error"] == "platform 'discord' not enabled"
+
+    def test_recurring_cron_not_disabled_when_croniter_missing(self, tmp_cron_dir, monkeypatch):
+        """Regression test for issue #16265.
+
+        If the gateway runs in an env where `croniter` went missing after a
+        recurring cron job was persisted, `compute_next_run()` returns None.
+        `mark_job_run()` must NOT treat that as terminal completion — the job
+        has to stay enabled with state=error so the user notices, rather than
+        silently flipping to enabled=false, state=completed.
+        """
+        pytest.importorskip("croniter")  # need it to create the job
+        job = create_job(prompt="Recurring", schedule="0 7,15,23 * * *")
+        assert job["schedule"]["kind"] == "cron"
+
+        # Simulate the runtime env having lost croniter between job creation
+        # and this run.
+        monkeypatch.setattr("cron.jobs.HAS_CRONITER", False)
+
+        mark_job_run(job["id"], success=True)
+
+        updated = get_job(job["id"])
+        assert updated is not None, "recurring cron job was deleted"
+        assert updated["enabled"] is True, (
+            "recurring cron job was disabled despite croniter-missing being "
+            "a runtime dep issue, not a terminal completion"
+        )
+        assert updated["state"] == "error"
+        assert updated["state"] != "completed"
+        assert updated["next_run_at"] is None
+        assert updated["last_error"]
+        assert "croniter" in updated["last_error"].lower()
+
+    def test_recurring_interval_not_disabled_when_next_run_is_none(self, tmp_cron_dir, monkeypatch):
+        """Defensive sibling of the cron test — any recurring schedule that
+        somehow yields next_run_at=None must stay enabled with state=error.
+        """
+        job = create_job(prompt="Recurring", schedule="every 1h")
+        assert job["schedule"]["kind"] == "interval"
+
+        # Force compute_next_run to return None for this call — simulates
+        # any future regression where a recurring schedule loses its
+        # next-run computation (missing dep, corrupt schedule, etc.).
+        monkeypatch.setattr("cron.jobs.compute_next_run", lambda *a, **kw: None)
+
+        mark_job_run(job["id"], success=True)
+
+        updated = get_job(job["id"])
+        assert updated is not None
+        assert updated["enabled"] is True
+        assert updated["state"] == "error"
+        assert updated["state"] != "completed"
+
+    def test_oneshot_still_completes_when_next_run_is_none(self, tmp_cron_dir):
+        """One-shot jobs must still flip to enabled=false, state=completed
+        when next_run_at cannot be computed — the #16265 fix must not
+        regress this path. We bypass create_job and craft a minimal
+        one-shot record directly so that the repeat-limit branch doesn't
+        pop the job before we observe the terminal-completion branch.
+        """
+        jobs = [{
+            "id": "oneshot-test",
+            "prompt": "Once",
+            "schedule": {"kind": "once", "run_at": "2020-01-01T00:00:00+00:00", "display": "once"},
+            "repeat": {"times": None, "completed": 0},
+            "enabled": True,
+            "state": "scheduled",
+            "next_run_at": "2020-01-01T00:00:00+00:00",
+            "last_run_at": None,
+            "last_status": None,
+            "last_error": None,
+            "last_delivery_error": None,
+            "created_at": "2020-01-01T00:00:00+00:00",
+        }]
+        save_jobs(jobs)
+
+        mark_job_run("oneshot-test", success=True)
+
+        updated = get_job("oneshot-test")
+        assert updated is not None
+        assert updated["next_run_at"] is None
+        assert updated["enabled"] is False
+        assert updated["state"] == "completed"
 
 
 class TestAdvanceNextRun:
@@ -592,559 +755,196 @@ class TestGetDueJobs:
         assert get_due_jobs() == []
         assert get_job("oneshot-stale")["next_run_at"] is None
 
+    def test_broken_cron_without_next_run_is_recovered(self, tmp_cron_dir, monkeypatch):
+        now = datetime(2026, 3, 18, 10, 0, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
 
-class TestInspectJobTopology:
-    def _write_output(self, job_id: str, filename: str, response: str):
-        import cron.jobs as cron_jobs
-
-        output_dir = cron_jobs.OUTPUT_DIR / job_id
-        output_dir.mkdir(parents=True, exist_ok=True)
-        path = output_dir / filename
-        path.write_text(f"# Cron Job\n\n## Response\n\n{response}", encoding="utf-8")
-        return path
-
-    def test_duplicate_names_are_flagged(self, tmp_cron_dir):
-        first = create_job(prompt="A", schedule="every 1h", name="shared-name")
-        second = create_job(prompt="B", schedule="every 2h", name="shared-name")
-        pause_job(second["id"], reason="legacy duplicate")
-
-        snapshot = inspect_job_topology(include_disabled=True)
-
-        duplicate_issue = next(issue for issue in snapshot["issues"] if issue["code"] == "duplicate_job_name")
-        assert duplicate_issue["severity"] == "warning"
-        assert first["id"] in duplicate_issue["job_ids"]
-        assert second["id"] in duplicate_issue["job_ids"]
-
-    def test_duplicate_implementation_scope_is_error(self, tmp_cron_dir):
-        create_job(prompt="A", schedule="every 1h", name="impl-a", role="implement", scope="pipeline")
-        create_job(prompt="B", schedule="every 2h", name="impl-b", role="implement", scope="pipeline")
-
-        snapshot = inspect_job_topology(include_disabled=True)
-
-        issue = next(issue for issue in snapshot["issues"] if issue["code"] == "duplicate_implementation_scope")
-        assert issue["severity"] == "error"
-        assert issue["scope"] == "pipeline"
-        assert snapshot["ok"] is False
-
-    def test_global_implementer_overlapping_scoped_implementers_is_error(self, tmp_cron_dir):
-        create_job(prompt="A", schedule="every 1h", name="impl-global", role="implement", scope="global")
-        create_job(prompt="B", schedule="every 2h", name="impl-ontology", role="implement", scope="ontology")
-
-        snapshot = inspect_job_topology(include_disabled=True)
-
-        issue = next(issue for issue in snapshot["issues"] if issue["code"] == "global_implementation_overlap")
-        assert issue["severity"] == "error"
-        assert snapshot["ok"] is False
-
-    def test_duplicate_global_coordinators_are_flagged(self, tmp_cron_dir):
-        create_job(prompt="A", schedule="every 1h", name="coord-a", role="coordinate", scope="global")
-        create_job(prompt="B", schedule="every 2h", name="coord-b", role="coordinate", scope="global")
-
-        snapshot = inspect_job_topology(include_disabled=True)
-
-        issue = next(issue for issue in snapshot["issues"] if issue["code"] == "duplicate_global_coordinator")
-        assert issue["severity"] == "error"
-        assert snapshot["ok"] is False
-
-    def test_global_coordinator_overlapping_scoped_implementers_is_error(self, tmp_cron_dir):
-        create_job(prompt="A", schedule="every 1h", name="coord-global", role="coordinate", scope="global")
-        create_job(prompt="B", schedule="every 2h", name="impl-pipeline", role="implement", scope="pipeline")
-
-        snapshot = inspect_job_topology(include_disabled=True)
-
-        issue = next(
-            issue for issue in snapshot["issues"] if issue["code"] == "global_coordinator_with_scoped_implementers"
+        save_jobs(
+            [{
+                "id": "cron-recover",
+                "name": "AI Daily Digest",
+                "prompt": "...",
+                "schedule": {"kind": "cron", "expr": "0 12 * * *", "display": "0 12 * * *"},
+                "schedule_display": "0 12 * * *",
+                "repeat": {"times": None, "completed": 0},
+                "enabled": True,
+                "state": "scheduled",
+                "paused_at": None,
+                "paused_reason": None,
+                "created_at": "2026-03-18T09:00:00+00:00",
+                "next_run_at": None,
+                "last_run_at": None,
+                "last_status": None,
+                "last_error": None,
+                "deliver": "local",
+                "origin": None,
+            }]
         )
-        assert issue["severity"] == "error"
-        assert snapshot["ok"] is False
 
-    def test_persistence_ratchet_healthy_when_state_carries_forward(self, tmp_cron_dir):
-        job = create_job(
-            prompt="Coordinate backlog",
-            schedule="every 1h",
-            name="coord-global",
-            role="coordinate",
-            scope="global",
+        assert get_due_jobs() == []
+        recovered = get_job("cron-recover")["next_run_at"]
+        assert recovered is not None
+        recovered_dt = datetime.fromisoformat(recovered)
+        if recovered_dt.tzinfo is None:
+            recovered_dt = recovered_dt.replace(tzinfo=timezone.utc)
+        assert recovered_dt > now
+
+    def test_broken_interval_without_next_run_is_recovered(self, tmp_cron_dir, monkeypatch):
+        now = datetime(2026, 3, 18, 10, 0, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+
+        save_jobs(
+            [{
+                "id": "interval-recover",
+                "name": "Hourly heartbeat",
+                "prompt": "...",
+                "schedule": {"kind": "interval", "minutes": 60, "display": "every 60m"},
+                "schedule_display": "every 1h",
+                "repeat": {"times": None, "completed": 0},
+                "enabled": True,
+                "state": "scheduled",
+                "paused_at": None,
+                "paused_reason": None,
+                "created_at": "2026-03-18T09:00:00+00:00",
+                "next_run_at": None,
+                "last_run_at": None,
+                "last_status": None,
+                "last_error": None,
+                "deliver": "local",
+                "origin": None,
+            }]
         )
-        first = """Progress report.
 
-Persistence Ratchet:
-- Evidence: HAD-420 asks for preserved evidence/decisions/artifacts across runs
-- Decisions: keep one global coordinator as backlog owner
-- Artifacts: hadto_patches/cron_jobs.py topology check
-- Carry-forward: preserve HAD-420 evidence in the next report
-- Drift: none
-"""
-        second = """Follow-up report.
+        assert get_due_jobs() == []
+        recovered = get_job("interval-recover")["next_run_at"]
+        assert recovered is not None
+        recovered_dt = datetime.fromisoformat(recovered)
+        if recovered_dt.tzinfo is None:
+            recovered_dt = recovered_dt.replace(tzinfo=timezone.utc)
+        assert recovered_dt > now
 
-Persistence Ratchet:
-- Evidence: HAD-420 asks for preserved evidence/decisions/artifacts across runs
-- Decisions: keep one global coordinator as backlog owner
-- Artifacts: hadto_patches/cron_jobs.py topology check
-- Carry-forward: keep HAD-420 evidence attached to the next action
-- Drift: none
-"""
-        self._write_output(job["id"], "2026-04-21_10-00-00.md", first)
-        self._write_output(job["id"], "2026-04-21_11-00-00.md", second)
 
-        ratchet = inspect_persistence_ratchet(get_job(job["id"]))
-        snapshot = inspect_job_topology(include_disabled=True)
+class TestEnabledToolsets:
+    def test_enabled_toolsets_stored(self, tmp_cron_dir):
+        job = create_job(prompt="monitor", schedule="every 1h", enabled_toolsets=["web", "terminal"])
+        assert job["enabled_toolsets"] == ["web", "terminal"]
 
-        assert ratchet["status"] == "healthy"
-        assert ratchet["compact_evidence"]["preserved_item_count"] >= 3
-        assert snapshot["summary"]["persistence_ratchet_checked"] == 1
-        assert snapshot["summary"]["persistence_ratchet_issue_count"] == 0
-        assert not [issue for issue in snapshot["issues"] if issue["code"].startswith("persistence_ratchet")]
+    def test_enabled_toolsets_persisted(self, tmp_cron_dir):
+        job = create_job(prompt="monitor", schedule="every 1h", enabled_toolsets=["web", "file"])
+        fetched = get_job(job["id"])
+        assert fetched["enabled_toolsets"] == ["web", "file"]
 
-    def test_persistence_ratchet_missing_is_warning_after_repeated_reports(self, tmp_cron_dir):
-        job = create_job(
-            prompt="Coordinate backlog",
-            schedule="every 1h",
-            name="coord-global",
-            role="coordinate",
-            scope="global",
-        )
-        self._write_output(job["id"], "2026-04-21_10-00-00.md", "Checked the backlog and found work.")
-        self._write_output(job["id"], "2026-04-21_11-00-00.md", "Checked the backlog and found work again.")
+    def test_enabled_toolsets_none_when_omitted(self, tmp_cron_dir):
+        job = create_job(prompt="monitor", schedule="every 1h")
+        assert job["enabled_toolsets"] is None
 
-        snapshot = inspect_job_topology(include_disabled=True)
+    def test_enabled_toolsets_empty_list_normalizes_to_none(self, tmp_cron_dir):
+        job = create_job(prompt="monitor", schedule="every 1h", enabled_toolsets=[])
+        assert job["enabled_toolsets"] is None
 
-        issue = next(issue for issue in snapshot["issues"] if issue["code"] == "persistence_ratchet_missing")
-        assert issue["severity"] == "warning"
-        assert issue["job_id"] == job["id"]
-        assert issue["surfaces"] == ["operator_value", "anti_make_work", "leading_indicator"]
-        assert snapshot["ok"] is True
+    def test_enabled_toolsets_whitespace_entries_stripped(self, tmp_cron_dir):
+        job = create_job(prompt="monitor", schedule="every 1h", enabled_toolsets=["web", " ", "file"])
+        assert job["enabled_toolsets"] == ["web", "file"]
 
-    def test_trust_contract_surfaces_repeated_loop_posture_and_artifact(self, tmp_cron_dir):
-        job = create_job(
-            prompt="Coordinate backlog and keep the selected issue moving.",
-            schedule="every 10m",
-            name="coord-global",
-            role="coordinate",
-            scope="global",
-        )
-        self._write_output(job["id"], "2026-04-21_10-00-00.md", "Checked the backlog and found work.")
-        self._write_output(job["id"], "2026-04-21_11-00-00.md", "Checked the backlog and found work again.")
+    def test_enabled_toolsets_updated_via_update_job(self, tmp_cron_dir):
+        job = create_job(prompt="monitor", schedule="every 1h")
+        update_job(job["id"], {"enabled_toolsets": ["web", "delegation"]})
+        fetched = get_job(job["id"])
+        assert fetched["enabled_toolsets"] == ["web", "delegation"]
 
-        ratchet = inspect_persistence_ratchet(get_job(job["id"]))
-        contract = inspect_trust_contract(get_job(job["id"]), ratchet)
-        snapshot = inspect_job_topology(include_disabled=True)
-        topology_contract = next(item for item in snapshot["trust_contracts"] if item["job_id"] == job["id"])
 
-        assert contract["declared_commitment"].startswith("Coordinate backlog")
-        assert contract["interaction_mode"] == "repeated"
-        assert contract["discovery_execution_mode"] == "bridge"
-        assert contract["shared_artifact_path"].endswith(job["id"])
-        assert contract["verification_target"].startswith("saved output in")
-        assert contract["trust_posture"] == "repeated_trust_bearing_degraded"
-        assert "operator agency" in contract["dignity_check"]
-        assert "delegated decision" in contract["capability_check"]
-        assert "stable and inspectable" in contract["viability_check"]
-        assert contract["fast_loop_surfaces"][0].startswith("reacquire backlog")
-        assert contract["slow_loop_surfaces"][-1] == "change backlog selection policy, preemption rules, or recurring loop contracts"
-        assert "backlog policy" in contract["escalation_checkpoint"]
-        assert topology_contract["trust_posture"] == contract["trust_posture"]
-        assert topology_contract["dignity_check"] == contract["dignity_check"]
-        assert topology_contract["capability_check"] == contract["capability_check"]
-        assert topology_contract["viability_check"] == contract["viability_check"]
-        assert topology_contract["fast_loop_surfaces"] == contract["fast_loop_surfaces"]
-        assert topology_contract["escalation_checkpoint"] == contract["escalation_checkpoint"]
-        assert contract["geometry_shaping"]["status"] == "required"
-        assert contract["geometry_shaping"]["required_fields"] == [
-            "default_changed",
-            "channel_opened",
-            "friction_changed",
-            "stale_path_pruned",
-            "policy_vs_path",
+class TestMarkJobRunConcurrency:
+    """Regression tests for concurrent parallel job state writes.
+
+    tick() dispatches multiple jobs to separate threads simultaneously.
+    Without _jobs_file_lock protecting the load→modify→save cycle in
+    mark_job_run(), concurrent writes can clobber each other's updates
+    (last-writer-wins), leaving some jobs with stale last_status / last_run_at.
+    """
+
+    def test_three_concurrent_mark_job_run_no_overwrites(self, tmp_cron_dir):
+        """Run mark_job_run() for 3 jobs in parallel threads; all must land correctly."""
+        # Create 3 distinct recurring jobs
+        job_a = create_job(prompt="Job A", schedule="every 1h")
+        job_b = create_job(prompt="Job B", schedule="every 1h")
+        job_c = create_job(prompt="Job C", schedule="every 1h")
+
+        errors: list = []
+
+        def run_mark(job_id: str, success: bool, error_msg=None):
+            try:
+                mark_job_run(job_id, success=success, error=error_msg)
+            except Exception as exc:  # pragma: no cover
+                errors.append(exc)
+
+        # Fire all three concurrently
+        threads = [
+            threading.Thread(target=run_mark, args=(job_a["id"], True)),
+            threading.Thread(target=run_mark, args=(job_b["id"], False, "timeout")),
+            threading.Thread(target=run_mark, args=(job_c["id"], True)),
         ]
-        assert snapshot["summary"]["trust_contract_checked"] >= 1
-        assert snapshot["summary"]["trust_contract_degraded_count"] >= 1
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
 
-    def test_value_surfaces_warn_when_only_circulation_output_is_reported(self, tmp_cron_dir):
-        job = create_job(
-            prompt="Coordinate backlog and keep the selected issue moving.",
-            schedule="every 10m",
-            name="coord-global",
-            role="coordinate",
-            scope="global",
-        )
-        output = """Progress report.
+        assert not errors, f"Unexpected exceptions in worker threads: {errors}"
 
-Persistence Ratchet:
-- Evidence: backlog still exists
-- Decisions: keep the selected issue moving
-- Artifacts: none
-- Carry-forward: check again next run
-- Drift: none
+        # Verify each job has the correct state — no overwrites
+        a = get_job(job_a["id"])
+        b = get_job(job_b["id"])
+        c = get_job(job_c["id"])
 
-Value Surfaces:
-- Durable Store: Slack heartbeat only
-- Circulation: Slack heartbeat, status ping
-- Closure Rule: do not count until a durable artifact updates
-"""
-        self._write_output(job["id"], "2026-04-21_10-00-00.md", output)
+        assert a is not None, "Job A was unexpectedly deleted"
+        assert b is not None, "Job B was unexpectedly deleted"
+        assert c is not None, "Job C was unexpectedly deleted"
 
-        value_surfaces = inspect_value_surfaces(get_job(job["id"]))
-        snapshot = inspect_job_topology(include_disabled=True)
-        issue = next(issue for issue in snapshot["issues"] if issue["code"] == "value_surfaces_circulation_only")
-        contract = next(item for item in snapshot["trust_contracts"] if item["job_id"] == job["id"])
+        assert a["last_status"] == "ok", f"Job A last_status wrong: {a['last_status']}"
+        assert a["last_run_at"] is not None, "Job A last_run_at not set"
+        assert a["repeat"]["completed"] == 1, f"Job A completed count wrong: {a['repeat']['completed']}"
 
-        assert value_surfaces["status"] == "circulation_only"
-        assert issue["severity"] == "warning"
-        assert contract["value_surfaces"]["status"] == "circulation_only"
-        assert contract["value_surfaces"]["fields"]["durable_store"] == "Slack heartbeat only"
-        assert snapshot["summary"]["value_surfaces_checked"] >= 1
-        assert snapshot["summary"]["value_surfaces_issue_count"] >= 1
+        assert b["last_status"] == "error", f"Job B last_status wrong: {b['last_status']}"
+        assert b["last_error"] == "timeout", f"Job B last_error wrong: {b['last_error']}"
+        assert b["last_run_at"] is not None, "Job B last_run_at not set"
+        assert b["repeat"]["completed"] == 1, f"Job B completed count wrong: {b['repeat']['completed']}"
 
-    def test_attention_budget_populates_trust_contract_and_topology(self, tmp_cron_dir):
-        job = create_job(
-            prompt="Coordinate backlog and keep the selected issue moving.",
-            schedule="every 10m",
-            name="coord-global",
-            role="coordinate",
-            scope="global",
-        )
-        output = """Progress report.
+        assert c["last_status"] == "ok", f"Job C last_status wrong: {c['last_status']}"
+        assert c["last_run_at"] is not None, "Job C last_run_at not set"
+        assert c["repeat"]["completed"] == 1, f"Job C completed count wrong: {c['repeat']['completed']}"
 
-Attention Budget:
-- Attention Cost: low, one compact six-line operator summary tied to the selected issue.
-- Decision Value: high because it names the next action, records blocker evidence, and updates durable Linear state.
-- Focus Effect: sharpens focus on one live issue and avoids report churn.
-"""
-        self._write_output(job["id"], "2026-04-21_10-00-00.md", output)
+    def test_repeated_concurrent_runs_accumulate_completed_count(self, tmp_cron_dir):
+        """Stress test: 10 threads each call mark_job_run on a different job once.
 
-        attention_budget = inspect_attention_budget(get_job(job["id"]))
-        snapshot = inspect_job_topology(include_disabled=True)
-        contract = next(item for item in snapshot["trust_contracts"] if item["job_id"] == job["id"])
+        The completed count for every job must be exactly 1 after all threads finish,
+        confirming no thread's write was silently dropped.
+        """
+        n = 10
+        jobs = [create_job(prompt=f"Stress job {i}", schedule="every 1h") for i in range(n)]
+        errors: list = []
 
-        assert attention_budget["status"] == "populated"
-        assert attention_budget["fields"]["attention_cost"].startswith("low")
-        assert contract["attention_budget"]["status"] == "populated"
-        assert contract["attention_budget"]["fields"]["decision_value"].startswith("high")
-        assert snapshot["summary"]["attention_budget_checked"] == 1
-        assert snapshot["summary"]["attention_budget_issue_count"] == 0
+        def run_mark(job_id: str):
+            try:
+                mark_job_run(job_id, success=True)
+            except Exception as exc:  # pragma: no cover
+                errors.append(exc)
 
-    def test_attention_budget_low_yield_is_warning(self, tmp_cron_dir):
-        job = create_job(
-            prompt="Coordinate backlog and keep the selected issue moving.",
-            schedule="every 10m",
-            name="coord-global",
-            role="coordinate",
-            scope="global",
-        )
-        output = """Progress report.
+        threads = [threading.Thread(target=run_mark, args=(j["id"],)) for j in jobs]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
 
-Attention Budget:
-- Attention Cost: high, multi-block alert flood with repeated pings.
-- Decision Value: low, no durable state and no decision change.
-- Focus Effect: low-yield report spam that scatters attention.
-"""
-        self._write_output(job["id"], "2026-04-21_10-00-00.md", output)
+        assert not errors, f"Unexpected exceptions: {errors}"
 
-        attention_budget = inspect_attention_budget(get_job(job["id"]))
-        snapshot = inspect_job_topology(include_disabled=True)
-        issue = next(issue for issue in snapshot["issues"] if issue["code"] == "attention_budget_low_yield")
-        contract = next(item for item in snapshot["trust_contracts"] if item["job_id"] == job["id"])
-
-        assert attention_budget["status"] == "low_yield"
-        assert issue["severity"] == "warning"
-        assert contract["attention_budget"]["status"] == "low_yield"
-        assert snapshot["summary"]["attention_budget_issue_count"] == 1
-
-    def test_value_surfaces_populate_durable_and_circulation_fields(self, tmp_cron_dir):
-        job = create_job(
-            prompt="Coordinate backlog and keep the selected issue moving.",
-            schedule="every 10m",
-            name="coord-global",
-            role="coordinate",
-            scope="global",
-        )
-        output = """Progress report.
-
-Persistence Ratchet:
-- Evidence: workspace-orchestrator:HAD-440 comment preserved the auth blocker evidence
-- Decisions: keep HAD-440 selected until native fallback or auth repair
-- Artifacts: ~/.hermes/cron/output/coord-global/2026-04-21_10-00-00.md, Linear comment workspace-orchestrator:HAD-440
-- Carry-forward: preserve the same blocker evidence in the next run
-- Drift: none
-
-Value Surfaces:
-- Durable Store: Linear issue comment workspace-orchestrator:HAD-440 and the saved cron output file
-- Circulation: Slack heartbeat and transient status summary
-- Closure Rule: circulation-only output does not count unless the issue comment or saved output updates durable evidence
-"""
-        self._write_output(job["id"], "2026-04-21_10-00-00.md", output)
-
-        value_surfaces = inspect_value_surfaces(get_job(job["id"]))
-        snapshot = inspect_job_topology(include_disabled=True)
-        contract = next(item for item in snapshot["trust_contracts"] if item["job_id"] == job["id"])
-
-        assert value_surfaces["status"] == "populated"
-        assert value_surfaces["fields"]["durable_store"].startswith("Linear issue comment")
-        assert value_surfaces["fields"]["circulation"].startswith("Slack heartbeat")
-        assert contract["value_surfaces"]["status"] == "populated"
-        assert contract["value_surfaces"]["fields"]["closure_rule"].startswith("circulation-only output does not count")
-        assert not [issue for issue in snapshot["issues"] if issue["code"].startswith("value_surfaces_")]
-
-    def test_aggregate_stewardship_missing_is_warning_after_report(self, tmp_cron_dir):
-        job = create_job(
-            prompt="Coordinate backlog",
-            schedule="every 1h",
-            name="coord-global",
-            role="coordinate",
-            scope="global",
-        )
-        self._write_output(job["id"], "2026-04-21_10-00-00.md", "Progress report with only loop-local evidence.")
-
-        snapshot = inspect_job_topology(include_disabled=True)
-
-        issue = next(issue for issue in snapshot["issues"] if issue["code"] == "aggregate_stewardship_missing")
-        contract = next(item for item in snapshot["trust_contracts"] if item["job_id"] == job["id"])
-        assert issue["severity"] == "warning"
-        assert issue["job_id"] == job["id"]
-        assert contract["aggregate_stewardship"]["status"] == "missing"
-        assert snapshot["summary"]["aggregate_stewardship_issue_count"] == 1
-
-    def test_aggregate_stewardship_populates_topology_summary(self, tmp_cron_dir):
-        create_job(
-            prompt="Coordinate backlog",
-            schedule="every 1h",
-            name="coord-global",
-            role="coordinate",
-            scope="global",
-            provider="openai",
-        )
-        job2 = create_job(
-            prompt="Review self-improvement health",
-            schedule="every 2h",
-            name="self-improve",
-            role="coordinate",
-            scope="global",
-            provider="openai",
-        )
-        output = """Progress report.
-
-Aggregate Stewardship:
-- Shared Provider Concentration: openai auth and default ChatGPT-backed Codex login are shared by the recurring coordinator and self-improvement loops.
-- Dependency Choke Points: Linear writeback and ~/.hermes/cron/output remain shared operator surfaces for both loops.
-- Verification Debt: topology warnings must stay visible until both loops publish aggregate stewardship fields.
-- Synchronized Failure Risk: a shared OpenAI auth outage would stall both loops in the same cycle.
-- Portfolio State: locally healthy loop reports still leave the portfolio fragile until both recurring loops publish the macro block.
-- Shared Artifact: hermes cron topology and inspect_job_topology aggregate stewardship summary.
-"""
-        self._write_output(job2["id"], "2026-04-21_10-00-00.md", output)
-
-        stewardship = inspect_aggregate_stewardship(get_job(job2["id"]))
-        snapshot = inspect_job_topology(include_disabled=True)
-        contract = next(item for item in snapshot["trust_contracts"] if item["job_id"] == job2["id"])
-        summary = snapshot["aggregate_stewardship_summary"]
-
-        assert stewardship["status"] == "populated"
-        assert contract["aggregate_stewardship"]["status"] == "populated"
-        assert summary["shared_provider_concentration"] == "openai=2"
-        assert summary["shared_artifact"].startswith("inspect_job_topology()")
-        assert snapshot["summary"]["aggregate_stewardship_checked"] == 2
-        assert snapshot["summary"]["aggregate_stewardship_issue_count"] == 0
-
-    def test_aggregate_stewardship_stale_fields_stay_visible(self, tmp_cron_dir):
-        job = create_job(
-            prompt="Coordinate backlog",
-            schedule="every 1h",
-            name="coord-global",
-            role="coordinate",
-            scope="global",
-        )
-        output = """Progress report.
-
-Aggregate Stewardship:
-- Shared Provider Concentration: same as last run
-- Dependency Choke Points: unchanged
-- Verification Debt: carry forward
-- Synchronized Failure Risk: still healthy
-- Portfolio State: same as last run
-- Shared Artifact: dashboard
-"""
-        self._write_output(job["id"], "2026-04-21_10-00-00.md", output)
-
-        stewardship = inspect_aggregate_stewardship(get_job(job["id"]))
-        snapshot = inspect_job_topology(include_disabled=True)
-        issue = next(issue for issue in snapshot["issues"] if issue["code"] == "aggregate_stewardship_stale")
-
-        assert stewardship["status"] == "stale"
-        assert "shared_artifact" in stewardship["stale_fields"]
-        assert issue["severity"] == "warning"
-        assert snapshot["summary"]["aggregate_stewardship_issue_count"] == 1
-
-    def test_first_proof_point_populates_bounded_seed_in_trust_contract(self, tmp_cron_dir):
-        job = create_job(
-            prompt="Coordinate backlog and keep the selected issue moving.",
-            schedule="every 10m",
-            name="coord-global",
-            role="coordinate",
-            scope="global",
-        )
-        self._write_output(
-            job["id"],
-            "2026-04-21_11-00-00.md",
-            """Backlog coordination moved HAD-437.
-
-First Proof Point:
-- Seed Surface: HAD-437 cron topology report in hadto_patches/cron_jobs.py and hermes cron topology
-- Protection Assumptions: limited to recurring classified cron control loops; warnings only, no job rewrites
-- Success Signal: topology output names the first seed, proof signal, and imitation dependency
-- Imitation Path: copy the same field set into other planning/self-improvement surfaces after topology reports stay populated
-- Why First: the global coordinator is the recurring bridge loop most likely to turn governance language into live work
-""",
-        )
-
-        proof_point = inspect_first_proof_point(get_job(job["id"]))
-        snapshot = inspect_job_topology(include_disabled=True)
-        contract = next(item for item in snapshot["trust_contracts"] if item["job_id"] == job["id"])
-
-        assert proof_point["status"] == "populated"
-        assert proof_point["fields"]["seed_surface"].startswith("HAD-437 cron topology report")
-        assert proof_point["fields"]["imitation_path"].startswith("copy the same field set")
-        assert contract["first_proof_point"]["status"] == "populated"
-        assert contract["first_proof_point"]["fields"]["success_signal"].startswith("topology output names")
-        assert snapshot["summary"]["first_proof_point_checked"] == 1
-        assert snapshot["summary"]["first_proof_point_issue_count"] == 0
-
-    def test_geometry_shaping_populates_trust_contract_and_topology(self, tmp_cron_dir):
-        job = create_job(
-            prompt="Coordinate backlog and keep the selected issue moving.",
-            schedule="every 10m",
-            name="coord-global",
-            role="coordinate",
-            scope="global",
-        )
-        self._write_output(
-            job["id"],
-            "2026-04-21_11-00-00.md",
-            """Backlog coordination moved HAD-439.
-
-Geometry Shaping:
-- Default Changed: backlog coordination now starts with workspace_backlog_orchestrator before any repo-local prioritization.
-- Channel Opened: the canonical workspace-orchestrator Linear comment is updated in place for the selected issue.
-- Friction Changed: duplicate scoped implementers are treated as a warning surface instead of silent parallel drift.
-- Stale Path Pruned: stale git-hygiene rediscovery is pruned by recording blocker state in the selected issue instead of reopening cleanup loops.
-- Policy-vs-Path: this changed the actual selection path and status-write path, not only the doctrine about ownership.
-""",
-        )
-
-        geometry = inspect_geometry_shaping(get_job(job["id"]))
-        snapshot = inspect_job_topology(include_disabled=True)
-        contract = next(item for item in snapshot["trust_contracts"] if item["job_id"] == job["id"])
-
-        assert geometry["status"] == "populated"
-        assert geometry["fields"]["default_changed"].startswith("backlog coordination now starts")
-        assert contract["geometry_shaping"]["status"] == "populated"
-        assert contract["geometry_shaping"]["fields"]["policy_vs_path"].startswith("this changed the actual selection path")
-        assert snapshot["summary"]["geometry_shaping_checked"] == 1
-        assert snapshot["summary"]["geometry_shaping_issue_count"] == 0
-
-    def test_geometry_shaping_missing_is_warning_after_report(self, tmp_cron_dir):
-        job = create_job(
-            prompt="Coordinate backlog",
-            schedule="every 1h",
-            name="coord-global",
-            role="coordinate",
-            scope="global",
-        )
-        self._write_output(job["id"], "2026-04-21_11-00-00.md", "Governance should improve the path for everyone.")
-
-        snapshot = inspect_job_topology(include_disabled=True)
-
-        issue = next(issue for issue in snapshot["issues"] if issue["code"] == "geometry_shaping_missing")
-        assert issue["severity"] == "warning"
-        assert issue["job_id"] == job["id"]
-        assert "changed defaults, channels, friction, pruning" in issue["message"]
-        assert snapshot["summary"]["geometry_shaping_issue_count"] == 1
-
-    def test_first_proof_point_missing_is_warning_after_report(self, tmp_cron_dir):
-        job = create_job(
-            prompt="Coordinate backlog",
-            schedule="every 1h",
-            name="coord-global",
-            role="coordinate",
-            scope="global",
-        )
-        self._write_output(job["id"], "2026-04-21_11-00-00.md", "Governance should improve everywhere.")
-
-        snapshot = inspect_job_topology(include_disabled=True)
-
-        issue = next(issue for issue in snapshot["issues"] if issue["code"] == "first_proof_point_missing")
-        assert issue["severity"] == "warning"
-        assert issue["job_id"] == job["id"]
-        assert "one protected seed surface" in issue["message"]
-        assert snapshot["summary"]["first_proof_point_issue_count"] == 1
-
-    def test_persistence_ratchet_surfaces_repeated_rediscovery_and_cleanup_drift(self, tmp_cron_dir):
-        job = create_job(
-            prompt="Coordinate backlog",
-            schedule="every 1h",
-            name="coord-global",
-            role="coordinate",
-            scope="global",
-        )
-        self._write_output(
-            job["id"],
-            "2026-04-21_10-00-00.md",
-            "Rediscovered the same backlog gap again and cleaned a dirty checkout.",
-        )
-        self._write_output(
-            job["id"],
-            "2026-04-21_11-00-00.md",
-            "Rediscovered the same backlog gap again; cleanup drift left untracked files.",
-        )
-
-        snapshot = inspect_job_topology(include_disabled=True)
-
-        issue = next(issue for issue in snapshot["issues"] if issue["code"] == "persistence_ratchet_drift")
-        evidence = issue["compact_evidence"]
-        assert issue["ratchet_status"] == "drift"
-        assert evidence["repeated_signals"] == ["cleanup_drift", "repeated_rediscovery"]
-
-    def test_routine_delivery_gate_warns_on_repeated_hadto_heartbeat_noise(self, tmp_cron_dir):
-        job = create_job(
-            prompt="You are Hermes posting David's hourly Hadto heartbeat.",
-            schedule="every 1h",
-            name="hadto-hourly-heartbeat",
-            role="report",
-            scope="global",
-            deliver="slack:C0APDPNRGVB",
-        )
-        heartbeat = "Heartbeat: active 0, selected HAD-445, stale 0, blocked 0, cron failures 0, next no-proof."
-        self._write_output(job["id"], "2026-04-21_10-00-00.md", heartbeat)
-        self._write_output(job["id"], "2026-04-21_11-00-00.md", heartbeat)
-
-        gate = inspect_routine_delivery_gate(get_job(job["id"]), [heartbeat, heartbeat])
-        snapshot = inspect_job_topology(include_disabled=True)
-
-        issue = next(issue for issue in snapshot["issues"] if issue["code"] == "routine_delivery_gate_suppressible_noise")
-        assert gate["status"] == "suppressible_noise"
-        assert gate["decision_reason"] == "heartbeat_no_change_no_worker"
-        assert issue["job_id"] == job["id"]
-        assert snapshot["summary"]["routine_delivery_gate_checked"] == 1
-        assert snapshot["summary"]["routine_delivery_gate_issue_count"] == 1
-
-    def test_productive_fallback_selected_when_outreach_is_approval_blocked(self):
-        job = {
-            "name": "hadto-outreach-surplus",
-            "prompt": "Cold outreach is blocked by David approval and public-touch constraints; avoid self-audit.",
-            "schedule": {"kind": "interval", "minutes": 60},
-            "role": "report",
-            "scope": "global",
-            "deliver": "slack",
-        }
-
-        fallback = productive_fallback_selection(job)
-
-        assert fallback["outreach_blocked"] is True
-        assert fallback["selected"] == "vertical opportunity research"
-        assert "source discovery" in fallback["lanes"]
-        assert "book-study continuation" in fallback["lanes"]
-        assert "ontology enrichment" in fallback["lanes"]
-        assert "implementation" in fallback["lanes"]
+        for job in jobs:
+            updated = get_job(job["id"])
+            assert updated is not None, f"Job {job['id']} was deleted"
+            assert updated["last_status"] == "ok", (
+                f"Job {job['id']} has wrong last_status: {updated['last_status']}"
+            )
+            assert updated["repeat"]["completed"] == 1, (
+                f"Job {job['id']} completed count is {updated['repeat']['completed']}, expected 1"
+            )
 
 
 class TestSaveJobOutput:

@@ -11,6 +11,16 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from run_agent import AIAgent
+import run_agent
+
+
+@pytest.fixture(autouse=True)
+def _no_fallback_wait(monkeypatch):
+    """Short-circuit time.sleep in fallback/recovery paths so tests don't
+    block on the ``min(3 + retry_count, 8)`` wait before a primary retry."""
+    import time as _time
+    monkeypatch.setattr(_time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr(run_agent, "jittered_backoff", lambda *a, **k: 0.0)
 
 
 def _make_tool_defs(*names: str) -> list:
@@ -36,6 +46,7 @@ def _make_agent(fallback_model=None):
     ):
         agent = AIAgent(
             api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
             quiet_mode=True,
             skip_context_files=True,
             skip_memory=True,
@@ -296,29 +307,6 @@ class TestTryActivateFallback:
             assert agent.api_mode == "codex_responses"
             assert agent.client is mock_client
 
-    def test_activates_codex_fallback_with_reasoning_effort_override(self):
-        agent = _make_agent(
-            fallback_model={
-                "provider": "openai-codex",
-                "model": "gpt-5.3-codex-spark",
-                "reasoning_effort": "xhigh",
-            },
-        )
-        mock_client = _mock_resolve(
-            api_key="codex-oauth-token",
-            base_url="https://chatgpt.com/backend-api/codex",
-        )
-        with patch(
-            "agent.auxiliary_client.resolve_provider_client",
-            return_value=(mock_client, "gpt-5.3-codex-spark"),
-        ):
-            result = agent._try_activate_fallback()
-            assert result is True
-            assert agent.model == "gpt-5.3-codex-spark"
-            assert agent.provider == "openai-codex"
-            assert agent.api_mode == "codex_responses"
-            assert agent.reasoning_config == {"enabled": True, "effort": "xhigh"}
-
     def test_codex_fallback_fails_gracefully_without_credentials(self):
         """Codex fallback should return False if no OAuth credentials available."""
         agent = _make_agent(
@@ -330,35 +318,6 @@ class TestTryActivateFallback:
         ):
             assert agent._try_activate_fallback() is False
             assert agent._fallback_activated is False
-
-    def test_failed_codex_fallback_advances_to_next_tier(self):
-        """Fallback-side model rejection should not prevent lower-tier fallback."""
-        agent = _make_agent(
-            fallback_model=[
-                {"provider": "openai-codex", "model": "gpt-5.3-codex-spark"},
-                {"provider": "groq-kimi", "model": "openai/gpt-oss-120b"},
-            ],
-        )
-        agent._fallback_activated = True
-        agent._fallback_index = 1
-        agent.provider = "openai-codex"
-        agent.model = "gpt-5.3-codex-spark"
-        api_error = SimpleNamespace(
-            status_code=400,
-            body={
-                "error": {
-                    "message": (
-                        "The 'gpt-5.3-codex-spark' model is not supported "
-                        "when using Codex with a ChatGPT account."
-                    )
-                }
-            },
-        )
-
-        with patch.object(agent, "_try_activate_fallback", return_value=True) as mock_next:
-            assert agent._try_advance_failed_fallback(api_error, reason="fallback_client_error") is True
-
-        mock_next.assert_called_once_with(reason="fallback_client_error", error=api_error)
 
     def test_activates_nous_fallback(self):
         """Nous Portal fallback should use OAuth credentials and chat_completions mode."""
@@ -446,3 +405,107 @@ class TestProviderCredentials:
             assert agent.client is mock_client
             assert agent.model == "test-model"
             assert agent.provider == provider
+
+
+# =============================================================================
+# api_key_env / key_env resolution in fallback entries (#5392)
+# =============================================================================
+
+class TestFallbackKeyEnvResolution:
+    """Verify that api_key_env and key_env are both resolved from the
+    environment and forwarded to resolve_provider_client as explicit_api_key.
+
+    Before the fix, _try_activate_fallback only checked ``key_env`` and ignored
+    the ``api_key_env`` alias documented in the custom_providers config schema.
+    The init-time fallback path never resolved either field.
+    """
+
+    def test_api_key_env_resolved_at_runtime_fallback(self, monkeypatch):
+        """api_key_env in fallback entry must be read from env and passed
+        as explicit_api_key to resolve_provider_client (#5392)."""
+        monkeypatch.setenv("MY_GOOGLE_KEY", "google-secret-from-env")
+
+        agent = _make_agent(
+            fallback_model={
+                "provider": "custom",
+                "model": "gemini-flash",
+                "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+                "api_key_env": "MY_GOOGLE_KEY",
+            },
+        )
+        captured = {}
+
+        def _fake_resolve(provider, model=None, raw_codex=False,
+                          explicit_base_url=None, explicit_api_key=None, **kw):
+            captured["explicit_api_key"] = explicit_api_key
+            captured["explicit_base_url"] = explicit_base_url
+            mock = MagicMock()
+            mock.api_key = explicit_api_key or "no-key"
+            mock.base_url = explicit_base_url or "https://example.com/v1"
+            return mock, model
+
+        with patch("agent.auxiliary_client.resolve_provider_client", side_effect=_fake_resolve):
+            result = agent._try_activate_fallback()
+
+        assert result is True
+        assert captured["explicit_api_key"] == "google-secret-from-env", (
+            "api_key_env value was not resolved and forwarded as explicit_api_key"
+        )
+        assert captured["explicit_base_url"] == "https://generativelanguage.googleapis.com/v1beta/openai"
+
+    def test_key_env_still_works_at_runtime_fallback(self, monkeypatch):
+        """key_env (canonical form) must still be resolved correctly."""
+        monkeypatch.setenv("MY_PROVIDER_KEY", "secret-via-key-env")
+
+        agent = _make_agent(
+            fallback_model={
+                "provider": "custom",
+                "model": "my-model",
+                "base_url": "https://api.example.com/v1",
+                "key_env": "MY_PROVIDER_KEY",
+            },
+        )
+        captured = {}
+
+        def _fake_resolve(provider, model=None, raw_codex=False,
+                          explicit_base_url=None, explicit_api_key=None, **kw):
+            captured["explicit_api_key"] = explicit_api_key
+            mock = MagicMock()
+            mock.api_key = explicit_api_key or "no-key"
+            mock.base_url = explicit_base_url or "https://api.example.com/v1"
+            return mock, model
+
+        with patch("agent.auxiliary_client.resolve_provider_client", side_effect=_fake_resolve):
+            result = agent._try_activate_fallback()
+
+        assert result is True
+        assert captured["explicit_api_key"] == "secret-via-key-env"
+
+    def test_api_key_env_unset_does_not_crash(self, monkeypatch):
+        """When api_key_env refers to an unset variable, explicit_api_key is None
+        (not an empty string) so the provider can fall through to its default."""
+        monkeypatch.delenv("ABSENT_KEY_VAR", raising=False)
+
+        agent = _make_agent(
+            fallback_model={
+                "provider": "openrouter",
+                "model": "some/model",
+                "api_key_env": "ABSENT_KEY_VAR",
+            },
+        )
+        captured = {}
+
+        def _fake_resolve(provider, model=None, raw_codex=False,
+                          explicit_base_url=None, explicit_api_key=None, **kw):
+            captured["explicit_api_key"] = explicit_api_key
+            mock = MagicMock()
+            mock.api_key = "fallback-default"
+            mock.base_url = "https://openrouter.ai/api/v1"
+            return mock, model
+
+        with patch("agent.auxiliary_client.resolve_provider_client", side_effect=_fake_resolve):
+            agent._try_activate_fallback()
+
+        assert captured["explicit_api_key"] is None, (
+            "Unset api_key_env should yield None, not empty string"
+        )

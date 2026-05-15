@@ -1,4 +1,3 @@
-# HADTO-PATCH: security
 """Tirith pre-exec security scanning wrapper.
 
 Runs the tirith binary as a subprocess to scan commands for content-level
@@ -53,7 +52,7 @@ def _env_bool(key: str, default: bool) -> bool:
     val = os.getenv(key)
     if val is None:
         return default
-    return val.lower() in ("1", "true", "yes")
+    return val.lower() in {"1", "true", "yes"}
 
 
 def _env_int(key: str, default: int) -> int:
@@ -72,7 +71,7 @@ def _load_security_config() -> dict:
         "tirith_enabled": True,
         "tirith_path": "tirith",
         "tirith_timeout": 5,
-        "tirith_fail_open": False,
+        "tirith_fail_open": True,
     }
     try:
         from hermes_cli.config import load_config
@@ -127,7 +126,7 @@ def _read_failure_reason() -> str | None:
         mtime = os.path.getmtime(p)
         if (time.time() - mtime) >= _MARKER_TTL:
             return None
-        with open(p, "r") as f:
+        with open(p, "r", encoding="utf-8") as f:
             return f.read().strip()
     except OSError:
         return None
@@ -161,7 +160,7 @@ def _mark_install_failed(reason: str = ""):
     try:
         p = _failure_marker_path()
         os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "w") as f:
+        with open(p, "w", encoding="utf-8") as f:
             f.write(reason)
     except OSError:
         pass
@@ -187,16 +186,17 @@ def _detect_target() -> str | None:
     system = platform.system()
     machine = platform.machine().lower()
 
+    # Android (Termux) is ABI-compatible with Linux — reuse Linux binaries.
     if system == "Darwin":
         plat = "apple-darwin"
-    elif system == "Linux":
+    elif system in {"Linux", "Android"}:
         plat = "unknown-linux-gnu"
     else:
         return None
 
-    if machine in ("x86_64", "amd64"):
+    if machine in {"x86_64", "amd64"}:
         arch = "x86_64"
-    elif machine in ("aarch64", "arm64"):
+    elif machine in {"aarch64", "arm64"}:
         arch = "aarch64"
     else:
         return None
@@ -257,7 +257,7 @@ def _verify_cosign(checksums_path: str, sig_path: str, cert_path: str) -> bool |
 def _verify_checksum(archive_path: str, checksums_path: str, archive_name: str) -> bool:
     """Verify SHA-256 of the archive against checksums.txt."""
     expected = None
-    with open(checksums_path) as f:
+    with open(checksums_path, encoding="utf-8") as f:
         for line in f:
             # Format: "<hash>  <filename>"
             parts = line.strip().split("  ", 1)
@@ -631,6 +631,12 @@ def check_command_security(command: str) -> dict:
     timeout = cfg["tirith_timeout"]
     fail_open = cfg["tirith_fail_open"]
 
+    if tirith_path is None:
+        logger.warning("tirith path resolved to None; scanning disabled")
+        if fail_open:
+            return {"action": "allow", "findings": [], "summary": "tirith path unavailable"}
+        return {"action": "block", "findings": [], "summary": "tirith path unavailable (fail-closed)"}
+
     try:
         result = subprocess.run(
             [tirith_path, "check", "--json", "--non-interactive",
@@ -644,7 +650,6 @@ def check_command_security(command: str) -> dict:
         logger.warning("tirith spawn failed: %s", exc)
         if fail_open:
             return {"action": "allow", "findings": [], "summary": f"tirith unavailable: {exc}"}
-        logger.warning("Tirith security scanner unavailable — commands requiring scanning will be blocked. Install tirith or set tirith_fail_open=true to allow.")
         return {"action": "block", "findings": [], "summary": f"tirith spawn failed (fail-closed): {exc}"}
     except subprocess.TimeoutExpired:
         logger.warning("tirith timed out after %ds", timeout)
