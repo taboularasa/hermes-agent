@@ -1036,6 +1036,110 @@ def _parse_env_var(name: str, default: str, converter=int, type_label: str = "in
         )
 
 
+_HOST_PATH_PREFIXES = ("/Users/", "/home/", "C:\\", "C:/")
+
+
+def _split_docker_volume_spec(spec: str) -> Optional[tuple[str, str, str]]:
+    raw = str(spec or "").strip()
+    if not raw or ":" not in raw:
+        return None
+    parts = raw.split(":")
+    if len(parts) < 2:
+        return None
+    if len(parts[0]) == 1 and parts[0].isalpha() and len(parts) >= 3:
+        host = f"{parts[0]}:{parts[1]}"
+        container = parts[2]
+        mode = ":".join(parts[3:])
+    else:
+        host = parts[0]
+        container = parts[1]
+        mode = ":".join(parts[2:])
+    if not host or not container:
+        return None
+    return host, container, mode
+
+
+def _map_host_path_to_docker_volume(path: str, volumes: list[Any]) -> Optional[str]:
+    if not path:
+        return None
+    try:
+        candidate = os.path.abspath(os.path.expanduser(path))
+    except Exception:
+        return None
+    for raw_volume in volumes or []:
+        if not isinstance(raw_volume, str):
+            continue
+        parsed = _split_docker_volume_spec(raw_volume)
+        if parsed is None:
+            continue
+        host_path, container_path, _mode = parsed
+        if not (
+            host_path.startswith(("/", "~"))
+            or re.match(r"^[A-Za-z]:[\\/]", host_path)
+        ):
+            continue
+        try:
+            host_root = os.path.abspath(os.path.expanduser(host_path)).rstrip(os.sep) or os.sep
+        except Exception:
+            continue
+        if candidate == host_root:
+            return container_path
+        prefix = host_root.rstrip(os.sep) + os.sep
+        if candidate.startswith(prefix):
+            rel = os.path.relpath(candidate, host_root).replace(os.sep, "/")
+            return f"{container_path.rstrip('/')}/{rel}"
+    return None
+
+
+def _sanitize_backend_cwd(
+    cwd: Optional[str],
+    *,
+    env_type: str,
+    fallback_cwd: str,
+    docker_volumes: list[Any],
+    source: str,
+) -> str:
+    candidate = os.path.expanduser(str(cwd or fallback_cwd))
+    if env_type == "docker":
+        mapped = _map_host_path_to_docker_volume(candidate, docker_volumes)
+        if mapped:
+            if mapped != candidate:
+                logger.info("Mapped %s=%r into Docker cwd %r.", source, candidate, mapped)
+            return mapped
+
+    if env_type in {"modal", "docker", "singularity", "daytona", "vercel_sandbox"}:
+        is_host_path = any(candidate.startswith(p) for p in _HOST_PATH_PREFIXES)
+        is_relative = not os.path.isabs(candidate)
+        if (is_host_path or is_relative) and candidate != fallback_cwd:
+            logger.info(
+                "Ignoring %s=%r for %s backend because it is not available inside the sandbox. Using %r instead.",
+                source,
+                candidate,
+                env_type,
+                fallback_cwd,
+            )
+            return fallback_cwd
+    return candidate
+
+
+def _resolve_effective_workdir(
+    workdir: Optional[str],
+    *,
+    config: Dict[str, Any],
+    env_type: str,
+    cwd: str,
+) -> str:
+    if not workdir:
+        return cwd
+    return _sanitize_backend_cwd(
+        workdir,
+        env_type=env_type,
+        fallback_cwd=cwd,
+        docker_volumes=config.get("docker_volumes", []),
+        source="workdir",
+    )
+
+
 def _get_env_config() -> Dict[str, Any]:
     """Get terminal environment configuration from environment variables."""
     # Default image with Python and Node.js for maximum compatibility
@@ -1056,33 +1160,35 @@ def _get_env_config() -> Dict[str, Any]:
     else:
         default_cwd = "/root"
 
+    docker_volumes = _parse_env_var("TERMINAL_DOCKER_VOLUMES", "[]", json.loads, "valid JSON")
+
     # Read TERMINAL_CWD but sanity-check it for container backends.
+    # Host-only prefixes covered here: /Users/, /home/, C:\\, C:/.
     # If Docker cwd passthrough is explicitly enabled, remap the host path to
     # /workspace and track the original host path separately. Otherwise keep the
-    # normal sandbox behavior and discard host paths.
+    # normal sandbox behavior: configured bind-mounted host paths are mapped
+    # into their container path, and unmapped host paths are discarded.
     cwd = os.getenv("TERMINAL_CWD", default_cwd)
     if cwd:
         cwd = os.path.expanduser(cwd)
     host_cwd = None
-    host_prefixes = ("/Users/", "/home/", "C:\\", "C:/")
     if env_type == "docker" and mount_docker_cwd:
         docker_cwd_source = os.getenv("TERMINAL_CWD") or os.getcwd()
         candidate = os.path.abspath(os.path.expanduser(docker_cwd_source))
         if (
-            any(candidate.startswith(p) for p in host_prefixes)
+            any(candidate.startswith(p) for p in _HOST_PATH_PREFIXES)
             or (os.path.isabs(candidate) and os.path.isdir(candidate) and not candidate.startswith(("/workspace", "/root")))
         ):
             host_cwd = candidate
             cwd = "/workspace"
-    elif env_type in {"modal", "docker", "singularity", "daytona", "vercel_sandbox"} and cwd:
-        # Host paths and relative paths that won't work inside containers
-        is_host_path = any(cwd.startswith(p) for p in host_prefixes)
-        is_relative = not os.path.isabs(cwd)  # e.g. "." or "src/"
-        if (is_host_path or is_relative) and cwd != default_cwd:
-            logger.info("Ignoring TERMINAL_CWD=%r for %s backend "
-                        "(host/relative path won't work in sandbox). Using %r instead.",
-                        cwd, env_type, default_cwd)
-            cwd = default_cwd
+    elif cwd:
+        cwd = _sanitize_backend_cwd(
+            cwd,
+            env_type=env_type,
+            fallback_cwd=default_cwd,
+            docker_volumes=docker_volumes,
+            source="TERMINAL_CWD",
+        )
 
     return {
         "env_type": env_type,
@@ -1118,7 +1224,7 @@ def _get_env_config() -> Dict[str, Any]:
         "container_disk": _parse_env_var("TERMINAL_CONTAINER_DISK", "51200"),        # MB (default 50GB)
         "container_persistent": os.getenv("TERMINAL_CONTAINER_PERSISTENT", "true").lower() in {"true", "1", "yes"},
         "container_isolation": _container_isolation_scope(),
-        "docker_volumes": _parse_env_var("TERMINAL_DOCKER_VOLUMES", "[]", json.loads, "valid JSON"),
+        "docker_volumes": docker_volumes,
         "docker_env": _parse_env_var("TERMINAL_DOCKER_ENV", "{}", json.loads, "valid JSON"),
         "docker_run_as_host_user": os.getenv("TERMINAL_DOCKER_RUN_AS_HOST_USER", "false").lower() in {"true", "1", "yes"},
         "docker_extra_args": _parse_env_var("TERMINAL_DOCKER_EXTRA_ARGS", "[]", json.loads, "valid JSON"),
@@ -1937,6 +2043,13 @@ def terminal_tool(
                     "status": "blocked"
                 }, ensure_ascii=False)
 
+        effective_workdir = _resolve_effective_workdir(
+            workdir,
+            config=config,
+            env_type=env_type,
+            cwd=cwd,
+        )
+
         # Prepare command for execution
         pty_disabled_reason = None
         effective_pty = pty
@@ -1957,12 +2070,11 @@ def terminal_tool(
             from tools.process_registry import process_registry
 
             session_key = get_current_session_key(default="")
-            effective_cwd = workdir or cwd
             try:
                 if env_type == "local":
                     proc_session = process_registry.spawn_local(
                         command=command,
-                        cwd=effective_cwd,
+                        cwd=effective_workdir,
                         task_id=effective_task_id,
                         session_key=session_key,
                         env_vars=env.env if hasattr(env, 'env') else None,
@@ -1972,7 +2084,7 @@ def terminal_tool(
                     proc_session = process_registry.spawn_via_env(
                         env=env,
                         command=command,
-                        cwd=effective_cwd,
+                        cwd=effective_workdir,
                         task_id=effective_task_id,
                         session_key=session_key,
                     )
@@ -2066,7 +2178,7 @@ def terminal_tool(
                 try:
                     execute_kwargs = {
                         "timeout": effective_timeout,
-                        "cwd": workdir or cwd,
+                        "cwd": effective_workdir,
                     }
                     result = env.execute(command, **execute_kwargs)
                 except Exception as e:

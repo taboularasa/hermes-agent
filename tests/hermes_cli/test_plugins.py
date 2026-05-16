@@ -186,6 +186,61 @@ class TestPluginDiscovery:
 
         assert "ep_plugin" in mgr._plugins
 
+    def test_entry_point_register_callable_loads(self, tmp_path, monkeypatch):
+        """Entry points may point directly at a register(ctx) callable."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_test"))
+        (tmp_path / "hermes_test" / "config.yaml").write_text(
+            yaml.safe_dump({"plugins": {"enabled": ["ep_plugin"]}})
+        )
+        called = []
+
+        def register(ctx):
+            called.append(ctx.manifest.name)
+
+        fake_ep = MagicMock()
+        fake_ep.name = "ep_plugin"
+        fake_ep.value = "fake_ep_plugin:register"
+        fake_ep.group = ENTRY_POINTS_GROUP
+        fake_ep.load.return_value = register
+
+        def fake_entry_points():
+            result = MagicMock()
+            result.select = MagicMock(return_value=[fake_ep])
+            return result
+
+        with patch("importlib.metadata.entry_points", fake_entry_points):
+            mgr = PluginManager()
+            mgr.discover_and_load()
+
+        assert called == ["ep_plugin"]
+        assert mgr._plugins["ep_plugin"].enabled
+        assert mgr._plugins["ep_plugin"].error is None
+
+    def test_user_plugin_overrides_same_named_entry_point(self, tmp_path, monkeypatch):
+        """A user-installed plugin directory must beat a same-key entry point."""
+        hermes_home = tmp_path / "hermes_test"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        _make_plugin_dir(hermes_home / "plugins", "hadto")
+
+        fake_ep = MagicMock()
+        fake_ep.name = "hadto"
+        fake_ep.value = "bad_hadto_entrypoint:no_register"
+        fake_ep.group = ENTRY_POINTS_GROUP
+        fake_ep.load.return_value = object()
+
+        def fake_entry_points():
+            result = MagicMock()
+            result.select = MagicMock(return_value=[fake_ep])
+            return result
+
+        with patch("importlib.metadata.entry_points", fake_entry_points):
+            mgr = PluginManager()
+            mgr.discover_and_load()
+
+        assert mgr._plugins["hadto"].manifest.source == "user"
+        assert mgr._plugins["hadto"].enabled
+        assert mgr._plugins["hadto"].error is None
+
 
 # ── TestPluginLoading ──────────────────────────────────────────────────────
 
