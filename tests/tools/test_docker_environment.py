@@ -155,6 +155,21 @@ def test_auto_mount_disabled_by_default(monkeypatch, tmp_path):
     assert f"{project_dir}:/workspace" not in run_args_str
 
 
+def test_container_keepalive_has_no_fixed_two_hour_timeout(monkeypatch):
+    """The Docker sandbox must not exit while long HITL flows are still polling."""
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    calls = _mock_subprocess_run(monkeypatch)
+
+    _make_dummy_env()
+
+    run_calls = [c for c in calls if isinstance(c[0], list) and len(c[0]) >= 2 and c[0][1] == "run"]
+    assert run_calls, "docker run should have been called"
+    run_args = run_calls[0][0]
+
+    assert run_args[-3:] == ["tail", "-f", "/dev/null"]
+    assert "2h" not in run_args
+
+
 def test_auto_mount_skipped_when_workspace_already_mounted(monkeypatch, tmp_path):
     """Explicit user volumes for /workspace should take precedence over cwd mount."""
     project_dir = tmp_path / "my-project"
