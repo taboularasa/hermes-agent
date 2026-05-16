@@ -25,6 +25,7 @@ mirrors the pattern used in tests/hermes_cli/test_config_drift.py.
 
 import ast
 import inspect
+import json
 
 
 def _extract_dict_values(source: str, dict_name: str) -> set[str]:
@@ -238,3 +239,39 @@ def test_container_isolation_is_bridged_everywhere():
     assert "container_isolation" in _gateway_env_map_keys()
     assert "container_isolation" in _save_config_env_sync_keys()
     assert "TERMINAL_CONTAINER_ISOLATION" in _terminal_tool_env_var_names()
+
+
+def test_docker_cwd_uses_explicit_same_path_bind_mount(monkeypatch, tmp_path):
+    """A configured host path should remain usable when it is explicitly bind-mounted."""
+    stacks = tmp_path / "stacks"
+    stacks.mkdir()
+
+    monkeypatch.setenv("TERMINAL_ENV", "docker")
+    monkeypatch.setenv("TERMINAL_CWD", str(stacks))
+    monkeypatch.setenv("TERMINAL_DOCKER_VOLUMES", json.dumps([f"{stacks}:{stacks}"]))
+
+    from tools.terminal_tool import _get_env_config
+
+    assert _get_env_config()["cwd"] == str(stacks)
+
+
+def test_docker_workdir_falls_back_when_ctx_path_is_unmounted(monkeypatch, tmp_path):
+    """Stale ctx worktree paths must not be sent to Docker as chdir targets."""
+    stacks = tmp_path / "stacks"
+    stacks.mkdir()
+    stale_ctx = "/home/david/.ctx-data/worktrees/missing/session"
+
+    monkeypatch.setenv("TERMINAL_ENV", "docker")
+    monkeypatch.setenv("TERMINAL_CWD", str(stacks))
+    monkeypatch.setenv("TERMINAL_DOCKER_VOLUMES", json.dumps([f"{stacks}:{stacks}"]))
+
+    from tools.terminal_tool import _get_env_config, _resolve_effective_workdir
+
+    config = _get_env_config()
+    assert config["cwd"] == str(stacks)
+    assert _resolve_effective_workdir(
+        stale_ctx,
+        config=config,
+        env_type="docker",
+        cwd=config["cwd"],
+    ) == str(stacks)
