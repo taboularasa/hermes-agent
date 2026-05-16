@@ -1036,6 +1036,50 @@ def _parse_env_var(name: str, default: str, converter=int, type_label: str = "in
         )
 
 
+def _split_docker_volume_spec(spec: str) -> tuple[str, str] | None:
+    """Return (host_path, container_path) for a simple Docker bind spec."""
+    if not isinstance(spec, str):
+        return None
+    parts = spec.split(":")
+    if len(parts) < 2:
+        return None
+    host_path = parts[0].strip()
+    container_path = parts[1].strip()
+    if not host_path or not container_path:
+        return None
+    if not os.path.isabs(host_path) or not container_path.startswith("/"):
+        return None
+    return host_path, container_path
+
+
+def _map_host_path_to_docker_volume(host_path: str, volumes: list[Any]) -> str | None:
+    """Map a host path into its explicitly configured Docker bind mount."""
+    try:
+        candidate = Path(host_path).expanduser().resolve()
+    except Exception:
+        return None
+
+    best: tuple[int, str] | None = None
+    for spec in volumes or []:
+        split = _split_docker_volume_spec(spec)
+        if not split:
+            continue
+        host_root_raw, container_root_raw = split
+        try:
+            host_root = Path(host_root_raw).expanduser().resolve()
+            relative = candidate.relative_to(host_root)
+        except Exception:
+            continue
+
+        container_root = container_root_raw.rstrip("/") or "/"
+        mapped = str(Path(container_root) / relative)
+        score = len(str(host_root))
+        if best is None or score > best[0]:
+            best = (score, mapped)
+
+    return best[1] if best else None
+
+
 def _get_env_config() -> Dict[str, Any]:
     """Get terminal environment configuration from environment variables."""
     # Default image with Python and Node.js for maximum compatibility
@@ -1043,6 +1087,7 @@ def _get_env_config() -> Dict[str, Any]:
     env_type = os.getenv("TERMINAL_ENV", "local")
     
     mount_docker_cwd = os.getenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "false").lower() in {"true", "1", "yes"}
+    docker_volumes = _parse_env_var("TERMINAL_DOCKER_VOLUMES", "[]", json.loads, "valid JSON")
 
     # Default cwd: local uses the host's current directory, ssh uses the
     # remote home, Vercel uses its documented workspace root, and everything
@@ -1065,10 +1110,13 @@ def _get_env_config() -> Dict[str, Any]:
         cwd = os.path.expanduser(cwd)
     host_cwd = None
     host_prefixes = ("/Users/", "/home/", "C:\\", "C:/")
-    if env_type == "docker" and mount_docker_cwd:
+    if env_type == "docker":
         docker_cwd_source = os.getenv("TERMINAL_CWD") or os.getcwd()
         candidate = os.path.abspath(os.path.expanduser(docker_cwd_source))
-        if (
+        mounted_cwd = _map_host_path_to_docker_volume(candidate, docker_volumes)
+        if mounted_cwd:
+            cwd = mounted_cwd
+        elif mount_docker_cwd and (
             any(candidate.startswith(p) for p in host_prefixes)
             or (os.path.isabs(candidate) and os.path.isdir(candidate) and not candidate.startswith(("/workspace", "/root")))
         ):
@@ -1118,7 +1166,7 @@ def _get_env_config() -> Dict[str, Any]:
         "container_disk": _parse_env_var("TERMINAL_CONTAINER_DISK", "51200"),        # MB (default 50GB)
         "container_persistent": os.getenv("TERMINAL_CONTAINER_PERSISTENT", "true").lower() in {"true", "1", "yes"},
         "container_isolation": _container_isolation_scope(),
-        "docker_volumes": _parse_env_var("TERMINAL_DOCKER_VOLUMES", "[]", json.loads, "valid JSON"),
+        "docker_volumes": docker_volumes,
         "docker_env": _parse_env_var("TERMINAL_DOCKER_ENV", "{}", json.loads, "valid JSON"),
         "docker_run_as_host_user": os.getenv("TERMINAL_DOCKER_RUN_AS_HOST_USER", "false").lower() in {"true", "1", "yes"},
         "docker_extra_args": _parse_env_var("TERMINAL_DOCKER_EXTRA_ARGS", "[]", json.loads, "valid JSON"),

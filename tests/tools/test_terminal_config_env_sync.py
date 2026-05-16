@@ -25,6 +25,7 @@ mirrors the pattern used in tests/hermes_cli/test_config_drift.py.
 
 import ast
 import inspect
+import json
 
 
 def _extract_dict_values(source: str, dict_name: str) -> set[str]:
@@ -209,6 +210,44 @@ def test_docker_mount_cwd_to_workspace_is_bridged_everywhere():
     assert "docker_mount_cwd_to_workspace" in _gateway_env_map_keys()
     assert "docker_mount_cwd_to_workspace" in _save_config_env_sync_keys()
     assert "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE" in _terminal_tool_env_var_names()
+
+
+def test_docker_cwd_uses_explicit_same_path_volume(monkeypatch, tmp_path):
+    """A bind-mounted host cwd should keep the same path inside Docker."""
+    import tools.terminal_tool as tt
+
+    stacks = tmp_path / "stacks"
+    repo = stacks / "repo"
+    repo.mkdir(parents=True)
+
+    monkeypatch.setenv("TERMINAL_ENV", "docker")
+    monkeypatch.setenv("TERMINAL_CWD", str(repo))
+    monkeypatch.setenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "true")
+    monkeypatch.setenv("TERMINAL_DOCKER_VOLUMES", json.dumps([f"{stacks}:{stacks}"]))
+
+    cfg = tt._get_env_config()
+
+    assert cfg["cwd"] == str(repo)
+    assert cfg["host_cwd"] is None
+
+
+def test_docker_cwd_maps_to_explicit_container_volume(monkeypatch, tmp_path):
+    """Explicit volume mappings should win over the legacy /workspace remap."""
+    import tools.terminal_tool as tt
+
+    stacks = tmp_path / "stacks"
+    repo = stacks / "repo"
+    repo.mkdir(parents=True)
+
+    monkeypatch.setenv("TERMINAL_ENV", "docker")
+    monkeypatch.setenv("TERMINAL_CWD", str(repo))
+    monkeypatch.setenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "true")
+    monkeypatch.setenv("TERMINAL_DOCKER_VOLUMES", json.dumps([f"{stacks}:/workspace"]))
+
+    cfg = tt._get_env_config()
+
+    assert cfg["cwd"] == "/workspace/repo"
+    assert cfg["host_cwd"] is None
 
 
 def test_docker_env_is_bridged_everywhere():
