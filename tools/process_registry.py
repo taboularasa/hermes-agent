@@ -735,6 +735,29 @@ class ProcessRegistry:
                     if delta:
                         self._check_watch_patterns(session, delta)
 
+                # Prefer the explicit exit sentinel over kill -0. Sandbox
+                # wrapper shells can remain as zombies under PID 1, and kill
+                # still reports zombies as existing even though the command is
+                # done and the exit file has already been written.
+                exit_probe = env.execute(
+                    (
+                        f"if test -f {quoted_exit_path}; then "
+                        f"cat {quoted_exit_path}; else echo __HERMES_RUNNING__; fi"
+                    ),
+                    timeout=5,
+                )
+                exit_probe_output = exit_probe.get("output", "").strip()
+                if exit_probe_output:
+                    exit_line = exit_probe_output.splitlines()[-1].strip()
+                    if exit_line != "__HERMES_RUNNING__":
+                        try:
+                            session.exit_code = int(exit_line)
+                        except ValueError:
+                            session.exit_code = -1
+                        session.exited = True
+                        self._move_to_finished(session)
+                        return
+
                 # Check if process is still running
                 check = env.execute(
                     f"kill -0 \"$(cat {quoted_pid_path} 2>/dev/null)\" 2>/dev/null; echo $?",

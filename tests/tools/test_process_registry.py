@@ -505,6 +505,7 @@ class TestSpawnEnvSanitization:
                 self.commands = []
                 self._responses = iter([
                     {"output": "hello\n"},
+                    {"output": "__HERMES_RUNNING__\n"},
                     {"output": "1\n"},
                     {"output": "0\n"},
                 ])
@@ -526,8 +527,42 @@ class TestSpawnEnvSanitization:
             )
 
         assert env.commands[0][0] == "cat '/path with spaces/hermes_bg.log' 2>/dev/null"
-        assert env.commands[1][0] == "kill -0 \"$(cat '/path with spaces/hermes_bg.pid' 2>/dev/null)\" 2>/dev/null; echo $?"
-        assert env.commands[2][0] == "cat '/path with spaces/hermes_bg.exit' 2>/dev/null"
+        assert env.commands[1][0] == "if test -f '/path with spaces/hermes_bg.exit'; then cat '/path with spaces/hermes_bg.exit'; else echo __HERMES_RUNNING__; fi"
+        assert env.commands[2][0] == "kill -0 \"$(cat '/path with spaces/hermes_bg.pid' 2>/dev/null)\" 2>/dev/null; echo $?"
+        assert env.commands[3][0] == "cat '/path with spaces/hermes_bg.exit' 2>/dev/null"
+
+    def test_env_poller_prefers_exit_file_over_zombie_pid(self, registry):
+        session = _make_session(sid="proc_zombie")
+        session.exited = False
+
+        class FakeEnv:
+            def __init__(self):
+                self.commands = []
+                self._responses = iter([
+                    {"output": "done\n"},
+                    {"output": "0\n"},
+                ])
+
+            def execute(self, command, timeout=None):
+                self.commands.append((command, timeout))
+                return next(self._responses)
+
+        env = FakeEnv()
+
+        with patch("tools.process_registry.time.sleep", return_value=None), \
+            patch.object(registry, "_move_to_finished") as move_to_finished:
+            registry._env_poller_loop(
+                session,
+                env,
+                "/tmp/hermes_bg.log",
+                "/tmp/hermes_bg.pid",
+                "/tmp/hermes_bg.exit",
+            )
+
+        assert session.exited is True
+        assert session.exit_code == 0
+        assert all("kill -0" not in command for command, _timeout in env.commands)
+        move_to_finished.assert_called_once_with(session)
 
 
 # =========================================================================
