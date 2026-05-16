@@ -25,6 +25,7 @@ mirrors the pattern used in tests/hermes_cli/test_config_drift.py.
 
 import ast
 import inspect
+import json
 
 
 def _extract_dict_values(source: str, dict_name: str) -> set[str]:
@@ -238,3 +239,37 @@ def test_container_isolation_is_bridged_everywhere():
     assert "container_isolation" in _gateway_env_map_keys()
     assert "container_isolation" in _save_config_env_sync_keys()
     assert "TERMINAL_CONTAINER_ISOLATION" in _terminal_tool_env_var_names()
+
+
+def test_docker_explicit_same_path_volume_makes_host_cwd_valid(monkeypatch):
+    import tools.terminal_tool as tt
+
+    monkeypatch.setenv("TERMINAL_ENV", "docker")
+    monkeypatch.setenv("TERMINAL_CWD", "/home/david/stacks")
+    monkeypatch.setenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "false")
+    monkeypatch.setenv(
+        "TERMINAL_DOCKER_VOLUMES",
+        json.dumps(["/home/david/stacks:/home/david/stacks"]),
+    )
+
+    config = tt._get_env_config()
+
+    assert config["cwd"] == "/home/david/stacks"
+    assert config["host_cwd"] is None
+
+
+def test_docker_explicit_workspace_volume_maps_host_cwd(monkeypatch):
+    import tools.terminal_tool as tt
+
+    monkeypatch.setenv("TERMINAL_ENV", "docker")
+    monkeypatch.setenv("TERMINAL_CWD", "/home/david/project/subdir")
+    monkeypatch.setenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "false")
+    monkeypatch.setenv(
+        "TERMINAL_DOCKER_VOLUMES",
+        json.dumps(["/home/david/project:/workspace"]),
+    )
+
+    config = tt._get_env_config()
+
+    assert config["cwd"] == "/workspace/subdir"
+    assert config["host_cwd"] is None

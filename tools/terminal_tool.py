@@ -1036,6 +1036,47 @@ def _parse_env_var(name: str, default: str, converter=int, type_label: str = "in
         )
 
 
+def _split_docker_volume_spec(spec: Any) -> tuple[str, str] | None:
+    """Return ``(host_path, container_path)`` for a Docker volume spec."""
+    if not isinstance(spec, str):
+        return None
+    parts = spec.split(":")
+    if len(parts) < 2:
+        return None
+    host_path = os.path.abspath(os.path.expanduser(parts[0]))
+    container_path = parts[1].rstrip("/") or "/"
+    if not host_path or not container_path.startswith("/"):
+        return None
+    return host_path, container_path
+
+
+def _map_host_path_to_docker_volume(path: str, volume_specs: list[Any]) -> str | None:
+    """Map a host path into a matching explicit Docker bind destination."""
+    try:
+        candidate = os.path.abspath(os.path.expanduser(path))
+    except Exception:
+        return None
+
+    mounts: list[tuple[str, str]] = []
+    for spec in volume_specs:
+        mount = _split_docker_volume_spec(spec)
+        if mount is not None:
+            mounts.append(mount)
+
+    for host_path, container_path in sorted(mounts, key=lambda item: len(item[0]), reverse=True):
+        try:
+            common = os.path.commonpath([candidate, host_path])
+        except ValueError:
+            continue
+        if common != host_path:
+            continue
+        rel = os.path.relpath(candidate, host_path)
+        if rel == ".":
+            return container_path
+        return os.path.normpath(os.path.join(container_path, rel))
+    return None
+
+
 def _get_env_config() -> Dict[str, Any]:
     """Get terminal environment configuration from environment variables."""
     # Default image with Python and Node.js for maximum compatibility
@@ -1043,6 +1084,7 @@ def _get_env_config() -> Dict[str, Any]:
     env_type = os.getenv("TERMINAL_ENV", "local")
     
     mount_docker_cwd = os.getenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "false").lower() in {"true", "1", "yes"}
+    docker_volumes = _parse_env_var("TERMINAL_DOCKER_VOLUMES", "[]", json.loads, "valid JSON")
 
     # Default cwd: local uses the host's current directory, ssh uses the
     # remote home, Vercel uses its documented workspace root, and everything
@@ -1079,10 +1121,18 @@ def _get_env_config() -> Dict[str, Any]:
         is_host_path = any(cwd.startswith(p) for p in host_prefixes)
         is_relative = not os.path.isabs(cwd)  # e.g. "." or "src/"
         if (is_host_path or is_relative) and cwd != default_cwd:
-            logger.info("Ignoring TERMINAL_CWD=%r for %s backend "
-                        "(host/relative path won't work in sandbox). Using %r instead.",
-                        cwd, env_type, default_cwd)
-            cwd = default_cwd
+            mapped_cwd = (
+                _map_host_path_to_docker_volume(cwd, docker_volumes)
+                if env_type == "docker" and is_host_path
+                else None
+            )
+            if mapped_cwd:
+                cwd = mapped_cwd
+            else:
+                logger.info("Ignoring TERMINAL_CWD=%r for %s backend "
+                            "(host/relative path won't work in sandbox). Using %r instead.",
+                            cwd, env_type, default_cwd)
+                cwd = default_cwd
 
     return {
         "env_type": env_type,
@@ -1118,7 +1168,7 @@ def _get_env_config() -> Dict[str, Any]:
         "container_disk": _parse_env_var("TERMINAL_CONTAINER_DISK", "51200"),        # MB (default 50GB)
         "container_persistent": os.getenv("TERMINAL_CONTAINER_PERSISTENT", "true").lower() in {"true", "1", "yes"},
         "container_isolation": _container_isolation_scope(),
-        "docker_volumes": _parse_env_var("TERMINAL_DOCKER_VOLUMES", "[]", json.loads, "valid JSON"),
+        "docker_volumes": docker_volumes,
         "docker_env": _parse_env_var("TERMINAL_DOCKER_ENV", "{}", json.loads, "valid JSON"),
         "docker_run_as_host_user": os.getenv("TERMINAL_DOCKER_RUN_AS_HOST_USER", "false").lower() in {"true", "1", "yes"},
         "docker_extra_args": _parse_env_var("TERMINAL_DOCKER_EXTRA_ARGS", "[]", json.loads, "valid JSON"),

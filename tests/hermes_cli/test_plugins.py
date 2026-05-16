@@ -186,6 +186,40 @@ class TestPluginDiscovery:
 
         assert "ep_plugin" in mgr._plugins
 
+    def test_entry_point_register_callable_loads(self, tmp_path, monkeypatch):
+        """Entry points may point directly at a plugin register function."""
+        hermes_home = tmp_path / "hermes_test"
+        hermes_home.mkdir(exist_ok=True)
+        (hermes_home / "config.yaml").write_text(
+            yaml.safe_dump({"plugins": {"enabled": ["ep_plugin"]}})
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        called = []
+
+        def fake_register(ctx):
+            called.append(ctx.manifest.name)
+            ctx.register_hook("on_session_start", lambda **kw: None)
+
+        fake_ep = MagicMock()
+        fake_ep.name = "ep_plugin"
+        fake_ep.value = "fake_ep_plugin:register"
+        fake_ep.group = ENTRY_POINTS_GROUP
+        fake_ep.load.return_value = fake_register
+
+        def fake_entry_points():
+            result = MagicMock()
+            result.select = MagicMock(return_value=[fake_ep])
+            return result
+
+        with patch("importlib.metadata.entry_points", fake_entry_points):
+            mgr = PluginManager()
+            mgr.discover_and_load()
+
+        assert called == ["ep_plugin"]
+        assert mgr._plugins["ep_plugin"].enabled
+        assert mgr._plugins["ep_plugin"].hooks_registered == ["on_session_start"]
+
 
 # ── TestPluginLoading ──────────────────────────────────────────────────────
 
