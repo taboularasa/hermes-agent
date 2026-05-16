@@ -826,9 +826,13 @@ class PluginManager:
         # don't collide even when both manifests say ``name: openai``.
         disabled = _get_disabled_plugins()
         enabled = _get_enabled_plugins()  # None = opt-in default (nothing enabled)
+        source_priority = {"bundled": 0, "entrypoint": 1, "user": 2, "project": 3}
         winners: Dict[str, PluginManifest] = {}
         for manifest in manifests:
-            winners[manifest.key or manifest.name] = manifest
+            lookup_key = manifest.key or manifest.name
+            existing = winners.get(lookup_key)
+            if existing is None or source_priority.get(manifest.source, 0) >= source_priority.get(existing.source, 0):
+                winners[lookup_key] = manifest
         for manifest in winners.values():
             lookup_key = manifest.key or manifest.name
 
@@ -1240,7 +1244,22 @@ class PluginManager:
 
         for ep in group_eps:
             if ep.name == manifest.name:
-                return ep.load()
+                loaded = ep.load()
+                if isinstance(loaded, types.ModuleType):
+                    return loaded
+                register_fn = getattr(loaded, "register", None)
+                if callable(register_fn):
+                    module = types.ModuleType(str(manifest.name))
+                    module.register = register_fn  # type: ignore[attr-defined]
+                    return module
+                if callable(loaded):
+                    module = types.ModuleType(str(manifest.name))
+                    module.register = loaded  # type: ignore[attr-defined]
+                    return module
+                raise TypeError(
+                    f"Entry point '{manifest.name}' loaded {type(loaded).__name__}, "
+                    "expected a module or register(ctx) callable"
+                )
 
         raise ImportError(
             f"Entry point '{manifest.name}' not found in group '{ENTRY_POINTS_GROUP}'"
