@@ -1240,7 +1240,22 @@ class PluginManager:
 
         for ep in group_eps:
             if ep.name == manifest.name:
-                return ep.load()
+                loaded = ep.load()
+                if isinstance(loaded, types.ModuleType):
+                    return loaded
+                if callable(loaded):
+                    key = manifest.key or manifest.name
+                    slug = key.replace("/", "__").replace("-", "_")
+                    module_name = f"{_NS_PARENT}.{slug}_entrypoint"
+                    module = types.ModuleType(module_name)
+                    module.__package__ = module_name.rpartition(".")[0]
+                    module.register = loaded  # type: ignore[attr-defined]
+                    sys.modules[module_name] = module
+                    return module
+                raise TypeError(
+                    f"Entry point '{manifest.name}' loaded {type(loaded).__name__}, "
+                    "expected a module or register callable"
+                )
 
         raise ImportError(
             f"Entry point '{manifest.name}' not found in group '{ENTRY_POINTS_GROUP}'"
