@@ -63,6 +63,24 @@ def _normalize_skill_list(skill: Optional[str] = None, skills: Optional[Any] = N
     return normalized
 
 
+def _normalize_string_list(value: Any) -> Optional[List[str]]:
+    """Normalize optional list-or-string cron metadata fields."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        raw_items = [part.strip() for part in value.replace("\n", ",").split(",")]
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = [str(item or "").strip() for item in value]
+    else:
+        return None
+
+    normalized: List[str] = []
+    for item in raw_items:
+        if item and item not in normalized:
+            normalized.append(item)
+    return normalized or None
+
+
 def _apply_skill_fields(job: Dict[str, Any]) -> Dict[str, Any]:
     """Return a job dict with canonical `skills` and legacy `skill` fields aligned."""
     normalized = dict(job)
@@ -127,6 +145,9 @@ def _normalize_job_record(job: Dict[str, Any]) -> Dict[str, Any]:
     if not state:
         state = "scheduled" if normalized.get("enabled", True) else "paused"
     normalized["state"] = state
+    for key in ("required_tools", "required_web_backends"):
+        if key in normalized:
+            normalized[key] = _normalize_string_list(normalized.get(key))
 
     return normalized
 
@@ -495,6 +516,8 @@ def create_job(
     context_from: Optional[Union[str, List[str]]] = None,
     enabled_toolsets: Optional[List[str]] = None,
     workdir: Optional[str] = None,
+    required_tools: Optional[List[str]] = None,
+    required_web_backends: Optional[List[str]] = None,
     no_agent: bool = False,
 ) -> Dict[str, Any]:
     """
@@ -536,6 +559,12 @@ def create_job(
                 With ``no_agent=True``, ``workdir`` is still applied as the
                 script's cwd so relative paths inside the script behave
                 predictably.
+        required_tools: Optional list of tool names the scheduler should
+                preflight before the agent runs. Reports distinguish missing
+                tool surface from credential-gated availability.
+        required_web_backends: Optional list of named web providers the
+                scheduler should preflight before the agent runs. Currently
+                used for Firecrawl downgrade/reporting gates.
         no_agent: When True, skip the agent entirely — run ``script`` on schedule
                 and deliver its stdout directly. Empty stdout = silent (no
                 delivery). Requires ``script`` to be set. Ideal for classic
@@ -573,6 +602,8 @@ def create_job(
     normalized_toolsets = [str(t).strip() for t in enabled_toolsets if str(t).strip()] if enabled_toolsets else None
     normalized_toolsets = normalized_toolsets or None
     normalized_workdir = _normalize_workdir(workdir)
+    normalized_required_tools = _normalize_string_list(required_tools)
+    normalized_required_web_backends = _normalize_string_list(required_web_backends)
     normalized_no_agent = bool(no_agent)
 
     # no_agent jobs are meaningless without a script — the script IS the job.
@@ -627,6 +658,8 @@ def create_job(
         "origin": origin,  # Tracks where job was created for "origin" delivery
         "enabled_toolsets": normalized_toolsets,
         "workdir": normalized_workdir,
+        "required_tools": normalized_required_tools,
+        "required_web_backends": normalized_required_web_backends,
     }
 
     jobs = load_jobs()
@@ -714,6 +747,9 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
             normalized_skills = _normalize_skill_list(updated.get("skill"), updated.get("skills"))
             updated["skills"] = normalized_skills
             updated["skill"] = normalized_skills[0] if normalized_skills else None
+        for key in ("required_tools", "required_web_backends"):
+            if key in updates:
+                updated[key] = _normalize_string_list(updates.get(key))
 
         if schedule_changed:
             updated_schedule = updated["schedule"]

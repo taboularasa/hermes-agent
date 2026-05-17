@@ -45,7 +45,12 @@ class TestGetToolset:
 
         ts = get_toolset("web")
         assert ts is not None
-        assert set(ts["tools"]) == {"web_search", "web_search_matrix", "web_extract", "web_search_plus"}
+        assert set(ts["tools"]) == {
+            "web_search",
+            "web_search_matrix",
+            "web_extract",
+            "web_search_plus",
+        }
 
     def test_unknown_returns_none(self):
         assert get_toolset("nonexistent") is None
@@ -55,6 +60,10 @@ class TestResolveToolset:
     def test_leaf_toolset(self):
         tools = resolve_toolset("web")
         assert set(tools) == {"web_search", "web_search_matrix", "web_extract"}
+
+    def test_search_toolset_includes_matrix_search(self):
+        tools = resolve_toolset("search")
+        assert set(tools) == {"web_search", "web_search_matrix"}
 
     def test_composite_toolset(self):
         tools = resolve_toolset("debugging")
@@ -251,6 +260,8 @@ class TestPluginToolsets:
 class TestDefaultPlatformWebSearchCoverage:
     def test_hermes_whatsapp_toolset_includes_web_search(self):
         assert "web_search" in resolve_toolset("hermes-whatsapp")
+        assert "web_search_matrix" in resolve_toolset("hermes-whatsapp")
 
     def test_hermes_api_server_toolset_includes_web_search(self):
         assert "web_search" in resolve_toolset("hermes-api-server")
+        assert "web_search_matrix" in resolve_toolset("hermes-api-server")

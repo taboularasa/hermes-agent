@@ -110,6 +110,21 @@ def _toolset_allowed_for_platform(ts_key: str, platform: str) -> bool:
     return allowed is None or platform in allowed
 
 
+def _toolset_subset_matches(ts_key: str, ts_tools: Set[str], available_tools: Set[str]) -> bool:
+    """Return True when a configurable toolset is represented in a composite.
+
+    The web toolset gained ``web_search_matrix`` after older composites and
+    tests already represented "web" as ``web_search`` + ``web_extract``. Keep
+    that legacy pair sufficient for inference so existing platform composites
+    continue to get the full current web toolset.
+    """
+    if ts_tools and ts_tools.issubset(available_tools):
+        return True
+    if ts_key == "web":
+        return {"web_search", "web_extract"}.issubset(available_tools)
+    return False
+
+
 def _get_effective_configurable_toolsets():
     """Return CONFIGURABLE_TOOLSETS + any plugin-provided toolsets.
 
@@ -1039,7 +1054,7 @@ def _get_platform_tools(
                 if not _toolset_allowed_for_platform(ts_key, platform):
                     continue
                 ts_tools = set(resolve_toolset(ts_key))
-                if ts_tools and ts_tools.issubset(composite_tools):
+                if _toolset_subset_matches(ts_key, ts_tools, composite_tools):
                     expanded.add(ts_key)
 
             default_off = set(_DEFAULT_OFF_TOOLSETS)
@@ -1062,7 +1077,7 @@ def _get_platform_tools(
             if not _toolset_allowed_for_platform(ts_key, platform):
                 continue
             ts_tools = set(resolve_toolset(ts_key))
-            if ts_tools and ts_tools.issubset(all_tool_names):
+            if _toolset_subset_matches(ts_key, ts_tools, all_tool_names):
                 enabled_toolsets.add(ts_key)
 
         default_off = set(_DEFAULT_OFF_TOOLSETS)

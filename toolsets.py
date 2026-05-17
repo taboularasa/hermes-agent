@@ -85,7 +85,7 @@ TOOLSETS = {
 
     "search": {
         "description": "Web search only (no content extraction/scraping)",
-        "tools": ["web_search"],
+        "tools": ["web_search", "web_search_matrix"],
         "includes": []
     },
 

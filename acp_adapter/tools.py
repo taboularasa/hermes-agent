@@ -35,6 +35,7 @@ TOOL_KIND_MAP: Dict[str, ToolKind] = {
     "skill_manage": "edit",
     # Web / fetch
     "web_search": "fetch",
+    "web_search_matrix": "fetch",
     "web_extract": "fetch",
     # Browser
     "browser_navigate": "fetch",
@@ -62,7 +63,7 @@ _POLISHED_TOOLS = {
     # Files / execution
     "read_file", "write_file", "patch", "search_files", "terminal", "process", "execute_code",
     # Skills / web / browser / media
-    "skill_view", "skills_list", "skill_manage", "web_search", "web_extract",
+    "skill_view", "skills_list", "skill_manage", "web_search", "web_search_matrix", "web_extract",
     "browser_navigate", "browser_click", "browser_type", "browser_press", "browser_scroll",
     "browser_back", "browser_snapshot", "browser_console", "browser_get_images", "browser_vision",
     "vision_analyze", "image_generate", "text_to_speech",
