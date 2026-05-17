@@ -45,7 +45,7 @@ import logging
 import os
 import re
 import asyncio
-from typing import List, Dict, Any, Optional, TYPE_CHECKING
+from typing import List, Dict, Any, Optional, TYPE_CHECKING, Tuple
 import httpx  # noqa: F401 — kept at module top so tests can patch tools.web_tools.httpx
 # After the web-provider plugin migration (PR #25182), the Firecrawl SDK
 # proxy, client construction, and response-shape normalizers all live in
@@ -839,6 +839,105 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         return tool_error(error_msg)
 
 
+def _normalize_matrix_queries(queries: Any) -> Tuple[List[Dict[str, str]], Optional[str]]:
+    """Normalize matrix-search query input into labeled query objects."""
+    if isinstance(queries, str):
+        raw_items = [line.strip() for line in queries.splitlines() if line.strip()]
+    elif isinstance(queries, list):
+        raw_items = queries
+    else:
+        return [], "queries must be a list of strings/objects or newline-delimited text"
+
+    normalized: List[Dict[str, str]] = []
+    for item in raw_items:
+        if isinstance(item, str):
+            query = item.strip()
+            label = query
+        elif isinstance(item, dict):
+            query = str(item.get("query") or item.get("q") or "").strip()
+            label = str(item.get("label") or item.get("id") or query).strip()
+        else:
+            return [], "each query must be a string or an object with a query field"
+        if query:
+            normalized.append({"label": label or query, "query": query})
+
+    if not normalized:
+        return [], "at least one non-empty query is required"
+    return normalized[:12], None
+
+
+def web_search_matrix_tool(queries: Any, limit_per_query: int = 3) -> str:
+    """Run a bounded matrix of web searches and return per-query + deduped results."""
+    normalized, error = _normalize_matrix_queries(queries)
+    if error:
+        return tool_error(error, success=False)
+
+    try:
+        limit = int(limit_per_query)
+    except (TypeError, ValueError):
+        limit = 3
+    limit = min(max(limit, 1), 10)
+
+    matrix = []
+    deduped = []
+    seen_urls = set()
+    failures = []
+
+    for item in normalized:
+        query = item["query"]
+        raw = web_search_tool(query, limit=limit)
+        try:
+            payload = json.loads(raw)
+        except Exception as exc:
+            payload = {"success": False, "error": f"Invalid web_search response: {exc}"}
+
+        results = []
+        if isinstance(payload, dict):
+            results = ((payload.get("data") or {}).get("web") or [])
+            if not payload.get("success", False):
+                failures.append({
+                    "label": item["label"],
+                    "query": query,
+                    "error": payload.get("error") or "web_search failed",
+                })
+
+        for result in results:
+            url = str(result.get("url") or "").strip()
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            deduped.append({
+                "query_label": item["label"],
+                "query": query,
+                **result,
+            })
+
+        matrix.append({
+            "label": item["label"],
+            "query": query,
+            "success": bool(isinstance(payload, dict) and payload.get("success", False)),
+            "results_count": len(results),
+            "results": results,
+            "error": payload.get("error") if isinstance(payload, dict) else None,
+        })
+
+    response_data = {
+        "success": not failures,
+        "data": {
+            "matrix": matrix,
+            "deduped_web": deduped,
+        },
+        "meta": {
+            "query_count": len(normalized),
+            "limit_per_query": limit,
+            "configured_backend": _get_search_backend(),
+        },
+    }
+    if failures:
+        response_data["errors"] = failures
+    return json.dumps(response_data, indent=2, ensure_ascii=False)
+
+
 async def web_extract_tool(
     urls: List[str],
     format: str = None,
@@ -1510,6 +1609,47 @@ WEB_SEARCH_SCHEMA = {
     }
 }
 
+WEB_SEARCH_MATRIX_SCHEMA = {
+    "name": "web_search_matrix",
+    "description": (
+        "Run several web searches as one bounded source-discovery matrix. "
+        "Use this when a research task needs multiple query phrasings, source classes, "
+        "or site/domain probes and a single deduped result set."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "queries": {
+                "type": "array",
+                "items": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {
+                            "type": "object",
+                            "properties": {
+                                "label": {"type": "string"},
+                                "query": {"type": "string"},
+                            },
+                            "required": ["query"],
+                        },
+                    ]
+                },
+                "description": "One to twelve search queries, as strings or {label, query} objects.",
+                "minItems": 1,
+                "maxItems": 12,
+            },
+            "limit_per_query": {
+                "type": "integer",
+                "description": "Maximum results per query. Defaults to 3.",
+                "minimum": 1,
+                "maximum": 10,
+                "default": 3,
+            },
+        },
+        "required": ["queries"],
+    },
+}
+
 WEB_EXTRACT_SCHEMA = {
     "name": "web_extract",
     "description": "Extract content from web page URLs. Returns page content in markdown format. Also works with PDF URLs (arxiv papers, documents, etc.) — pass the PDF link directly and it converts to markdown text. Pages under 5000 chars return full markdown; larger pages are LLM-summarized and capped at ~5000 chars per page. Pages over 2M chars are refused. If a URL fails or times out, use the browser tool to access it instead.",
@@ -1535,6 +1675,19 @@ registry.register(
     check_fn=check_web_api_key,
     requires_env=_web_requires_env(),
     emoji="🔍",
+    max_result_size_chars=100_000,
+)
+registry.register(
+    name="web_search_matrix",
+    toolset="web",
+    schema=WEB_SEARCH_MATRIX_SCHEMA,
+    handler=lambda args, **kw: web_search_matrix_tool(
+        args.get("queries", []),
+        limit_per_query=args.get("limit_per_query", 3),
+    ),
+    check_fn=check_web_api_key,
+    requires_env=_web_requires_env(),
+    emoji="🔎",
     max_result_size_chars=100_000,
 )
 registry.register(
