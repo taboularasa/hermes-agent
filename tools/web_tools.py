@@ -45,6 +45,8 @@ import logging
 import os
 import re
 import asyncio
+import hashlib
+from html.parser import HTMLParser
 from typing import List, Dict, Any, Optional, TYPE_CHECKING, Tuple
 import httpx  # noqa: F401 — kept at module top so tests can patch tools.web_tools.httpx
 # After the web-provider plugin migration (PR #25182), the Firecrawl SDK
@@ -363,6 +365,263 @@ def _web_requires_env() -> list[str]:
 
 
 DEFAULT_MIN_LENGTH_FOR_SUMMARIZATION = 5000
+_DIRECT_HTTP_FALLBACK_MAX_TEXT_CHARS = 1_000_000
+
+
+def _classify_web_extract_failure(error: Any, provider_name: str = "") -> Optional[str]:
+    """Return a stable machine-readable category for web extraction failures."""
+    text = str(error or "").lower()
+    provider = str(provider_name or "").lower()
+    if not text:
+        return None
+    if provider == "firecrawl" and (
+        "payment required" in text
+        or "insufficient credits" in text
+        or "credits have been exhausted" in text
+        or "top up" in text
+        or "402" in text
+    ):
+        return "provider_credit_exhaustion"
+    if (
+        "api key" in text
+        or "not configured" in text
+        or "missing direct config" in text
+        or "missing credentials" in text
+    ):
+        return "provider_credentials_absent"
+    return None
+
+
+class _HTMLTextExtractor(HTMLParser):
+    """Small stdlib HTML-to-text extractor for direct HTTP fallback."""
+
+    _BLOCK_TAGS = {
+        "address", "article", "aside", "blockquote", "br", "div", "dl", "fieldset",
+        "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5",
+        "h6", "header", "hr", "li", "main", "nav", "ol", "p", "pre", "section",
+        "table", "tr", "ul",
+    }
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: List[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: List[tuple[str, Optional[str]]]) -> None:
+        if tag in {"script", "style", "noscript"}:
+            self._skip_depth += 1
+            return
+        if tag in self._BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"script", "style", "noscript"} and self._skip_depth:
+            self._skip_depth -= 1
+            return
+        if tag in self._BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if not self._skip_depth and data:
+            self._parts.append(data)
+
+    def text(self) -> str:
+        text = "".join(self._parts)
+        text = re.sub(r"[ \t\r\f\v]+", " ", text)
+        text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
+        return text.strip()
+
+
+def _html_to_text(content: str) -> str:
+    parser = _HTMLTextExtractor()
+    try:
+        parser.feed(content)
+        parser.close()
+        text = parser.text()
+    except Exception:
+        text = re.sub(r"<[^>]+>", " ", content)
+        text = re.sub(r"\s+", " ", text).strip()
+    return text or content
+
+
+def _extract_html_title(content: str) -> str:
+    match = re.search(r"<title[^>]*>(.*?)</title>", content, re.IGNORECASE | re.DOTALL)
+    if not match:
+        return ""
+    title = re.sub(r"\s+", " ", match.group(1)).strip()
+    return title
+
+
+def _truncate_direct_http_content(content: str) -> str:
+    if len(content) <= _DIRECT_HTTP_FALLBACK_MAX_TEXT_CHARS:
+        return content
+    return (
+        content[:_DIRECT_HTTP_FALLBACK_MAX_TEXT_CHARS]
+        + "\n\n[Direct HTTP fallback content truncated after "
+        + f"{_DIRECT_HTTP_FALLBACK_MAX_TEXT_CHARS:,} characters.]"
+    )
+
+
+async def _direct_http_extract_one(url: str, format: Optional[str] = None) -> Dict[str, Any]:
+    """Fetch one URL without a scrape provider for credit-exhaustion fallback."""
+    blocked = check_website_access(url)
+    if blocked:
+        return {
+            "url": url,
+            "title": "",
+            "content": "",
+            "raw_content": "",
+            "error": blocked["message"],
+            "blocked_by_policy": {
+                "host": blocked["host"],
+                "rule": blocked["rule"],
+                "source": blocked["source"],
+            },
+        }
+
+    headers = {
+        "User-Agent": (
+            "Hermes web_extract direct-http fallback "
+            "(provider credit exhaustion recovery)"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/pdf,text/plain,*/*;q=0.8",
+    }
+    async with httpx.AsyncClient(follow_redirects=True, timeout=30.0, headers=headers) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+
+    final_url = str(response.url)
+    if not is_safe_url(final_url):
+        return {
+            "url": final_url,
+            "title": "",
+            "content": "",
+            "raw_content": "",
+            "error": "Blocked: URL redirected to a private or internal network address",
+        }
+
+    final_blocked = check_website_access(final_url)
+    if final_blocked:
+        return {
+            "url": final_url,
+            "title": "",
+            "content": "",
+            "raw_content": "",
+            "error": final_blocked["message"],
+            "blocked_by_policy": {
+                "host": final_blocked["host"],
+                "rule": final_blocked["rule"],
+                "source": final_blocked["source"],
+            },
+        }
+
+    body = response.content or b""
+    content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
+    metadata = {
+        "source": "direct_http",
+        "content_type": content_type or None,
+        "byte_length": len(body),
+        "sha256": hashlib.sha256(body).hexdigest(),
+    }
+
+    is_pdf = content_type == "application/pdf" or final_url.lower().split("?", 1)[0].endswith(".pdf")
+    if is_pdf:
+        content = (
+            "[Direct HTTP fallback fetched PDF source bytes; text extraction was not "
+            "available in the scraper fallback. "
+            f"byte_length={metadata['byte_length']} sha256={metadata['sha256']}]"
+        )
+        return {
+            "url": final_url,
+            "title": "",
+            "content": content,
+            "raw_content": content,
+            "metadata": metadata,
+        }
+
+    text = response.text or body.decode(response.encoding or "utf-8", errors="replace")
+    title = _extract_html_title(text)
+    if format != "html" and ("html" in content_type or re.search(r"<html[\s>]", text, re.IGNORECASE)):
+        text = _html_to_text(text)
+    text = _truncate_direct_http_content(text)
+    return {
+        "url": final_url,
+        "title": title,
+        "content": text,
+        "raw_content": text,
+        "metadata": metadata,
+    }
+
+
+async def _apply_web_extract_degradation_fallback(
+    *,
+    provider_name: str,
+    results: List[Dict[str, Any]],
+    format: Optional[str],
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Apply deterministic fallback for known provider degradation categories."""
+    if str(provider_name or "").lower() != "firecrawl":
+        return results, []
+
+    updated: List[Dict[str, Any]] = []
+    degradations: List[Dict[str, Any]] = []
+    for result in results:
+        if not isinstance(result, dict):
+            updated.append(result)
+            continue
+
+        error = result.get("error")
+        category = _classify_web_extract_failure(error, provider_name)
+        if category != "provider_credit_exhaustion":
+            updated.append(result)
+            continue
+
+        url = str(result.get("url") or "").strip()
+        degradation = {
+            "category": category,
+            "primary_provider": "firecrawl",
+            "primary_operation": "web_extract",
+            "primary_status": "failed",
+            "primary_error": str(error or ""),
+            "fallback_provider": "direct_http",
+            "fallback_status": "not_attempted",
+        }
+
+        if not url or not is_safe_url(url):
+            degradation["fallback_status"] = "blocked"
+            degradation["fallback_error"] = "URL was empty or failed safety checks"
+            retained = dict(result)
+            retained["degradation"] = degradation
+            updated.append(retained)
+            degradations.append(degradation)
+            continue
+
+        try:
+            fallback = await _direct_http_extract_one(url, format=format)
+        except Exception as exc:  # noqa: BLE001 - preserve primary failure
+            fallback = {
+                "url": url,
+                "title": "",
+                "content": "",
+                "raw_content": "",
+                "error": str(exc),
+            }
+
+        retained: Dict[str, Any]
+        if isinstance(fallback, dict) and fallback.get("content") and not fallback.get("error"):
+            degradation["fallback_status"] = "succeeded"
+            retained = dict(fallback)
+            retained["degradation"] = degradation
+        else:
+            degradation["fallback_status"] = "failed"
+            degradation["fallback_error"] = str((fallback or {}).get("error") or "direct HTTP fallback failed")
+            retained = dict(result)
+            retained["degradation"] = degradation
+
+        updated.append(retained)
+        degradations.append(degradation)
+
+    return updated, degradations
 
 def _is_nous_auxiliary_client(client: Any) -> bool:
     """Return True when the resolved auxiliary backend is Nous Portal."""
@@ -1594,6 +1853,9 @@ async def web_extract_tool(
             else:
                 safe_urls.append(url)
 
+        extract_provider_name = None
+        extract_degradations: List[Dict[str, Any]] = []
+
         # Dispatch only safe URLs to the configured backend
         if not safe_urls:
             results = []
@@ -1650,6 +1912,7 @@ async def web_extract_tool(
             logger.info(
                 "Web extract via %s: %d URL(s)", provider.name, len(safe_urls)
             )
+            extract_provider_name = provider.name
 
             # Async-or-sync dispatch: parallel + firecrawl have async
             # extract(); exa + tavily are sync.
@@ -1662,6 +1925,14 @@ async def web_extract_tool(
                 results = await asyncio.to_thread(
                     provider.extract, safe_urls, format=format
                 )
+
+            if not isinstance(results, list):
+                results = []
+            results, extract_degradations = await _apply_web_extract_degradation_fallback(
+                provider_name=extract_provider_name or "",
+                results=results,
+                format=format,
+            )
 
         # Merge any SSRF-blocked results back in
         if ssrf_blocked:
@@ -1760,17 +2031,26 @@ async def web_extract_tool(
                 logger.info("%s (%d characters)", url, content_length)
 
         # Trim output to minimal fields per entry: title, content, error
-        trimmed_results = [
-            {
+        trimmed_results = []
+        for r in response.get("results", []):
+            trimmed = {
                 "url": r.get("url", ""),
                 "title": r.get("title", ""),
                 "content": r.get("content", ""),
                 "error": r.get("error"),
-                **({  "blocked_by_policy": r["blocked_by_policy"]} if "blocked_by_policy" in r else {}),
             }
-            for r in response.get("results", [])
-        ]
+            if "blocked_by_policy" in r:
+                trimmed["blocked_by_policy"] = r["blocked_by_policy"]
+            if "degradation" in r:
+                trimmed["degradation"] = r["degradation"]
+            trimmed_results.append(trimmed)
         trimmed_response = {"results": trimmed_results}
+        if extract_provider_name or extract_degradations:
+            trimmed_response["meta"] = {
+                "extract_provider": extract_provider_name,
+            }
+            if extract_degradations:
+                trimmed_response["meta"]["degradations"] = extract_degradations
 
         if trimmed_response.get("results") == []:
             result_json = tool_error("Content was inaccessible or not found")
