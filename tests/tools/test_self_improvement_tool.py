@@ -205,6 +205,7 @@ def test_durable_work_evidence_passes_anti_make_work_check(tmp_path):
                     ),
                     "linearIssues": ["HAD-1019"],
                     "commitShas": ["abc1234"],
+                    "operatorDecisionSupport": "Operator can compare the PR and test evidence before selecting the next issue.",
                     "pullRequests": ["https://github.com/taboularasa/hermes-agent/pull/1019"],
                     "tests": ["pytest tests/tools/test_self_improvement_tool.py passed"],
                     "reposTouched": ["hermes-agent"],
@@ -228,7 +229,9 @@ def test_durable_work_evidence_passes_anti_make_work_check(tmp_path):
                         "COMMIT\n"
                         "- abc1234\n"
                         "PULL_REQUEST\n"
-                        "- https://github.com/taboularasa/hermes-agent/pull/1019"
+                        "- https://github.com/taboularasa/hermes-agent/pull/1019\n"
+                        "OPERATOR_DECISION_SUPPORT\n"
+                        "- Operator can choose the next issue from verified PR/test evidence."
                     ),
                     "exit_code": 0,
                 }
@@ -257,6 +260,136 @@ def test_durable_work_evidence_passes_anti_make_work_check(tmp_path):
     assert anti_make_work["metrics"]["durable_evidence_count"] == 2
     assert anti_make_work["metrics"]["shallow_work_item_count"] == 0
     assert benchmark["critical_failures"] == []
+
+
+def test_raw_throughput_does_not_pass_operator_value_alignment(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "volume-1",
+                    "occurredAt": recent,
+                    "summary": "Implemented HAD-1020 benchmark update.",
+                    "changedFiles": ["tools/self_improvement_tool.py"],
+                    "tests": ["pytest tests/tools/test_self_improvement_tool.py passed"],
+                },
+                {
+                    "id": "volume-2",
+                    "occurredAt": recent,
+                    "summary": "Opened PR #1020 with commit abc1234.",
+                    "pullRequests": ["https://github.com/taboularasa/hermes-agent/pull/1020"],
+                    "commitShas": ["abc1234"],
+                },
+            ]
+        },
+    )
+    _write_json(codex_path, {"runs": {"codex_1": {"run_id": "codex_1", "completed_at": recent}}})
+    _write_json(ctx_path, {"sessions": {"ctx_1": {"session_id": "ctx_1", "updated_at": recent}}})
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    anti_make_work = benchmark["checks"]["anti_make_work_check"]
+    assert anti_make_work["status"] == "pass"
+    assert anti_make_work["metrics"]["durable_evidence_count"] == 2
+
+    operator_value = benchmark["checks"]["operator_value_alignment"]
+    assert operator_value["status"] == "fail"
+    assert operator_value["score"] == 0.45
+    assert operator_value["metrics"]["verified_system_change_count"] == 2
+    assert operator_value["metrics"]["operator_decision_support_count"] == 0
+    assert "operator_value_alignment" in benchmark["critical_failures"]
+    assert benchmark["issue_selection"]["quantity_guardrail_active"] is True
+    assert "decision support" in benchmark["summary"]["operator_value_alignment"]
+
+
+def test_leading_indicator_drift_fails_when_operator_value_regresses(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    history_path = tmp_path / "history.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    entries = []
+    for idx in range(4):
+        entries.append(
+            {
+                "id": f"aligned-{idx}",
+                "occurredAt": recent,
+                "summary": f"Implemented operator-value path {idx}.",
+                "operatorDecisionSupport": "Operator can compare the verified change and choose the next issue.",
+                "changedFiles": ["tools/self_improvement_tool.py"],
+                "tests": ["pytest tests/tools/test_self_improvement_tool.py passed"],
+            }
+        )
+    for idx in range(2):
+        entries.append(
+            {
+                "id": f"decision-only-{idx}",
+                "occurredAt": recent,
+                "summary": f"Prepared operator decision support note {idx}.",
+                "operatorDecisionSupport": "Operator has a blocker and recommended next decision.",
+            }
+        )
+
+    _write_json(journal_path, {"entries": entries})
+    _write_json(codex_path, {"runs": {"codex_1": {"run_id": "codex_1", "completed_at": recent}}})
+    _write_json(ctx_path, {"sessions": {"ctx_1": {"session_id": "ctx_1", "updated_at": recent}}})
+    _write_json(
+        history_path,
+        {
+            "version": 1,
+            "evaluations": [
+                {
+                    "evaluated_at": (now - timedelta(hours=6)).isoformat(),
+                    "score": 94.0,
+                    "direction": "positive",
+                    "checks": {"operator_value_alignment": 0.95},
+                }
+            ],
+        },
+    )
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=history_path,
+        now=now,
+        persist=False,
+    )
+
+    operator_value = benchmark["checks"]["operator_value_alignment"]
+    assert operator_value["status"] == "pass"
+    assert operator_value["score"] == 0.8833
+
+    drift = benchmark["checks"]["leading_indicator_drift"]
+    assert drift["status"] == "fail"
+    assert drift["metrics"]["previous_operator_value_score"] == 0.95
+    assert drift["metrics"]["operator_value_delta"] == -0.0667
+    assert "leading_indicator_drift" in benchmark["critical_failures"]
+    assert benchmark["direction"] == "negative"
+    assert benchmark["trend"] == "regressing"
 
 
 def test_stale_active_ctx_still_degrades_reliability_floor(tmp_path):

@@ -143,6 +143,22 @@ _DURABLE_TEXT_PATTERNS = (
         ),
     ),
     (
+        "operator_decision_support",
+        re.compile(
+            r"\b(?:operator|human|user)\b[^.\n]{0,160}"
+            r"\b(?:decision|decide|choose|approval|blocker|risk|trade[- ]off|manual step|recommended)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "operator_decision_support",
+        re.compile(
+            r"\b(?:decision|decide|choose|approval|blocker|risk|trade[- ]off|manual step|recommended)\b"
+            r"[^.\n]{0,160}\b(?:operator|human|user)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
         "capability_change",
         re.compile(
             r"\b(?:added|implemented|fixed|hardened|repaired|wired|enabled)\b"
@@ -151,6 +167,41 @@ _DURABLE_TEXT_PATTERNS = (
         ),
     ),
 )
+_OPERATOR_DECISION_SUPPORT_SIGNALS = {
+    "decision",
+    "decisions",
+    "operator_decision_support",
+    "risk_reduction",
+}
+_VERIFIED_SYSTEM_CHANGE_SIGNALS = {
+    "artifact",
+    "artifact_path",
+    "artifact_paths",
+    "artifacts",
+    "capability_change",
+    "changed_files",
+    "changed_paths",
+    "checks",
+    "ci",
+    "commit",
+    "commit_sha",
+    "commit_shas",
+    "commits",
+    "durable_artifacts",
+    "evidence",
+    "files_changed",
+    "pr_url",
+    "pr_urls",
+    "proof_artifact",
+    "proof_artifacts",
+    "pull_request",
+    "pull_request_url",
+    "pull_requests",
+    "state_transition",
+    "test_results",
+    "tests",
+    "verification",
+}
 
 
 SELF_IMPROVEMENT_EVIDENCE_SCHEMA = {
@@ -956,6 +1007,43 @@ def _assess_make_work_item(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _assess_operator_value_item(item: dict[str, Any]) -> dict[str, Any]:
+    make_work = _assess_make_work_item(item)
+    durable_signals = set(make_work.get("signals") or [])
+    decision_support_signals = durable_signals.intersection(_OPERATOR_DECISION_SUPPORT_SIGNALS)
+    verified_change_signals = durable_signals.intersection(_VERIFIED_SYSTEM_CHANGE_SIGNALS)
+
+    item_score = 0.0
+    issue = make_work.get("issue")
+    if make_work["durable"]:
+        if decision_support_signals and verified_change_signals:
+            item_score = 1.0
+        elif decision_support_signals:
+            item_score = 0.65
+            issue = "decision_support_without_verified_system_change"
+        elif verified_change_signals:
+            item_score = 0.45
+            issue = "verified_change_without_operator_decision_support"
+        else:
+            item_score = 0.25
+            issue = "durable_evidence_without_operator_value_signal"
+
+    return {
+        "source": make_work.get("source"),
+        "id": make_work.get("id"),
+        "timestamp": make_work.get("timestamp"),
+        "score": item_score,
+        "durable": make_work["durable"],
+        "signals": sorted(durable_signals),
+        "operator_decision_support": bool(decision_support_signals),
+        "operator_decision_support_signals": sorted(decision_support_signals),
+        "verified_system_change": bool(verified_change_signals),
+        "verified_system_change_signals": sorted(verified_change_signals),
+        "aligned": bool(decision_support_signals and verified_change_signals),
+        "issue": issue,
+    }
+
+
 def _evaluate_anti_make_work_check(
     *,
     journal_path: Path,
@@ -1021,6 +1109,89 @@ def _evaluate_anti_make_work_check(
     )
 
 
+def _evaluate_operator_value_alignment_check(
+    *,
+    journal_path: Path,
+    codex_runs_path: Path,
+    ctx_bindings_path: Path,
+    now: datetime,
+    freshness_hours: int,
+) -> dict[str, Any]:
+    journal_payload = _load_json(journal_path)
+    codex_payload = _load_json(codex_runs_path)
+    ctx_payload = _load_json(ctx_bindings_path)
+    assessments = [
+        _assess_operator_value_item(item)
+        for item in _iter_recent_claimed_work_items(
+            journal_payload=journal_payload,
+            codex_payload=codex_payload,
+            ctx_payload=ctx_payload,
+            now=now,
+            freshness_hours=freshness_hours,
+        )
+    ]
+
+    assessed_count = len(assessments)
+    durable_count = sum(1 for item in assessments if item["durable"])
+    decision_support_count = sum(1 for item in assessments if item["operator_decision_support"])
+    verified_change_count = sum(1 for item in assessments if item["verified_system_change"])
+    aligned_count = sum(1 for item in assessments if item["aligned"])
+    issue_items = [item for item in assessments if item.get("issue")]
+
+    if assessed_count == 0:
+        score = 1.0
+        detail = "No claimed work items required operator-value assessment."
+    else:
+        score = sum(float(item["score"]) for item in assessments) / assessed_count
+        if verified_change_count and not decision_support_count:
+            score = min(score, 0.55)
+        if assessed_count >= 3 and not aligned_count:
+            score = min(score, 0.55)
+
+        if aligned_count == assessed_count:
+            detail = "Claimed work pairs operator decision support with verified system change."
+        elif not decision_support_count:
+            detail = "Claimed work shows throughput, but lacks operator decision support."
+        elif not verified_change_count:
+            detail = "Claimed work supports operator decisions, but lacks verified system change."
+        else:
+            detail = "Operator-value evidence is incomplete across claimed work."
+
+    return _build_benchmark_item(
+        "operator_value_alignment",
+        "Operator-value alignment",
+        score=score,
+        weight=30,
+        detail=detail,
+        critical=True,
+        metrics={
+            "assessed_work_item_count": assessed_count,
+            "durable_evidence_count": durable_count,
+            "operator_decision_support_count": decision_support_count,
+            "verified_system_change_count": verified_change_count,
+            "aligned_work_item_count": aligned_count,
+            "operator_decision_support_rate": (
+                round(decision_support_count / assessed_count, 4)
+                if assessed_count
+                else 1.0
+            ),
+            "verified_system_change_rate": (
+                round(verified_change_count / assessed_count, 4)
+                if assessed_count
+                else 1.0
+            ),
+            "aligned_work_rate": (
+                round(aligned_count / assessed_count, 4)
+                if assessed_count
+                else 1.0
+            ),
+            "quantity_guardrail_basis": "average_evidence_quality_not_item_count",
+            "issue_examples": issue_items[:5],
+            "aligned_examples": [item for item in assessments if item["aligned"]][:5],
+        },
+    )
+
+
 def _weighted_project_score(checks: dict[str, dict[str, Any]]) -> float:
     total_weight = sum(max(0, int(check.get("weight") or 0)) for check in checks.values())
     if total_weight <= 0:
@@ -1030,6 +1201,144 @@ def _weighted_project_score(checks: dict[str, dict[str, Any]]) -> float:
         for check in checks.values()
     )
     return round((weighted_score / total_weight) * 100, 2)
+
+
+def _coerce_score(value: Any) -> Optional[float]:
+    if isinstance(value, dict):
+        value = value.get("score")
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _iter_benchmark_history_entries(history: dict[str, Any]) -> Iterable[dict[str, Any]]:
+    for key in ("evaluations", "runs"):
+        entries = history.get(key)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, dict):
+                yield entry
+
+
+def _history_check_scores(history: dict[str, Any], check_id: str) -> list[float]:
+    scores: list[float] = []
+    for entry in _iter_benchmark_history_entries(history):
+        checks = entry.get("checks")
+        if not isinstance(checks, dict):
+            continue
+        score = _coerce_score(checks.get(check_id))
+        if score is not None:
+            scores.append(score)
+    return scores
+
+
+def _latest_history_project_score(history: dict[str, Any]) -> Optional[float]:
+    for entry in reversed(list(_iter_benchmark_history_entries(history))):
+        score = _coerce_score(entry.get("project_score"))
+        if score is None:
+            score = _coerce_score(entry.get("score"))
+        if score is not None:
+            return score
+    return None
+
+
+def _score_direction(current: float, previous: Optional[float], *, threshold: float = 0.01) -> str:
+    if previous is None:
+        return "stable"
+    delta = current - previous
+    if delta > threshold:
+        return "positive"
+    if delta < -threshold:
+        return "negative"
+    return "stable"
+
+
+def _evaluate_leading_indicator_drift_check(
+    operator_value_check: dict[str, Any],
+    history: dict[str, Any],
+) -> dict[str, Any]:
+    current_score = float(operator_value_check.get("score") or 0.0)
+    prior_scores = _history_check_scores(history, "operator_value_alignment")
+    previous_score = prior_scores[-1] if prior_scores else None
+    delta = round(current_score - previous_score, 4) if previous_score is not None else None
+    regressing = delta is not None and delta < -0.01
+
+    if previous_score is None:
+        score = 1.0
+        detail = "No prior operator-value score; drift not assessed."
+    elif regressing:
+        score = 0.5
+        detail = "Operator-value alignment is regressing; keep quantity guardrail active."
+    else:
+        score = 1.0
+        detail = "Operator-value leading indicator is stable or improving."
+
+    metrics = dict(operator_value_check.get("metrics") or {})
+    metrics.update(
+        {
+            "previous_operator_value_score": (
+                round(previous_score, 4) if previous_score is not None else None
+            ),
+            "current_operator_value_score": round(current_score, 4),
+            "operator_value_delta": delta,
+            "prior_operator_value_sample_count": len(prior_scores),
+        }
+    )
+    return _build_benchmark_item(
+        "leading_indicator_drift",
+        "Leading-indicator drift",
+        score=score,
+        weight=20,
+        detail=detail,
+        critical=True,
+        metrics=metrics,
+    )
+
+
+def _build_issue_selection_summary(
+    checks: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    guardrail_checks = {
+        name: check
+        for name, check in checks.items()
+        if name in {
+            "anti_make_work_check",
+            "operator_value_alignment",
+            "leading_indicator_drift",
+        }
+        and check.get("status") != "pass"
+    }
+    quantity_guardrail_active = bool(guardrail_checks)
+    return {
+        "quantity_guardrail_active": quantity_guardrail_active,
+        "suppress_raw_throughput_selection": quantity_guardrail_active,
+        "blocked_checks": sorted(guardrail_checks),
+        "recommended_focus": (
+            "operator decision support plus verified system change"
+            if quantity_guardrail_active
+            else "normal lane selection"
+        ),
+        "detail": (
+            "Do not select issues because they increase task count; prefer work with operator decision support and verified change evidence."
+            if quantity_guardrail_active
+            else "Benchmark guardrails permit normal lane selection."
+        ),
+    }
+
+
+def _build_operator_summary(
+    checks: dict[str, dict[str, Any]],
+    issue_selection: dict[str, Any],
+) -> dict[str, str]:
+    operator_value = checks["operator_value_alignment"]
+    drift = checks["leading_indicator_drift"]
+    return {
+        "operator_value_alignment": str(operator_value.get("detail") or ""),
+        "leading_indicator_drift": str(drift.get("detail") or ""),
+        "issue_selection": str(issue_selection.get("detail") or ""),
+    }
 
 
 def evaluate_self_improvement_benchmark(
@@ -1106,9 +1415,23 @@ def evaluate_self_improvement_benchmark(
         now=current,
         freshness_hours=freshness_hours,
     )
+    operator_value_alignment = _evaluate_operator_value_alignment_check(
+        journal_path=journal_path,
+        codex_runs_path=codex_runs_path,
+        ctx_bindings_path=ctx_bindings_path,
+        now=current,
+        freshness_hours=freshness_hours,
+    )
+    history = _load_benchmark_history(history_path)
+    leading_indicator_drift = _evaluate_leading_indicator_drift_check(
+        operator_value_alignment,
+        history,
+    )
     checks = {
         "reliability_gate": reliability_gate,
         "anti_make_work_check": anti_make_work_check,
+        "operator_value_alignment": operator_value_alignment,
+        "leading_indicator_drift": leading_indicator_drift,
     }
     project_score = _weighted_project_score(checks)
     critical_failures = [
@@ -1116,25 +1439,60 @@ def evaluate_self_improvement_benchmark(
         for name, check in checks.items()
         if check.get("critical") and check.get("status") == "fail"
     ]
+    issue_selection = _build_issue_selection_summary(checks)
+    operator_summary = _build_operator_summary(checks, issue_selection)
+    previous_project_score = _latest_history_project_score(history)
+    direction = _score_direction(project_score, previous_project_score, threshold=0.1)
+    trend = "single_run" if previous_project_score is None else direction
+    if leading_indicator_drift.get("status") == "fail":
+        direction = "negative"
+        trend = "regressing"
+
     benchmark = {
         "contract_version": BENCHMARK_CONTRACT_VERSION,
         "generated_at": current.isoformat(),
         "project_score": project_score,
         "score": project_score,
-        "direction": "stable",
-        "trend": "single_run",
+        "direction": direction,
+        "trend": trend,
         "gate": gate,
         "checks": checks,
         "critical_failures": critical_failures,
+        "operator_value_score": operator_value_alignment.get("score"),
+        "operator_value_checks": {
+            "operator_decision_support_rate": (
+                operator_value_alignment.get("metrics", {}).get("operator_decision_support_rate")
+            ),
+            "verified_system_change_rate": (
+                operator_value_alignment.get("metrics", {}).get("verified_system_change_rate")
+            ),
+            "aligned_work_rate": (
+                operator_value_alignment.get("metrics", {}).get("aligned_work_rate")
+            ),
+            "operator_value_score": operator_value_alignment.get("score"),
+        },
+        "anti_make_work": {
+            "status": anti_make_work_check.get("status"),
+            "score": anti_make_work_check.get("score"),
+            "flags": [
+                item.get("issue")
+                for item in anti_make_work_check.get("metrics", {}).get("shallow_examples", [])
+                if item.get("issue")
+            ],
+        },
+        "issue_selection": issue_selection,
+        "summary": operator_summary,
         "history_path": str(history_path),
     }
 
     if persist:
-        history = _load_benchmark_history(history_path)
         history["runs"].append(
             {
                 "generated_at": benchmark["generated_at"],
                 "project_score": benchmark["project_score"],
+                "direction": benchmark["direction"],
+                "critical_failures": benchmark["critical_failures"],
+                "operator_value_score": benchmark["operator_value_score"],
                 "checks": {
                     name: {
                         "score": check.get("score"),
