@@ -95,6 +95,29 @@ _FIRECRAWL_ENV_HINTS = [
     "FIRECRAWL_GATEWAY_URL",
     "TOOL_GATEWAY_DOMAIN + TOOL_GATEWAY_USER_TOKEN",
 ]
+_ONTOLOGY_RESEARCH_MARKERS = (
+    "ontology research",
+    "ontology_engineering",
+    "ontology_context",
+    "source-registry",
+    "source registry",
+    "ontology literature",
+)
+_WEB_SEARCH_MATRIX_MARKERS = (
+    "web_search_matrix",
+    "search matrix",
+)
+_WEB_EXTRACT_MARKERS = (
+    "web_extract",
+)
+_FIRECRAWL_MARKERS = (
+    "firecrawl",
+)
+
+
+def _prompt_contains_any(prompt: str, markers: tuple[str, ...]) -> bool:
+    lowered = (prompt or "").lower()
+    return any(marker in lowered for marker in markers)
 
 
 def _listify_preflight_value(value: Any) -> List[str]:
@@ -140,6 +163,7 @@ def _cron_preflight_declared(job: dict, key: str) -> List[str]:
 
 def _infer_cron_preflight_requirements(job: dict, prompt: str) -> tuple[List[str], List[str]]:
     """Infer narrow research preflight requirements from job text."""
+    profile = str(job.get("research_profile") or job.get("research_protocol") or "")
     haystack = "\n".join(
         str(part or "")
         for part in (
@@ -148,15 +172,21 @@ def _infer_cron_preflight_requirements(job: dict, prompt: str) -> tuple[List[str
             job.get("skill"),
             " ".join(str(s) for s in job.get("skills") or []),
             job.get("workdir"),
+            profile,
             prompt,
         )
     )
 
     required_tools: List[str] = []
     required_web_backends: List[str] = []
-    if re.search(r"\bweb_search_matrix\b", haystack):
+    if (
+        _prompt_contains_any(haystack, _WEB_SEARCH_MATRIX_MARKERS)
+        or _prompt_contains_any(haystack, _ONTOLOGY_RESEARCH_MARKERS)
+    ):
         required_tools.append("web_search_matrix")
-    if re.search(r"\bfirecrawl\b", haystack, re.IGNORECASE):
+    if _prompt_contains_any(haystack, _WEB_EXTRACT_MARKERS):
+        required_tools.append("web_extract")
+    if _prompt_contains_any(haystack, _FIRECRAWL_MARKERS):
         required_web_backends.append("firecrawl")
     return required_tools, required_web_backends
 

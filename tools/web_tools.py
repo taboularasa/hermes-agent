@@ -1027,6 +1027,25 @@ def _normalize_matrix_queries(queries: Any) -> Tuple[List[Dict[str, str]], Optio
     return normalized[:12], None
 
 
+def _coerce_matrix_provider_list(value: Any) -> List[str]:
+    """Normalize caller-supplied provider names without logging secrets."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_items = value.split(",")
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = value
+    else:
+        return []
+
+    normalized: List[str] = []
+    for item in raw_items:
+        name = str(item or "").strip().lower()
+        if name and name not in normalized:
+            normalized.append(name)
+    return normalized[:12]
+
+
 _MATRIX_PROVIDER_ENV_KEYS = {
     "exa": ("EXA_API_KEY",),
     "parallel": ("PARALLEL_API_KEY",),
@@ -1157,6 +1176,7 @@ def _web_provider_matrix_search(
     query: str,
     limit: int = 5,
     providers: Any = None,
+    required_providers: Any = None,
 ) -> Dict[str, Any]:
     """Search one query across all requested registered web providers."""
     query = str(query or "").strip()
@@ -1169,45 +1189,41 @@ def _web_provider_matrix_search(
     limit = min(max(limit, 1), 10)
 
     status = _provider_matrix_status()
-    requested = [
-        str(provider).strip().lower()
-        for provider in (providers or [])
-        if str(provider).strip()
-    ]
+    requested = _coerce_matrix_provider_list(providers)
     if not requested or "all" in requested:
-        requested = list(status.get("available_providers", []))
-    else:
         requested = [
-            provider
-            for provider in requested
-            if provider in status.get("providers", {})
+            name
+            for name, entry in status.get("providers", {}).items()
+            if entry.get("registered")
         ]
 
-    available_requested = [
-        provider
-        for provider in requested
-        if status.get("providers", {}).get(provider, {}).get("available")
-    ]
-    missing_requested = [
-        provider for provider in requested if provider not in available_requested
-    ]
-    if not available_requested:
+    required = set(_coerce_matrix_provider_list(required_providers))
+    if not requested:
         return {
             "success": False,
+            "coverage_status": "failed",
+            "degraded_coverage": True,
             "error": "No configured web search providers are available for provider matrix search.",
             "provider_status": status,
             "requested_providers": requested,
+            "providers": [],
         }
 
     try:
         from agent.web_search_registry import get_provider
+        from tools.interrupt import is_interrupted
     except Exception as exc:
         return {"success": False, "error": f"Web provider registry unavailable: {exc}"}
 
     provider_results: Dict[str, Dict[str, Any]] = {}
+    provider_reports: List[Dict[str, Any]] = []
     fused_index: Dict[str, Dict[str, Any]] = {}
+    required_failures: List[str] = []
 
-    for provider_name in available_requested:
+    for provider_name in requested:
+        if is_interrupted():
+            return {"success": False, "error": "Interrupted"}
+
         provider = get_provider(provider_name)
         if provider is None:
             provider_results[provider_name] = {
@@ -1216,7 +1232,58 @@ def _web_provider_matrix_search(
                 "error": f"Web search provider {provider_name!r} is not registered.",
                 "results": [],
             }
+            provider_reports.append({
+                "provider": provider_name,
+                "status": "unavailable",
+                "error": "provider is not registered",
+                "results": [],
+            })
+            if provider_name in required:
+                required_failures.append(provider_name)
             continue
+
+        display_name = getattr(provider, "display_name", provider_name)
+        try:
+            supports_search = bool(provider.supports_search())
+        except Exception:
+            supports_search = False
+        if not supports_search:
+            provider_results[provider_name] = {
+                "success": False,
+                "result_count": 0,
+                "error": "provider does not support search",
+                "results": [],
+            }
+            provider_reports.append({
+                "provider": provider_name,
+                "display_name": display_name,
+                "status": "unsupported",
+                "error": "provider does not support search",
+                "results": [],
+            })
+            if provider_name in required:
+                required_failures.append(provider_name)
+            continue
+
+        provider_status = status.get("providers", {}).get(provider_name, {})
+        if not provider_status.get("available"):
+            provider_results[provider_name] = {
+                "success": False,
+                "result_count": 0,
+                "error": "provider credentials or endpoint are unavailable",
+                "results": [],
+            }
+            provider_reports.append({
+                "provider": provider_name,
+                "display_name": display_name,
+                "status": "unavailable",
+                "error": "provider credentials or endpoint are unavailable",
+                "results": [],
+            })
+            if provider_name in required:
+                required_failures.append(provider_name)
+            continue
+
         try:
             response_data = provider.search(query, limit=limit)
             provider_success = bool(
@@ -1229,10 +1296,27 @@ def _web_provider_matrix_search(
                 "results": normalized,
             }
             if not provider_success:
-                provider_results[provider_name]["error"] = (
+                error = (
                     response_data.get("error") if isinstance(response_data, dict) else "provider search failed"
                 )
+                provider_results[provider_name]["error"] = error
+                provider_reports.append({
+                    "provider": provider_name,
+                    "display_name": display_name,
+                    "status": "error",
+                    "error": str(error or "search failed"),
+                    "results": [],
+                })
+                if provider_name in required:
+                    required_failures.append(provider_name)
                 continue
+            provider_reports.append({
+                "provider": provider_name,
+                "display_name": display_name,
+                "status": "ok",
+                "result_count": len(normalized),
+                "results": normalized,
+            })
             for item in normalized:
                 key = (
                     _canonicalize_matrix_result_url(item["url"])
@@ -1263,6 +1347,15 @@ def _web_provider_matrix_search(
                 "error": str(exc),
                 "results": [],
             }
+            provider_reports.append({
+                "provider": provider_name,
+                "display_name": display_name,
+                "status": "error",
+                "error": f"search failed: {type(exc).__name__}: {exc}",
+                "results": [],
+            })
+            if provider_name in required:
+                required_failures.append(provider_name)
 
     fused_results = []
     for entry in fused_index.values():
@@ -1299,18 +1392,39 @@ def _web_provider_matrix_search(
         for provider, result in provider_results.items()
         if result.get("success")
     ]
+    failed_or_unavailable = [
+        report for report in provider_reports if report.get("status") != "ok"
+    ]
+    coverage_status = "complete"
+    if not successful:
+        coverage_status = "failed"
+    elif failed_or_unavailable:
+        coverage_status = "degraded"
+
     response: Dict[str, Any] = {
-        "success": bool(successful),
+        "success": bool(successful) and not required_failures,
         "query": query,
         "strategy": "provider_matrix",
+        "coverage_status": coverage_status,
+        "degraded_coverage": coverage_status != "complete",
         "data": {"web": trimmed_results},
         "provider_status": status,
-        "providers_used": available_requested,
-        "providers_missing": missing_requested,
+        "providers_requested": len(provider_reports),
+        "providers_succeeded": len(successful),
+        "providers_used": successful,
+        "providers_missing": [item["provider"] for item in failed_or_unavailable],
+        "providers": provider_reports,
         "provider_results": provider_results,
     }
+    if required:
+        response["required_providers"] = sorted(required)
     if not successful:
         response["error"] = "All requested web search providers failed."
+    if required_failures:
+        response["error"] = (
+            "Required search providers unavailable or failed: "
+            + ", ".join(sorted(set(required_failures)))
+        )
     return response
 
 
@@ -1321,13 +1435,19 @@ def web_search_matrix_tool(
     query: Any = None,
     limit: Any = None,
     providers: Any = None,
+    required_providers: Any = None,
 ) -> str:
     """Run a bounded matrix of web searches and return per-query + deduped results."""
-    if query is not None or providers:
+    if query is None and isinstance(queries, str):
+        query = queries
+        queries = None
+
+    if query is not None or providers or required_providers:
         response_data = _web_provider_matrix_search(
             query=query,
             limit=limit if limit is not None else limit_per_query,
             providers=providers,
+            required_providers=required_providers,
         )
         return json.dumps(response_data, indent=2, ensure_ascii=False)
 
@@ -2116,6 +2236,17 @@ WEB_SEARCH_MATRIX_SCHEMA = {
                     "enum": ["all", "firecrawl", "parallel", "tavily", "exa", "searxng", "brave-free", "ddgs"],
                 },
             },
+            "required_providers": {
+                "type": "array",
+                "description": (
+                    "Providers that must succeed for success=true in query/provider mode. "
+                    "Use when a research protocol explicitly requires a named provider."
+                ),
+                "items": {
+                    "type": "string",
+                    "enum": ["firecrawl", "parallel", "tavily", "exa", "searxng", "brave-free", "ddgs"],
+                },
+            },
             "limit": {
                 "type": "integer",
                 "description": "Maximum fused results in query/provider mode. Defaults to 5.",
@@ -2175,6 +2306,7 @@ registry.register(
         query=args.get("query"),
         limit=args.get("limit"),
         providers=args.get("providers"),
+        required_providers=args.get("required_providers"),
     ),
     check_fn=check_web_api_key,
     requires_env=_web_requires_env(),
