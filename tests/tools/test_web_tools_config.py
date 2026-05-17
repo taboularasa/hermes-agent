@@ -508,6 +508,88 @@ class TestWebSearchSchema:
         assert result == {"success": True, "data": {"web": []}}
         fake_search.assert_called_once_with("docs", 100)
 
+    def test_web_search_falls_back_when_configured_provider_hits_quota(self):
+        import tools.web_tools
+
+        primary = MagicMock(
+            name="FirecrawlWebSearchProvider",
+            supports_search=MagicMock(return_value=True),
+        )
+        primary.name = "firecrawl"
+        primary.search.return_value = {
+            "success": False,
+            "error": "Payment Required: Insufficient credits",
+        }
+        fallback = MagicMock(
+            name="ParallelWebSearchProvider",
+            supports_search=MagicMock(return_value=True),
+        )
+        fallback.name = "parallel"
+        fallback.is_available.return_value = True
+        fallback.search.return_value = {
+            "success": True,
+            "data": {"web": [{"url": "https://example.com", "title": "ok"}]},
+        }
+
+        def provider_for(name):
+            return {"firecrawl": primary, "parallel": fallback}.get(name)
+
+        with patch("tools.web_tools._get_search_backend", return_value="firecrawl"), \
+             patch("agent.web_search_registry.get_provider", side_effect=provider_for), \
+             patch("agent.web_search_registry.list_providers", return_value=[primary, fallback]), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch.object(tools.web_tools._debug, "log_call"), \
+             patch.object(tools.web_tools._debug, "save"):
+            result = json.loads(tools.web_tools.web_search_tool("docs", limit=3))
+
+        assert result["success"] is True
+        assert result["data"]["web"][0]["url"] == "https://example.com"
+        assert result["meta"]["primary_provider"] == "firecrawl"
+        assert result["meta"]["provider"] == "parallel"
+        assert result["meta"]["fallback_from"] == "firecrawl"
+        assert "Insufficient credits" in result["meta"]["fallback_reason"]
+        assert result["meta"]["providers_attempted"] == ["firecrawl", "parallel"]
+        primary.search.assert_called_once_with("docs", 3)
+        fallback.search.assert_called_once_with("docs", 3)
+
+    def test_web_search_falls_back_when_configured_provider_raises_retryable_error(self):
+        import tools.web_tools
+
+        primary = MagicMock(
+            name="FirecrawlWebSearchProvider",
+            supports_search=MagicMock(return_value=True),
+        )
+        primary.name = "firecrawl"
+        primary.search.side_effect = RuntimeError("rate limited by provider")
+        fallback = MagicMock(
+            name="ParallelWebSearchProvider",
+            supports_search=MagicMock(return_value=True),
+        )
+        fallback.name = "parallel"
+        fallback.is_available.return_value = True
+        fallback.search.return_value = {
+            "success": True,
+            "data": {"web": [{"url": "https://example.com", "title": "ok"}]},
+        }
+
+        def provider_for(name):
+            return {"firecrawl": primary, "parallel": fallback}.get(name)
+
+        with patch("tools.web_tools._get_search_backend", return_value="firecrawl"), \
+             patch("agent.web_search_registry.get_provider", side_effect=provider_for), \
+             patch("agent.web_search_registry.list_providers", return_value=[primary, fallback]), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch.object(tools.web_tools._debug, "log_call"), \
+             patch.object(tools.web_tools._debug, "save"):
+            result = json.loads(tools.web_tools.web_search_tool("docs", limit=3))
+
+        assert result["success"] is True
+        assert result["meta"]["primary_provider"] == "firecrawl"
+        assert result["meta"]["provider"] == "parallel"
+        assert result["meta"]["fallback_reason"] == "rate limited by provider"
+        primary.search.assert_called_once_with("docs", 3)
+        fallback.search.assert_called_once_with("docs", 3)
+
 
 class TestWebSearchErrorHandling:
     """Test suite for web_search_tool() error responses."""

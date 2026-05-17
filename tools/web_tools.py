@@ -221,6 +221,85 @@ def _is_backend_available(backend: str) -> bool:
     return False
 
 
+def _web_provider_fallback_candidates(primary_name: str, capability: str) -> List[Any]:
+    """Return available providers to try after a configured provider fails."""
+    _ensure_web_search_plugins_registered()
+    try:
+        from agent.web_search_registry import get_provider, list_providers
+    except Exception:
+        return []
+
+    primary_name = str(primary_name or "").strip()
+    registered = {str(provider.name): provider for provider in list_providers()}
+    seen_names = {primary_name}
+    ordered_names = []
+    for name in _MATRIX_PROVIDER_ORDER:
+        if name not in seen_names:
+            ordered_names.append(name)
+            seen_names.add(name)
+    ordered_names.extend(sorted(name for name in registered if name not in seen_names))
+
+    capability_check = {
+        "search": "supports_search",
+        "extract": "supports_extract",
+        "crawl": "supports_crawl",
+    }.get(capability)
+    if capability_check is None:
+        return []
+
+    candidates = []
+    for name in ordered_names:
+        provider = get_provider(name)
+        if provider is None:
+            continue
+        supports = getattr(provider, capability_check, None)
+        try:
+            provider_supported = bool(callable(supports) and supports())
+        except Exception:
+            provider_supported = False
+        if not provider_supported:
+            continue
+        try:
+            available = bool(provider.is_available())
+        except Exception:
+            available = False
+        if available:
+            candidates.append(provider)
+    return candidates
+
+
+def _web_search_error_message(response_data: Any, default: str = "web search failed") -> str:
+    """Return a compact provider error message for fallback metadata."""
+    if isinstance(response_data, dict):
+        error = response_data.get("error") or response_data.get("message")
+        if error:
+            return str(error)
+    return default
+
+
+def _web_search_should_try_fallback(response_data: Any) -> bool:
+    if not isinstance(response_data, dict):
+        return True
+    if response_data.get("success", False):
+        return False
+    error = str(response_data.get("error") or "").lower()
+    if not error:
+        return True
+    retryable_markers = (
+        "payment required",
+        "insufficient credits",
+        "quota",
+        "rate limit",
+        "429",
+        "402",
+        "432",
+        "timeout",
+        "temporarily",
+        "unavailable",
+    )
+    return any(marker in error for marker in retryable_markers)
+
+
 def _ddgs_package_importable() -> bool:
     """Return True when the ``ddgs`` Python package can be imported.
 
@@ -819,7 +898,89 @@ def web_search_tool(query: str, limit: int = 5) -> str:
                 "Web search via %s: '%s' (limit: %d)",
                 provider.name, query, limit,
             )
-            response_data = provider.search(query, limit)
+            primary_exception = None
+            try:
+                response_data = provider.search(query, limit)
+            except Exception as exc:  # noqa: BLE001 - fallback may recover quota outages
+                primary_exception = exc
+                response_data = {"success": False, "error": str(exc)}
+
+            if _web_search_should_try_fallback(response_data):
+                attempted = [provider.name]
+                fallback_errors = {}
+                fallback_succeeded = False
+                first_error = _web_search_error_message(response_data)
+                for fallback_provider in _web_provider_fallback_candidates(
+                    provider.name, "search"
+                ):
+                    if fallback_provider.name in attempted:
+                        continue
+                    attempted.append(fallback_provider.name)
+                    logger.info(
+                        "Web search fallback via %s after %s failed",
+                        fallback_provider.name,
+                        provider.name,
+                    )
+                    try:
+                        fallback_response = fallback_provider.search(query, limit)
+                    except Exception as exc:  # noqa: BLE001 - keep walking retryable fallbacks
+                        fallback_response = {"success": False, "error": str(exc)}
+
+                    if isinstance(fallback_response, dict) and fallback_response.get(
+                        "success", False
+                    ):
+                        fallback_response.setdefault("meta", {})
+                        if isinstance(fallback_response["meta"], dict):
+                            fallback_response["meta"].update(
+                                {
+                                    "primary_provider": provider.name,
+                                    "provider": fallback_provider.name,
+                                    "fallback_from": provider.name,
+                                    "fallback_reason": first_error,
+                                    "providers_attempted": attempted,
+                                }
+                            )
+                            if fallback_errors:
+                                fallback_response["meta"]["fallback_errors"] = fallback_errors
+                        response_data = fallback_response
+                        fallback_succeeded = True
+                        break
+
+                    fallback_errors[fallback_provider.name] = _web_search_error_message(
+                        fallback_response
+                    )
+                    if not _web_search_should_try_fallback(fallback_response):
+                        break
+
+                if primary_exception is not None and not fallback_succeeded:
+                    raise primary_exception
+
+                if (
+                    len(attempted) > 1
+                    and isinstance(response_data, dict)
+                    and not response_data.get("success", False)
+                ):
+                    response_data.setdefault("meta", {})
+                    if isinstance(response_data["meta"], dict):
+                        response_data["meta"].update(
+                            {
+                                "primary_provider": provider.name,
+                                "provider": provider.name,
+                                "providers_attempted": attempted,
+                                "fallback_errors": fallback_errors,
+                            }
+                        )
+            elif primary_exception is not None:
+                raise primary_exception
+
+        if not isinstance(response_data, dict):
+            response_data = {
+                "success": False,
+                "error": _web_search_error_message(
+                    response_data,
+                    default="web search returned an invalid response",
+                ),
+            }
 
         debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
         result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
