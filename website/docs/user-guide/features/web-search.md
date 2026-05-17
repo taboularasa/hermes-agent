@@ -30,6 +30,18 @@ Both are configured through a single backend selection. Providers are chosen via
 If you have a paid [Nous Portal](https://portal.nousresearch.com) subscription, web search and extract are available through the **[Tool Gateway](tool-gateway.md)** via managed Firecrawl — no API key needed. Run `hermes tools` to enable it.
 :::
 
+### Provider degradation in recurring research
+
+When Firecrawl returns `Payment Required` or an insufficient-credits error, Hermes reports Firecrawl as `degraded` optional coverage rather than treating every recurring research run as an operator spend request. Scheduled ontology research should continue when fallback evidence is available from Parallel, Tavily, Exa, or direct HTTP/browser capture, and should only ask for a Firecrawl spend or credential decision when the task explicitly requires Firecrawl-only crawl or anti-bot coverage.
+
+Stable report wording:
+
+```text
+Firecrawl: degraded (credit exhausted). Fallback path: use Parallel, Tavily,
+or Exa for source discovery, then preserve selected sources with direct
+HTTP/browser capture or web_extract through a non-Firecrawl extract backend.
+```
+
 ---
 
 ## How `web_extract` handles long pages

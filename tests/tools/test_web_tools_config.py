@@ -545,6 +545,56 @@ class TestWebSearchErrorHandling:
         assert "traceback" not in result
 
 
+class TestWebExtractProviderStatus:
+    """Provider degradation metadata survives web_extract result trimming."""
+
+    @pytest.mark.asyncio
+    async def test_trimmed_extract_output_keeps_provider_status(self):
+        import tools.web_tools
+
+        provider_status = {
+            "provider": "firecrawl",
+            "status": "degraded",
+            "reason": "credit_exhausted",
+            "operator_action_required": False,
+            "policy": "Treat Firecrawl as optional degraded coverage.",
+            "fallback_path": "Use Parallel search plus direct capture.",
+        }
+
+        class FakeProvider:
+            name = "firecrawl"
+            display_name = "Firecrawl"
+
+            def supports_extract(self):
+                return True
+
+            async def extract(self, urls, **_kwargs):
+                return [
+                    {
+                        "url": urls[0],
+                        "title": "",
+                        "content": "",
+                        "raw_content": "",
+                        "error": "Firecrawl degraded: optional degraded coverage.",
+                        "provider_status": provider_status,
+                    }
+                ]
+
+        with patch("tools.web_tools._get_extract_backend", return_value="firecrawl"), \
+             patch("agent.web_search_registry.get_provider", return_value=FakeProvider()), \
+             patch.object(tools.web_tools._debug, "log_call"), \
+             patch.object(tools.web_tools._debug, "save"):
+            result = json.loads(
+                await tools.web_tools.web_extract_tool(
+                    ["https://example.com/source.pdf"],
+                    use_llm_processing=False,
+                )
+            )
+
+        assert result["provider_status"] == provider_status
+        assert result["results"][0]["provider_status"] == provider_status
+
+
 class TestCheckWebApiKey:
     """Test suite for check_web_api_key() unified availability check."""
 
