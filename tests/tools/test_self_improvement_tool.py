@@ -23,6 +23,31 @@ def _seed_ontology_repo(tmp_path: Path, *, generated_at: str, status: str = "fre
     return repo
 
 
+def _operator_value_entries(recent: str, *, aligned: int = 4, decision_only: int = 2) -> list[dict]:
+    entries = []
+    for idx in range(aligned):
+        entries.append(
+            {
+                "id": f"aligned-{idx}",
+                "occurredAt": recent,
+                "summary": f"Implemented operator-value path {idx}.",
+                "operatorDecisionSupport": "Operator can compare the verified change and choose the next issue.",
+                "changedFiles": ["tools/self_improvement_tool.py"],
+                "tests": ["pytest tests/tools/test_self_improvement_tool.py passed"],
+            }
+        )
+    for idx in range(decision_only):
+        entries.append(
+            {
+                "id": f"decision-only-{idx}",
+                "occurredAt": recent,
+                "summary": f"Prepared operator decision support note {idx}.",
+                "operatorDecisionSupport": "Operator has a blocker and recommended next decision.",
+            }
+        )
+    return entries
+
+
 def test_all_fresh_cross_source_skew_keeps_reliability_gate_healthy(tmp_path):
     now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
     recent = now.isoformat()
@@ -390,6 +415,184 @@ def test_leading_indicator_drift_fails_when_operator_value_regresses(tmp_path):
     assert "leading_indicator_drift" in benchmark["critical_failures"]
     assert benchmark["direction"] == "negative"
     assert benchmark["trend"] == "regressing"
+
+
+def test_leading_indicator_drift_flags_critical_slowing_down(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    history_path = tmp_path / "history.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(journal_path, {"entries": _operator_value_entries(recent)})
+    _write_json(codex_path, {"runs": {"codex_1": {"run_id": "codex_1", "completed_at": recent}}})
+    _write_json(ctx_path, {"sessions": {"ctx_1": {"session_id": "ctx_1", "updated_at": recent}}})
+    _write_json(
+        history_path,
+        {
+            "version": 1,
+            "evaluations": [
+                {
+                    "evaluated_at": (now - timedelta(hours=24 - idx * 6)).isoformat(),
+                    "checks": {"operator_value_alignment": {"score": score, "status": "pass"}},
+                }
+                for idx, score in enumerate([0.98, 0.9, 0.887, 0.884])
+            ],
+        },
+    )
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=history_path,
+        now=now,
+        persist=False,
+    )
+
+    drift = benchmark["checks"]["leading_indicator_drift"]
+    scorecard = drift["metrics"]["harbinger_scorecard"]
+    assert drift["status"] == "fail"
+    assert drift["metrics"]["triggered_harbingers"] == ["critical_slowing_down"]
+    assert scorecard["critical_slowing_down"]["triggered"] is True
+    assert scorecard["critical_slowing_down"]["evidence"]["recovery_gap"] > 0.09
+    assert scorecard["critical_slowing_down"]["next_action"]
+    assert "leading_indicator_drift" in benchmark["critical_failures"]
+
+
+def test_leading_indicator_drift_flags_variance_explosion_and_flickering(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    history_path = tmp_path / "history.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(journal_path, {"entries": _operator_value_entries(recent)})
+    _write_json(codex_path, {"runs": {"codex_1": {"run_id": "codex_1", "completed_at": recent}}})
+    _write_json(ctx_path, {"sessions": {"ctx_1": {"session_id": "ctx_1", "updated_at": recent}}})
+    _write_json(
+        history_path,
+        {
+            "version": 1,
+            "evaluations": [
+                {
+                    "evaluated_at": (now - timedelta(hours=36 - idx * 6)).isoformat(),
+                    "checks": {"operator_value_alignment": {"score": score, "status": status}},
+                }
+                for idx, (score, status) in enumerate(
+                    [
+                        (0.92, "pass"),
+                        (0.91, "pass"),
+                        (0.915, "pass"),
+                        (0.52, "fail"),
+                        (0.93, "pass"),
+                        (0.5, "fail"),
+                    ]
+                )
+            ],
+        },
+    )
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=history_path,
+        now=now,
+        persist=False,
+    )
+
+    drift = benchmark["checks"]["leading_indicator_drift"]
+    scorecard = drift["metrics"]["harbinger_scorecard"]
+    assert drift["status"] == "fail"
+    assert set(drift["metrics"]["triggered_harbingers"]) == {"variance_explosion", "flickering"}
+    assert scorecard["variance_explosion"]["evidence"]["recent_range"] > 0.4
+    assert scorecard["flickering"]["evidence"]["transition_count"] >= 3
+    assert len(drift["metrics"]["recommended_mitigations"]) == 2
+
+
+def test_leading_indicator_drift_flags_correlation_explosion(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    history_path = tmp_path / "history.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent, status="degraded")
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "status-only",
+                    "occurredAt": recent,
+                    "summary": "Status update: selected and working on the active self-improvement item.",
+                }
+            ]
+        },
+    )
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_status": {
+                    "run_id": "codex_status",
+                    "status": "completed",
+                    "completed_at": recent,
+                    "final_message": "STATUS\nWorking on active item. Next step is continued monitoring.",
+                    "exit_code": 0,
+                }
+            }
+        },
+    )
+    _write_json(ctx_path, {"sessions": {"ctx_1": {"session_id": "ctx_1", "updated_at": recent}}})
+    _write_json(
+        history_path,
+        {
+            "runs": [
+                {
+                    "generated_at": (now - timedelta(hours=6)).isoformat(),
+                    "project_score": 98.0,
+                    "checks": {
+                        "reliability_gate": {"score": 0.96, "status": "pass"},
+                        "anti_make_work_check": {"score": 0.98, "status": "pass"},
+                        "operator_value_alignment": {"score": 0.95, "status": "pass"},
+                    },
+                }
+            ]
+        },
+    )
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=history_path,
+        now=now,
+        persist=False,
+    )
+
+    drift = benchmark["checks"]["leading_indicator_drift"]
+    scorecard = drift["metrics"]["harbinger_scorecard"]
+    assert "correlation_explosion" in drift["metrics"]["triggered_harbingers"]
+    assert scorecard["correlation_explosion"]["triggered"] is True
+    assert scorecard["correlation_explosion"]["evidence"]["dropped_check_count"] == 3
+    assert set(scorecard["correlation_explosion"]["evidence"]["check_deltas"]) == {
+        "anti_make_work_check",
+        "operator_value_alignment",
+        "reliability_gate",
+    }
 
 
 def test_stale_active_ctx_still_degrades_reliability_floor(tmp_path):

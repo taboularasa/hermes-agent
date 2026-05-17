@@ -33,6 +33,17 @@ DEFAULT_ACTIVE_STALE_HOURS = 12
 PROVENANCE_CONTRACT_VERSION = "v1"
 BENCHMARK_CONTRACT_VERSION = "v1"
 _BENCHMARK_HISTORY_LIMIT = 200
+_LEADING_INDICATOR_CHECK_IDS = (
+    "reliability_gate",
+    "anti_make_work_check",
+    "operator_value_alignment",
+)
+_LEADING_INDICATOR_HARBINGERS = (
+    "critical_slowing_down",
+    "variance_explosion",
+    "flickering",
+    "correlation_explosion",
+)
 _ONTOLOGY_SCAN_SUFFIXES = {".json", ".yaml", ".yml", ".md"}
 _ONTOLOGY_SCAN_PRUNED_DIRS = {".git"}
 _TEXT_EVIDENCE_EXCLUDED_KEYS = {
@@ -1255,17 +1266,294 @@ def _score_direction(current: float, previous: Optional[float], *, threshold: fl
     return "stable"
 
 
+def _rounded_float(value: Any, digits: int = 4) -> Optional[float]:
+    try:
+        return round(float(value), digits)
+    except (TypeError, ValueError):
+        return None
+
+
+def _population_stddev(values: list[float]) -> float:
+    if len(values) < 2:
+        return 0.0
+    mean = sum(values) / len(values)
+    return (sum((value - mean) ** 2 for value in values) / len(values)) ** 0.5
+
+
+def _coerce_check_status(value: Any) -> str:
+    score = _coerce_score(value)
+    if isinstance(value, dict):
+        status = str(value.get("status") or "").strip().lower()
+        if status:
+            return status
+    if score is not None:
+        return _check_status(score)
+    return "unknown"
+
+
+def _normalize_benchmark_check(value: Any) -> Optional[dict[str, Any]]:
+    score = _coerce_score(value)
+    if score is None:
+        return None
+    return {"score": round(score, 4), "status": _coerce_check_status(value)}
+
+
+def _benchmark_indicator_series(
+    history: dict[str, Any],
+    current_checks: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    series: list[dict[str, Any]] = []
+    for entry in _iter_benchmark_history_entries(history):
+        checks = entry.get("checks")
+        if not isinstance(checks, dict):
+            continue
+        normalized_checks = {
+            check_id: normalized
+            for check_id in _LEADING_INDICATOR_CHECK_IDS
+            if (normalized := _normalize_benchmark_check(checks.get(check_id))) is not None
+        }
+        if not normalized_checks:
+            continue
+        series.append(
+            {
+                "source": "history",
+                "generated_at": entry.get("generated_at") or entry.get("evaluated_at"),
+                "checks": normalized_checks,
+            }
+        )
+
+    normalized_current = {
+        check_id: normalized
+        for check_id in _LEADING_INDICATOR_CHECK_IDS
+        if (normalized := _normalize_benchmark_check(current_checks.get(check_id))) is not None
+    }
+    if normalized_current:
+        series.append({"source": "current", "generated_at": None, "checks": normalized_current})
+    return series
+
+
+def _check_score_series(series: list[dict[str, Any]], check_id: str) -> list[float]:
+    scores: list[float] = []
+    for entry in series:
+        check = (entry.get("checks") or {}).get(check_id)
+        score = _coerce_score(check)
+        if score is not None:
+            scores.append(score)
+    return scores
+
+
+def _check_status_series(series: list[dict[str, Any]], check_id: str) -> list[str]:
+    statuses: list[str] = []
+    for entry in series:
+        check = (entry.get("checks") or {}).get(check_id)
+        if check is None:
+            continue
+        status = _coerce_check_status(check)
+        if status != "unknown":
+            statuses.append(status)
+    return statuses
+
+
+def _harbinger_payload(
+    *,
+    triggered: bool,
+    evidence: dict[str, Any],
+    mitigation: str,
+    next_action: str,
+) -> dict[str, Any]:
+    return {
+        "triggered": triggered,
+        "severity": "fail" if triggered else "none",
+        "evidence": evidence,
+        "mitigation": mitigation,
+        "next_action": next_action,
+    }
+
+
+def _detect_critical_slowing_down(scores: list[float]) -> dict[str, Any]:
+    recent_scores = [round(score, 4) for score in scores[-5:]]
+    prior_peak = max(scores[:-1]) if len(scores) > 1 else (scores[-1] if scores else None)
+    current_score = scores[-1] if scores else None
+    recovery_gap = (prior_peak - current_score) if prior_peak is not None and current_score is not None else 0.0
+    deltas = [scores[idx] - scores[idx - 1] for idx in range(1, len(scores))]
+    recent_deltas = deltas[-3:]
+    flat_or_negative_count = sum(1 for delta in recent_deltas if delta <= 0.01)
+    average_recent_delta = sum(recent_deltas) / len(recent_deltas) if recent_deltas else None
+    triggered = (
+        len(scores) >= 5
+        and recovery_gap >= 0.05
+        and len(recent_deltas) >= 3
+        and flat_or_negative_count == len(recent_deltas)
+    )
+
+    return _harbinger_payload(
+        triggered=triggered,
+        evidence={
+            "sample_count": len(scores),
+            "recent_scores": recent_scores,
+            "prior_peak": _rounded_float(prior_peak),
+            "current_score": _rounded_float(current_score),
+            "recovery_gap": round(recovery_gap, 4),
+            "recent_deltas": [round(delta, 4) for delta in recent_deltas],
+            "average_recent_delta": _rounded_float(average_recent_delta),
+            "flat_or_negative_delta_count": flat_or_negative_count,
+        },
+        mitigation="Stop expanding self-improvement scope until the lagging operator-value signal recovers.",
+        next_action="Select the next maintenance item only if it restores operator decision support plus verified change evidence.",
+    )
+
+
+def _detect_variance_explosion(scores: list[float]) -> dict[str, Any]:
+    recent_scores = scores[-4:]
+    baseline_scores = scores[:-4]
+    baseline_stddev = _population_stddev(baseline_scores)
+    recent_stddev = _population_stddev(recent_scores)
+    recent_range = max(recent_scores) - min(recent_scores) if recent_scores else 0.0
+    triggered = (
+        len(scores) >= 6
+        and len(recent_scores) >= 4
+        and recent_range >= 0.2
+        and recent_stddev >= max(0.08, baseline_stddev * 3)
+    )
+
+    return _harbinger_payload(
+        triggered=triggered,
+        evidence={
+            "sample_count": len(scores),
+            "baseline_scores": [round(score, 4) for score in baseline_scores[-4:]],
+            "recent_scores": [round(score, 4) for score in recent_scores],
+            "baseline_stddev": round(baseline_stddev, 4),
+            "recent_stddev": round(recent_stddev, 4),
+            "recent_range": round(recent_range, 4),
+        },
+        mitigation="Treat the benchmark as unstable and stop optimizing for throughput until score variance narrows.",
+        next_action="Run one focused stabilization pass and require the next run to include low-variance evidence before broadening lane selection.",
+    )
+
+
+def _detect_flickering(series: list[dict[str, Any]]) -> dict[str, Any]:
+    statuses = _check_status_series(series, "operator_value_alignment")[-6:]
+    transition_count = sum(
+        1
+        for idx in range(1, len(statuses))
+        if statuses[idx] != statuses[idx - 1]
+    )
+    pass_boundary_crossings = sum(
+        1
+        for idx in range(1, len(statuses))
+        if (statuses[idx] == "pass") != (statuses[idx - 1] == "pass")
+    )
+    triggered = len(statuses) >= 5 and transition_count >= 3 and pass_boundary_crossings >= 2
+
+    return _harbinger_payload(
+        triggered=triggered,
+        evidence={
+            "sample_count": len(statuses),
+            "recent_statuses": statuses,
+            "transition_count": transition_count,
+            "pass_boundary_crossings": pass_boundary_crossings,
+        },
+        mitigation="Do not treat a single passing run as stable while the signal flickers across pass/fail boundaries.",
+        next_action="Require two consecutive stable passing runs before raw issue-selection volume is allowed again.",
+    )
+
+
+def _detect_correlation_explosion(series: list[dict[str, Any]]) -> dict[str, Any]:
+    current = series[-1] if series else {}
+    current_checks = current.get("checks") if current.get("source") == "current" else {}
+    check_deltas: dict[str, float] = {}
+    for check_id in _LEADING_INDICATOR_CHECK_IDS:
+        current_score = _coerce_score((current_checks or {}).get(check_id))
+        if current_score is None:
+            continue
+        previous_score = None
+        for entry in reversed(series[:-1]):
+            previous_score = _coerce_score((entry.get("checks") or {}).get(check_id))
+            if previous_score is not None:
+                break
+        if previous_score is not None:
+            check_deltas[check_id] = round(current_score - previous_score, 4)
+
+    dropped_checks = {
+        check_id: delta
+        for check_id, delta in check_deltas.items()
+        if delta <= -0.05
+    }
+    triggered = len(dropped_checks) >= 3
+
+    return _harbinger_payload(
+        triggered=triggered,
+        evidence={
+            "check_deltas": check_deltas,
+            "dropped_check_count": len(dropped_checks),
+            "dropped_checks": sorted(dropped_checks),
+            "correlated_drop_threshold": -0.05,
+        },
+        mitigation="Treat simultaneous benchmark-check degradation as coupled risk, not isolated check noise.",
+        next_action="Pick a maintenance item that improves the shared evidence path before selecting feature or volume work.",
+    )
+
+
+def _build_leading_indicator_scorecard(
+    history: dict[str, Any],
+    current_checks: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    series = _benchmark_indicator_series(history, current_checks)
+    operator_scores = _check_score_series(series, "operator_value_alignment")
+    scorecard = {
+        "critical_slowing_down": _detect_critical_slowing_down(operator_scores),
+        "variance_explosion": _detect_variance_explosion(operator_scores),
+        "flickering": _detect_flickering(series),
+        "correlation_explosion": _detect_correlation_explosion(series),
+    }
+    triggered_harbingers = [
+        harbinger
+        for harbinger in _LEADING_INDICATOR_HARBINGERS
+        if scorecard[harbinger]["triggered"]
+    ]
+    return {
+        "series_sample_count": len(series),
+        "operator_value_score_series": [round(score, 4) for score in operator_scores[-8:]],
+        "scorecard": scorecard,
+        "triggered_harbingers": triggered_harbingers,
+        "recommended_mitigations": [
+            {
+                "harbinger": harbinger,
+                "mitigation": scorecard[harbinger]["mitigation"],
+                "next_action": scorecard[harbinger]["next_action"],
+                "evidence": scorecard[harbinger]["evidence"],
+            }
+            for harbinger in triggered_harbingers
+        ],
+    }
+
+
 def _evaluate_leading_indicator_drift_check(
     operator_value_check: dict[str, Any],
     history: dict[str, Any],
+    current_checks: Optional[dict[str, dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     current_score = float(operator_value_check.get("score") or 0.0)
     prior_scores = _history_check_scores(history, "operator_value_alignment")
     previous_score = prior_scores[-1] if prior_scores else None
     delta = round(current_score - previous_score, 4) if previous_score is not None else None
     regressing = delta is not None and delta < -0.01
+    indicator_payload = _build_leading_indicator_scorecard(
+        history,
+        current_checks or {"operator_value_alignment": operator_value_check},
+    )
+    triggered_harbingers = indicator_payload["triggered_harbingers"]
 
-    if previous_score is None:
+    if triggered_harbingers:
+        score = max(0.2, 0.6 - (0.15 * len(triggered_harbingers)))
+        if regressing:
+            score = min(score, 0.5)
+        detail = (
+            "Leading indicators triggered: "
+            + ", ".join(triggered_harbingers)
+            + "; run mitigation before expanding self-improvement scope."
+        )
+    elif previous_score is None:
         score = 1.0
         detail = "No prior operator-value score; drift not assessed."
     elif regressing:
@@ -1284,6 +1572,12 @@ def _evaluate_leading_indicator_drift_check(
             "current_operator_value_score": round(current_score, 4),
             "operator_value_delta": delta,
             "prior_operator_value_sample_count": len(prior_scores),
+            "leading_indicator_contract_version": "harbinger_scorecard.v1",
+            "series_sample_count": indicator_payload["series_sample_count"],
+            "operator_value_score_series": indicator_payload["operator_value_score_series"],
+            "triggered_harbingers": triggered_harbingers,
+            "harbinger_scorecard": indicator_payload["scorecard"],
+            "recommended_mitigations": indicator_payload["recommended_mitigations"],
         }
     )
     return _build_benchmark_item(
@@ -1426,6 +1720,11 @@ def evaluate_self_improvement_benchmark(
     leading_indicator_drift = _evaluate_leading_indicator_drift_check(
         operator_value_alignment,
         history,
+        {
+            "reliability_gate": reliability_gate,
+            "anti_make_work_check": anti_make_work_check,
+            "operator_value_alignment": operator_value_alignment,
+        },
     )
     checks = {
         "reliability_gate": reliability_gate,
