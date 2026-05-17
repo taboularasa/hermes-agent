@@ -74,52 +74,63 @@ class _FakeSearchProvider(WebSearchProvider):
         }
 
 
-def test_web_search_matrix_can_compare_registered_providers(monkeypatch):
-    web_search_registry._reset_for_tests()
+def _install_fake_search_providers(monkeypatch, providers):
+    providers_by_name = {provider.name: provider for provider in providers}
     monkeypatch.setattr(web_tools, "_ensure_web_search_plugins_registered", lambda: None)
-    web_search_registry.register_provider(
-        _FakeSearchProvider(
-            "parallel",
-            [
-                {
-                    "title": "Shared",
-                    "url": "https://example.com/shared/",
-                    "description": "from parallel",
-                    "position": 1,
-                }
-            ],
-        )
+    monkeypatch.setattr(
+        web_search_registry,
+        "list_providers",
+        lambda: list(providers_by_name.values()),
     )
-    web_search_registry.register_provider(
-        _FakeSearchProvider(
-            "exa",
-            [
-                {
-                    "title": "Shared exa",
-                    "url": "https://example.com/shared",
-                    "description": "from exa",
-                    "position": 2,
-                },
-                {
-                    "title": "Unique",
-                    "url": "https://example.com/unique",
-                    "description": "from exa",
-                    "position": 1,
-                },
-            ],
-        )
+    monkeypatch.setattr(
+        web_search_registry,
+        "get_provider",
+        lambda name: providers_by_name.get(str(name).strip()),
     )
 
-    try:
-        payload = json.loads(
-            web_tools.web_search_matrix_tool(
-                query="cms dental",
-                providers=["parallel", "exa"],
-                limit=5,
-            )
+
+def test_web_search_matrix_can_compare_registered_providers(monkeypatch):
+    _install_fake_search_providers(
+        monkeypatch,
+        [
+            _FakeSearchProvider(
+                "parallel",
+                [
+                    {
+                        "title": "Shared",
+                        "url": "https://example.com/shared/",
+                        "description": "from parallel",
+                        "position": 1,
+                    }
+                ],
+            ),
+            _FakeSearchProvider(
+                "exa",
+                [
+                    {
+                        "title": "Shared exa",
+                        "url": "https://example.com/shared",
+                        "description": "from exa",
+                        "position": 2,
+                    },
+                    {
+                        "title": "Unique",
+                        "url": "https://example.com/unique",
+                        "description": "from exa",
+                        "position": 1,
+                    },
+                ],
+            ),
+        ],
+    )
+
+    payload = json.loads(
+        web_tools.web_search_matrix_tool(
+            query="cms dental",
+            providers=["parallel", "exa"],
+            limit=5,
         )
-    finally:
-        web_search_registry._reset_for_tests()
+    )
 
     assert payload["success"] is True
     assert payload["strategy"] == "provider_matrix"
@@ -135,35 +146,34 @@ def test_web_search_matrix_can_compare_registered_providers(monkeypatch):
 
 
 def test_web_search_matrix_keeps_provider_failures_visible(monkeypatch):
-    web_search_registry._reset_for_tests()
-    monkeypatch.setattr(web_tools, "_ensure_web_search_plugins_registered", lambda: None)
-    web_search_registry.register_provider(
-        _FakeSearchProvider(
-            "parallel",
-            [
-                {
-                    "title": "Result",
-                    "url": "https://example.com/result",
-                    "description": "ok",
-                    "position": 1,
-                }
-            ],
-        )
-    )
-    web_search_registry.register_provider(
-        _FakeSearchProvider("firecrawl", error="Payment Required: Insufficient credits")
+    _install_fake_search_providers(
+        monkeypatch,
+        [
+            _FakeSearchProvider(
+                "parallel",
+                [
+                    {
+                        "title": "Result",
+                        "url": "https://example.com/result",
+                        "description": "ok",
+                        "position": 1,
+                    }
+                ],
+            ),
+            _FakeSearchProvider(
+                "firecrawl",
+                error="Payment Required: Insufficient credits",
+            ),
+        ],
     )
 
-    try:
-        payload = json.loads(
-            web_tools.web_search_matrix_tool(
-                query="cms dental",
-                providers=["firecrawl", "parallel"],
-                limit=5,
-            )
+    payload = json.loads(
+        web_tools.web_search_matrix_tool(
+            query="cms dental",
+            providers=["firecrawl", "parallel"],
+            limit=5,
         )
-    finally:
-        web_search_registry._reset_for_tests()
+    )
 
     assert payload["success"] is True
     assert payload["provider_results"]["parallel"]["success"] is True
