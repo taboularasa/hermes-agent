@@ -1016,6 +1016,60 @@ class TestRunJobSessionPersistence:
         kwargs = mock_agent_cls.call_args.kwargs
         assert kwargs["enabled_toolsets"] == ["terminal"]
 
+    def test_ontology_research_preflight_requires_matrix_search(self):
+        import cron.scheduler as scheduler
+
+        job = {"id": "ontology-job", "research_profile": "ontology"}
+        prompt = "Run ontology research for the source registry."
+
+        with patch("cron.scheduler._available_cron_tool_names", return_value={"web_search"}), \
+             patch("cron.scheduler._cron_firecrawl_available", return_value=True):
+            result = scheduler._preflight_cron_web_research(job, prompt, ["web"])
+
+        assert result is not None
+        assert result["missing"][0]["capability"] == "web_search_matrix"
+        assert "degraded" not in result["error"]
+
+    def test_ontology_research_preflight_passes_when_required_surface_is_available(self):
+        import cron.scheduler as scheduler
+
+        job = {"id": "ontology-job", "research_profile": "ontology"}
+        prompt = "Run ontology research with web_search_matrix and Firecrawl."
+
+        with patch(
+            "cron.scheduler._available_cron_tool_names",
+            return_value={"web_search", "web_search_matrix", "web_extract"},
+        ), patch("cron.scheduler._cron_firecrawl_available", return_value=True):
+            result = scheduler._preflight_cron_web_research(job, prompt, ["web"])
+
+        assert result is None
+
+    def test_run_job_blocks_required_web_research_when_surface_missing(self, tmp_path):
+        job = {
+            "id": "ontology-web-research",
+            "name": "ontology research",
+            "prompt": "Run ontology research with web_search_matrix and Firecrawl.",
+            "enabled_toolsets": ["web"],
+        }
+        fake_db, patches = self._make_run_job_patches(tmp_path)
+
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patch("cron.scheduler._available_cron_tool_names", return_value={"web_search"}), \
+             patch("cron.scheduler._cron_firecrawl_available", return_value=False), \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            success, output, final_response, error = run_job(job)
+
+        assert success is False
+        assert final_response == ""
+        assert "scheduled web research preflight failed" in error
+        assert "**Status:** BLOCKED" in output
+        assert "**Coverage:** degraded" in output
+        assert "web_search_matrix" in output
+        assert "Firecrawl" in output
+        assert "single-source sitemap discovery" in output
+        mock_agent_cls.assert_not_called()
+        fake_db.end_session.assert_called_once()
+
     def test_run_job_empty_response_returns_empty_not_placeholder(self, tmp_path):
         """Empty final_response should stay empty for delivery logic (issue #2234).
 

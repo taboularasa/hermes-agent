@@ -85,6 +85,190 @@ def _resolve_cron_enabled_toolsets(job: dict, cfg: dict) -> list[str] | None:
         )
         return None
 
+
+_ONTOLOGY_RESEARCH_MARKERS = (
+    "ontology research",
+    "ontology_engineering",
+    "ontology_context",
+    "source-registry",
+    "source registry",
+    "ontology literature",
+)
+_WEB_SEARCH_MATRIX_MARKERS = (
+    "web_search_matrix",
+    "search matrix",
+)
+_WEB_EXTRACT_MARKERS = (
+    "web_extract",
+)
+_FIRECRAWL_MARKERS = (
+    "firecrawl",
+)
+
+
+def _prompt_contains_any(prompt: str, markers: tuple[str, ...]) -> bool:
+    lowered = (prompt or "").lower()
+    return any(marker in lowered for marker in markers)
+
+
+def _cron_web_research_requirements(job: dict, prompt: str) -> dict[str, str]:
+    """Infer explicit web-research requirements from an assembled cron prompt."""
+    requirements: dict[str, str] = {}
+    profile = str(job.get("research_profile") or job.get("research_protocol") or "").lower()
+    text = f"{profile}\n{prompt or ''}"
+
+    if (
+        _prompt_contains_any(text, _WEB_SEARCH_MATRIX_MARKERS)
+        or _prompt_contains_any(text, _ONTOLOGY_RESEARCH_MARKERS)
+    ):
+        requirements["web_search_matrix"] = (
+            "scheduled ontology/source-registry research requires matrix search first"
+        )
+
+    if _prompt_contains_any(text, _WEB_EXTRACT_MARKERS):
+        requirements["web_extract"] = "assembled prompt explicitly requires web_extract"
+
+    if _prompt_contains_any(text, _FIRECRAWL_MARKERS):
+        requirements["firecrawl"] = "assembled prompt explicitly requires Firecrawl"
+
+    return requirements
+
+
+def _available_cron_tool_names(enabled_toolsets: list[str] | None) -> set[str]:
+    """Resolve the actual tool names visible to the cron agent after check_fn gates."""
+    from model_tools import get_tool_definitions
+
+    definitions = get_tool_definitions(
+        enabled_toolsets=enabled_toolsets,
+        disabled_toolsets=["cronjob", "messaging", "clarify"],
+        quiet_mode=True,
+    )
+    return {
+        item.get("function", {}).get("name", "")
+        for item in definitions
+        if item.get("function", {}).get("name")
+    }
+
+
+def _cron_firecrawl_available() -> bool:
+    try:
+        from tools.web_tools import check_firecrawl_api_key
+
+        return bool(check_firecrawl_api_key())
+    except Exception:
+        return False
+
+
+def _preflight_cron_web_research(
+    job: dict,
+    prompt: str,
+    enabled_toolsets: list[str] | None,
+) -> Optional[dict]:
+    """Fail scheduled research runs before the agent silently downgrades coverage."""
+    requirements = _cron_web_research_requirements(job, prompt)
+    if not requirements:
+        return None
+
+    available_tools = _available_cron_tool_names(enabled_toolsets)
+    missing: list[dict[str, str]] = []
+
+    if "web_search_matrix" in requirements and "web_search_matrix" not in available_tools:
+        missing.append(
+            {
+                "capability": "web_search_matrix",
+                "reason": requirements["web_search_matrix"],
+                "remediation": (
+                    "enable the web toolset for cron and configure at least one "
+                    "search provider such as EXA_API_KEY, PARALLEL_API_KEY, "
+                    "TAVILY_API_KEY, FIRECRAWL_API_KEY, or a managed tool gateway"
+                ),
+            }
+        )
+
+    if "web_extract" in requirements and "web_extract" not in available_tools:
+        missing.append(
+            {
+                "capability": "web_extract",
+                "reason": requirements["web_extract"],
+                "remediation": (
+                    "enable the web toolset for cron and configure an extract-capable "
+                    "provider such as Firecrawl, Exa, Parallel, or Tavily"
+                ),
+            }
+        )
+
+    if "firecrawl" in requirements and not _cron_firecrawl_available():
+        missing.append(
+            {
+                "capability": "Firecrawl",
+                "reason": requirements["firecrawl"],
+                "remediation": (
+                    "configure FIRECRAWL_API_KEY, FIRECRAWL_API_URL, "
+                    "FIRECRAWL_GATEWAY_URL, or TOOL_GATEWAY_DOMAIN plus "
+                    "TOOL_GATEWAY_USER_TOKEN for the cron runtime"
+                ),
+            }
+        )
+
+    if not missing:
+        return None
+
+    return {
+        "requirements": requirements,
+        "missing": missing,
+        "available_tools": sorted(available_tools),
+        "enabled_toolsets": enabled_toolsets,
+        "error": (
+            "scheduled web research preflight failed: "
+            + ", ".join(item["capability"] for item in missing)
+        ),
+    }
+
+
+def _format_cron_web_research_preflight_failure(
+    job: dict,
+    prompt: str,
+    preflight: dict,
+) -> str:
+    missing_lines = "\n".join(
+        f"- {item['capability']}: {item['reason']}. Remediation: {item['remediation']}."
+        for item in preflight.get("missing", [])
+    )
+    toolsets = preflight.get("enabled_toolsets")
+    if toolsets is None:
+        toolset_text = "full default toolset resolution"
+    else:
+        toolset_text = ", ".join(str(item) for item in toolsets) or "(none)"
+    available = ", ".join(preflight.get("available_tools", [])) or "(none)"
+
+    return f"""# Cron Job: {str(job.get('name') or job.get('id') or 'cron job')} (BLOCKED)
+
+**Job ID:** {job.get('id', '?')}
+**Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}
+**Schedule:** {job.get('schedule_display', 'N/A')}
+**Status:** BLOCKED
+**Coverage:** degraded
+
+## Prompt
+
+{prompt}
+
+## Web Research Preflight
+
+The assembled prompt requires scheduled web research capabilities that are not
+available to this cron agent. The job was blocked before model execution so it
+cannot silently degrade into single-source sitemap discovery.
+
+{missing_lines}
+
+Source-preservation fallback remains available only as degraded coverage; use
+it intentionally and label the run as degraded if broad provider coverage is
+not required.
+
+**Resolved cron toolsets:** {toolset_text}
+**Available cron tools:** {available}
+"""
+
 # Valid delivery platforms — used to validate user-supplied platform names
 # in cron delivery targets, preventing env var enumeration via crafted names.
 _KNOWN_DELIVERY_PLATFORMS = frozenset({
@@ -1338,6 +1522,26 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         # Max iterations
         max_iterations = _cfg.get("agent", {}).get("max_turns") or _cfg.get("max_turns") or 90
 
+        resolved_enabled_toolsets = _resolve_cron_enabled_toolsets(job, _cfg)
+        web_research_preflight = _preflight_cron_web_research(
+            job,
+            prompt,
+            resolved_enabled_toolsets,
+        )
+        if web_research_preflight:
+            logger.warning(
+                "Job '%s' (ID: %s): web research preflight failed: %s",
+                job_name,
+                job_id,
+                web_research_preflight.get("error"),
+            )
+            blocked_doc = _format_cron_web_research_preflight_failure(
+                job,
+                prompt,
+                web_research_preflight,
+            )
+            return False, blocked_doc, "", str(web_research_preflight.get("error") or "")
+
         # Provider routing
         pr = _cfg.get("provider_routing", {})
 
@@ -1441,7 +1645,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             providers_order=pr.get("order"),
             provider_sort=pr.get("sort"),
             openrouter_min_coding_score=(_cfg.get("openrouter") or {}).get("min_coding_score"),
-            enabled_toolsets=_resolve_cron_enabled_toolsets(job, _cfg),
+            enabled_toolsets=resolved_enabled_toolsets,
             disabled_toolsets=["cronjob", "messaging", "clarify"],
             quiet_mode=True,
             # Cron jobs should always inherit the user's SOUL.md identity from
