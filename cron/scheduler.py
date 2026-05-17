@@ -85,6 +85,271 @@ def _resolve_cron_enabled_toolsets(job: dict, cfg: dict) -> list[str] | None:
         )
         return None
 
+
+def _cron_job_contract_text(job: dict, prompt: str) -> str:
+    parts = [
+        job.get("name"),
+        job.get("prompt"),
+        prompt,
+        job.get("skill"),
+        " ".join(str(item) for item in (job.get("skills") or [])),
+    ]
+    return " ".join(str(part or "") for part in parts).lower()
+
+
+def _cron_job_requires_ontology_research_contract(job: dict, prompt: str) -> bool:
+    """Return True for scheduled ontology research jobs that need strict tools."""
+    text = _cron_job_contract_text(job, prompt)
+    if "ontology_context" in text or "web_search_matrix" in text:
+        return True
+    return (
+        "ontology" in text
+        and (
+            "research" in text
+            or "ontology_engineering" in text
+            or "ontology engineering" in text
+            or "source capture" in text
+            or "external evidence" in text
+            or "firecrawl" in text
+        )
+    )
+
+
+def _append_toolset_once(toolsets: list[str], toolset: str | None) -> None:
+    if toolset and toolset not in toolsets:
+        toolsets.append(toolset)
+
+
+def _registered_toolset_for_tool(tool_name: str) -> str | None:
+    try:
+        from hermes_cli.plugins import discover_plugins
+
+        discover_plugins()
+    except Exception as exc:
+        logger.debug("Cron plugin discovery failed while resolving %s: %s", tool_name, exc)
+    try:
+        from tools.registry import registry
+
+        return registry.get_toolset_for_tool(tool_name)
+    except Exception as exc:
+        logger.debug("Cron registry lookup failed for %s: %s", tool_name, exc)
+        return None
+
+
+def _resolve_ontology_cron_enabled_toolsets(
+    job: dict,
+    cfg: dict,
+    prompt: str,
+) -> list[str] | None:
+    enabled_toolsets = _resolve_cron_enabled_toolsets(job, cfg)
+    if not _cron_job_requires_ontology_research_contract(job, prompt):
+        return enabled_toolsets
+    if enabled_toolsets is None:
+        return None
+
+    augmented = [str(toolset) for toolset in enabled_toolsets]
+    _append_toolset_once(augmented, "web")
+    _append_toolset_once(augmented, _registered_toolset_for_tool("ontology_context"))
+    _append_toolset_once(augmented, _registered_toolset_for_tool("web_search_matrix"))
+    return augmented
+
+
+def _cron_tool_contract_status(
+    tool_name: str,
+    enabled_toolsets: list[str] | None,
+) -> dict:
+    toolsets_to_check = enabled_toolsets or ["hermes-cron"]
+    exposed = False
+    try:
+        from toolsets import resolve_multiple_toolsets
+
+        exposed = tool_name in resolve_multiple_toolsets(toolsets_to_check)
+    except Exception as exc:
+        return {
+            "tool": tool_name,
+            "available": False,
+            "exposed": False,
+            "registered": False,
+            "reason": f"{tool_name} toolset resolution failed: {exc}",
+        }
+
+    try:
+        from tools.registry import registry
+
+        entry = registry.get_entry(tool_name)
+    except Exception as exc:
+        entry = None
+        registry_error = str(exc)
+    else:
+        registry_error = ""
+
+    if not exposed:
+        return {
+            "tool": tool_name,
+            "available": False,
+            "exposed": False,
+            "registered": entry is not None,
+            "enabled_toolsets": enabled_toolsets,
+            "reason": f"{tool_name} is not exposed by this job's enabled toolsets",
+        }
+    if entry is None:
+        reason = f"{tool_name} is not registered"
+        if registry_error:
+            reason = f"{reason}: {registry_error}"
+        return {
+            "tool": tool_name,
+            "available": False,
+            "exposed": True,
+            "registered": False,
+            "enabled_toolsets": enabled_toolsets,
+            "reason": reason,
+        }
+    if entry.check_fn:
+        try:
+            if not bool(entry.check_fn()):
+                return {
+                    "tool": tool_name,
+                    "available": False,
+                    "exposed": True,
+                    "registered": True,
+                    "enabled_toolsets": enabled_toolsets,
+                    "reason": f"{tool_name} is registered but unavailable in this runtime",
+                }
+        except Exception as exc:
+            return {
+                "tool": tool_name,
+                "available": False,
+                "exposed": True,
+                "registered": True,
+                "enabled_toolsets": enabled_toolsets,
+                "reason": f"{tool_name} availability check failed: {exc}",
+            }
+    return {
+        "tool": tool_name,
+        "available": True,
+        "exposed": True,
+        "registered": True,
+        "toolset": entry.toolset,
+    }
+
+
+def _dependency_blocked_doc(
+    job_id: str,
+    job_name: str,
+    prompt: str,
+    reason: str,
+    status_payload: dict | None = None,
+) -> tuple[bool, str, str, str]:
+    now_iso = _hermes_now().strftime("%Y-%m-%d %H:%M:%S")
+    payload_text = json.dumps(status_payload or {}, indent=2, ensure_ascii=False)
+    output = f"""# Cron Job: {job_name} (DEPENDENCY BLOCKED)
+
+**Job ID:** {job_id}
+**Run Time:** {now_iso}
+**Status:** dependency_blocked
+
+## Prompt
+
+{prompt}
+
+## Dependency Blocker
+
+{reason}
+
+## Dependency Status
+
+```json
+{payload_text}
+```
+"""
+    return False, output, "", f"dependency_blocked: {reason}"
+
+
+def _run_ontology_research_dependency_preflight(
+    job: dict,
+    prompt: str,
+    enabled_toolsets: list[str] | None,
+) -> tuple[bool, str, str, str] | None:
+    """Block ontology research cron runs before degraded fallback work starts."""
+    if not _cron_job_requires_ontology_research_contract(job, prompt):
+        return None
+
+    job_id = job.get("id", "?")
+    job_name = str(job.get("name") or job.get("prompt") or job_id or "cron job")
+    tool_status = {
+        name: _cron_tool_contract_status(name, enabled_toolsets)
+        for name in ("ontology_context", "web_search_matrix")
+    }
+    missing = [
+        status["reason"]
+        for status in tool_status.values()
+        if not status.get("available")
+    ]
+    if missing:
+        return _dependency_blocked_doc(
+            job_id,
+            job_name,
+            prompt,
+            "; ".join(missing),
+            {
+                "success": False,
+                "status": "dependency_blocked",
+                "dependency": "ontology_cron_tool_surface",
+                "blocked_reasons": missing,
+                "tools": tool_status,
+                "enabled_toolsets": enabled_toolsets,
+            },
+        )
+
+    try:
+        from tools.web_tools import web_search_matrix
+
+        raw_status = web_search_matrix(
+            require_capabilities=["search", "extract"],
+            require_providers=["firecrawl"],
+        )
+        web_status = json.loads(raw_status)
+    except Exception as exc:
+        return _dependency_blocked_doc(
+            job_id,
+            job_name,
+            prompt,
+            f"web_search_matrix preflight failed: {exc}",
+            {
+                "success": False,
+                "status": "dependency_blocked",
+                "dependency": "web_search_matrix",
+                "blocked_reasons": [str(exc)],
+                "tools": tool_status,
+                "enabled_toolsets": enabled_toolsets,
+            },
+        )
+
+    blocked = web_status.get("status") == "dependency_blocked" or web_status.get("success") is False
+    if not blocked:
+        return None
+
+    reasons = web_status.get("blocked_reasons")
+    if isinstance(reasons, list) and reasons:
+        reason = "; ".join(str(item) for item in reasons)
+    else:
+        reason = "web provider dependencies are unavailable"
+    return _dependency_blocked_doc(
+        job_id,
+        job_name,
+        prompt,
+        reason,
+        {
+            "success": False,
+            "status": "dependency_blocked",
+            "dependency": "firecrawl_web_provider",
+            "blocked_reasons": reasons if isinstance(reasons, list) else [reason],
+            "tools": tool_status,
+            "web_search_matrix": web_status,
+            "enabled_toolsets": enabled_toolsets,
+        },
+    )
+
 # Valid delivery platforms — used to validate user-supplied platform names
 # in cron delivery targets, preventing env var enumeration via crafted names.
 _KNOWN_DELIVERY_PLATFORMS = frozenset({
@@ -1337,6 +1602,15 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
 
         # Max iterations
         max_iterations = _cfg.get("agent", {}).get("max_turns") or _cfg.get("max_turns") or 90
+        enabled_toolsets = _resolve_ontology_cron_enabled_toolsets(job, _cfg, prompt)
+
+        preflight_result = _run_ontology_research_dependency_preflight(
+            job,
+            prompt,
+            enabled_toolsets,
+        )
+        if preflight_result is not None:
+            return preflight_result
 
         # Provider routing
         pr = _cfg.get("provider_routing", {})
@@ -1441,7 +1715,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             providers_order=pr.get("order"),
             provider_sort=pr.get("sort"),
             openrouter_min_coding_score=(_cfg.get("openrouter") or {}).get("min_coding_score"),
-            enabled_toolsets=_resolve_cron_enabled_toolsets(job, _cfg),
+            enabled_toolsets=enabled_toolsets,
             disabled_toolsets=["cronjob", "messaging", "clarify"],
             quiet_mode=True,
             # Cron jobs should always inherit the user's SOUL.md identity from
