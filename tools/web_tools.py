@@ -866,8 +866,310 @@ def _normalize_matrix_queries(queries: Any) -> Tuple[List[Dict[str, str]], Optio
     return normalized[:12], None
 
 
-def web_search_matrix_tool(queries: Any, limit_per_query: int = 3) -> str:
+_MATRIX_PROVIDER_ENV_KEYS = {
+    "exa": ("EXA_API_KEY",),
+    "parallel": ("PARALLEL_API_KEY",),
+    "tavily": ("TAVILY_API_KEY",),
+    "firecrawl": ("FIRECRAWL_API_KEY", "FIRECRAWL_API_URL", "FIRECRAWL_GATEWAY_URL"),
+    "searxng": ("SEARXNG_URL",),
+    "brave-free": ("BRAVE_SEARCH_API_KEY",),
+    "ddgs": (),
+}
+_MATRIX_PROVIDER_ORDER = (
+    "firecrawl",
+    "parallel",
+    "tavily",
+    "exa",
+    "searxng",
+    "brave-free",
+    "ddgs",
+)
+
+
+def _ensure_web_search_plugins_registered() -> None:
+    """Best-effort load of bundled web provider plugins for direct callers."""
+    try:
+        from agent.web_search_registry import list_providers
+
+        if list_providers():
+            return
+        from hermes_cli.plugins import discover_plugins
+
+        discover_plugins()
+    except Exception as exc:  # noqa: BLE001 - matrix can still report no providers
+        logger.debug("Could not ensure web provider plugins are registered: %s", exc)
+
+
+def _provider_present_env_keys(provider: str) -> List[str]:
+    return [key for key in _MATRIX_PROVIDER_ENV_KEYS.get(provider, ()) if _has_env(key)]
+
+
+def _provider_matrix_status() -> Dict[str, Any]:
+    """Return registry-backed provider availability without network calls."""
+    _ensure_web_search_plugins_registered()
+    try:
+        from agent.web_search_registry import get_provider, list_providers
+    except Exception:
+        return {
+            "available_providers": [],
+            "missing_providers": list(_MATRIX_PROVIDER_ORDER),
+            "providers": {},
+        }
+
+    registered = {provider.name for provider in list_providers()}
+    ordered = list(_MATRIX_PROVIDER_ORDER)
+    ordered.extend(sorted(registered - set(ordered)))
+
+    available: List[str] = []
+    missing: List[str] = []
+    providers: Dict[str, Dict[str, Any]] = {}
+    for name in ordered:
+        provider = get_provider(name)
+        supports_search = bool(provider and provider.supports_search())
+        try:
+            provider_available = bool(provider and supports_search and provider.is_available())
+        except Exception as exc:  # noqa: BLE001
+            provider_available = False
+            availability_error = str(exc)
+        else:
+            availability_error = None
+        entry: Dict[str, Any] = {
+            "registered": provider is not None,
+            "supports_search": supports_search,
+            "available": provider_available,
+            "required_env_keys": list(_MATRIX_PROVIDER_ENV_KEYS.get(name, ())),
+            "present_env_keys": _provider_present_env_keys(name),
+        }
+        if availability_error:
+            entry["availability_error"] = availability_error
+        providers[name] = entry
+        if provider_available:
+            available.append(name)
+        else:
+            missing.append(name)
+
+    return {
+        "available_providers": available,
+        "missing_providers": missing,
+        "providers": providers,
+    }
+
+
+def _canonicalize_matrix_result_url(url: str) -> str:
+    if not url:
+        return ""
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+
+        parts = urlsplit(url.strip())
+        path = parts.path.rstrip("/") or "/"
+        return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, parts.query, ""))
+    except Exception:
+        return url.strip()
+
+
+def _normalize_provider_matrix_results(
+    provider: str, response_data: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    results = (
+        response_data.get("data", {}).get("web", [])
+        if isinstance(response_data, dict)
+        else []
+    )
+    normalized: List[Dict[str, Any]] = []
+    for index, result in enumerate(results):
+        if not isinstance(result, dict):
+            continue
+        normalized.append(
+            {
+                "provider": provider,
+                "url": result.get("url", ""),
+                "title": result.get("title", ""),
+                "description": result.get("description", ""),
+                "position": int(result.get("position") or index + 1),
+            }
+        )
+    return normalized
+
+
+def _web_provider_matrix_search(
+    query: str,
+    limit: int = 5,
+    providers: Any = None,
+) -> Dict[str, Any]:
+    """Search one query across all requested registered web providers."""
+    query = str(query or "").strip()
+    if not query:
+        return {"success": False, "error": "query is required for provider matrix search"}
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 5
+    limit = min(max(limit, 1), 10)
+
+    status = _provider_matrix_status()
+    requested = [
+        str(provider).strip().lower()
+        for provider in (providers or [])
+        if str(provider).strip()
+    ]
+    if not requested or "all" in requested:
+        requested = list(status.get("available_providers", []))
+    else:
+        requested = [
+            provider
+            for provider in requested
+            if provider in status.get("providers", {})
+        ]
+
+    available_requested = [
+        provider
+        for provider in requested
+        if status.get("providers", {}).get(provider, {}).get("available")
+    ]
+    missing_requested = [
+        provider for provider in requested if provider not in available_requested
+    ]
+    if not available_requested:
+        return {
+            "success": False,
+            "error": "No configured web search providers are available for provider matrix search.",
+            "provider_status": status,
+            "requested_providers": requested,
+        }
+
+    try:
+        from agent.web_search_registry import get_provider
+    except Exception as exc:
+        return {"success": False, "error": f"Web provider registry unavailable: {exc}"}
+
+    provider_results: Dict[str, Dict[str, Any]] = {}
+    fused_index: Dict[str, Dict[str, Any]] = {}
+
+    for provider_name in available_requested:
+        provider = get_provider(provider_name)
+        if provider is None:
+            provider_results[provider_name] = {
+                "success": False,
+                "result_count": 0,
+                "error": f"Web search provider {provider_name!r} is not registered.",
+                "results": [],
+            }
+            continue
+        try:
+            response_data = provider.search(query, limit=limit)
+            provider_success = bool(
+                isinstance(response_data, dict) and response_data.get("success", False)
+            )
+            normalized = _normalize_provider_matrix_results(provider_name, response_data)
+            provider_results[provider_name] = {
+                "success": provider_success,
+                "result_count": len(normalized),
+                "results": normalized,
+            }
+            if not provider_success:
+                provider_results[provider_name]["error"] = (
+                    response_data.get("error") if isinstance(response_data, dict) else "provider search failed"
+                )
+                continue
+            for item in normalized:
+                key = (
+                    _canonicalize_matrix_result_url(item["url"])
+                    or item["url"]
+                    or f"{provider_name}:{item['position']}"
+                )
+                entry = fused_index.setdefault(
+                    key,
+                    {
+                        "url": item["url"],
+                        "title": item["title"],
+                        "description": item["description"],
+                        "providers": [],
+                        "positions": {},
+                    },
+                )
+                if item["provider"] not in entry["providers"]:
+                    entry["providers"].append(item["provider"])
+                entry["positions"][item["provider"]] = item["position"]
+                if not entry.get("title") and item["title"]:
+                    entry["title"] = item["title"]
+                if not entry.get("description") and item["description"]:
+                    entry["description"] = item["description"]
+        except Exception as exc:
+            provider_results[provider_name] = {
+                "success": False,
+                "result_count": 0,
+                "error": str(exc),
+                "results": [],
+            }
+
+    fused_results = []
+    for entry in fused_index.values():
+        provider_hits = len(entry["providers"])
+        avg_position = sum(entry["positions"].values()) / max(1, provider_hits)
+        fused_results.append(
+            {
+                "url": entry["url"],
+                "title": entry["title"],
+                "description": entry["description"],
+                "providers": sorted(entry["providers"]),
+                "provider_hits": provider_hits,
+                "positions": entry["positions"],
+                "position": min(entry["positions"].values()) if entry["positions"] else None,
+                "_avg_position": avg_position,
+            }
+        )
+    fused_results.sort(
+        key=lambda item: (
+            -int(item.get("provider_hits") or 0),
+            float(item.get("_avg_position") or 999.0),
+            str(item.get("title") or ""),
+        )
+    )
+
+    trimmed_results = []
+    for item in fused_results[:limit]:
+        payload = dict(item)
+        payload.pop("_avg_position", None)
+        trimmed_results.append(payload)
+
+    successful = [
+        provider
+        for provider, result in provider_results.items()
+        if result.get("success")
+    ]
+    response: Dict[str, Any] = {
+        "success": bool(successful),
+        "query": query,
+        "strategy": "provider_matrix",
+        "data": {"web": trimmed_results},
+        "provider_status": status,
+        "providers_used": available_requested,
+        "providers_missing": missing_requested,
+        "provider_results": provider_results,
+    }
+    if not successful:
+        response["error"] = "All requested web search providers failed."
+    return response
+
+
+def web_search_matrix_tool(
+    queries: Any = None,
+    limit_per_query: int = 3,
+    *,
+    query: Any = None,
+    limit: Any = None,
+    providers: Any = None,
+) -> str:
     """Run a bounded matrix of web searches and return per-query + deduped results."""
+    if query is not None or providers:
+        response_data = _web_provider_matrix_search(
+            query=query,
+            limit=limit if limit is not None else limit_per_query,
+            providers=providers,
+        )
+        return json.dumps(response_data, indent=2, ensure_ascii=False)
+
     normalized, error = _normalize_matrix_queries(queries)
     if error:
         return tool_error(error, success=False)
@@ -1612,13 +1914,20 @@ WEB_SEARCH_SCHEMA = {
 WEB_SEARCH_MATRIX_SCHEMA = {
     "name": "web_search_matrix",
     "description": (
-        "Run several web searches as one bounded source-discovery matrix. "
-        "Use this when a research task needs multiple query phrasings, source classes, "
-        "or site/domain probes and a single deduped result set."
+        "Run a bounded source-discovery matrix. Use {query, providers} to compare "
+        "one query across all configured web providers, or {queries} to run "
+        "multiple query phrasings through the active web_search backend."
     ),
     "parameters": {
         "type": "object",
         "properties": {
+            "query": {
+                "type": "string",
+                "description": (
+                    "Single query to run across configured providers. When set, "
+                    "providers defaults to all available providers."
+                ),
+            },
             "queries": {
                 "type": "array",
                 "items": {
@@ -1638,6 +1947,21 @@ WEB_SEARCH_MATRIX_SCHEMA = {
                 "minItems": 1,
                 "maxItems": 12,
             },
+            "providers": {
+                "type": "array",
+                "description": "Provider subset for query mode; defaults to all available providers.",
+                "items": {
+                    "type": "string",
+                    "enum": ["all", "firecrawl", "parallel", "tavily", "exa", "searxng", "brave-free", "ddgs"],
+                },
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum fused results in query/provider mode. Defaults to 5.",
+                "minimum": 1,
+                "maximum": 10,
+                "default": 5,
+            },
             "limit_per_query": {
                 "type": "integer",
                 "description": "Maximum results per query. Defaults to 3.",
@@ -1646,7 +1970,10 @@ WEB_SEARCH_MATRIX_SCHEMA = {
                 "default": 3,
             },
         },
-        "required": ["queries"],
+        "anyOf": [
+            {"required": ["query"]},
+            {"required": ["queries"]},
+        ],
     },
 }
 
@@ -1682,8 +2009,11 @@ registry.register(
     toolset="web",
     schema=WEB_SEARCH_MATRIX_SCHEMA,
     handler=lambda args, **kw: web_search_matrix_tool(
-        args.get("queries", []),
+        args.get("queries"),
         limit_per_query=args.get("limit_per_query", 3),
+        query=args.get("query"),
+        limit=args.get("limit"),
+        providers=args.get("providers"),
     ),
     check_fn=check_web_api_key,
     requires_env=_web_requires_env(),
