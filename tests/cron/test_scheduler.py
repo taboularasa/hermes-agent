@@ -1016,6 +1016,37 @@ class TestRunJobSessionPersistence:
         kwargs = mock_agent_cls.call_args.kwargs
         assert kwargs["enabled_toolsets"] == ["terminal"]
 
+    def test_ontology_research_web_dependency_blocked_before_agent(self, tmp_path):
+        job = {
+            "id": "ontology-web-deps",
+            "name": "Scheduled ontology research",
+            "prompt": (
+                "Run scheduled ontology research. Before source capture, "
+                "call web_search_matrix and require Firecrawl."
+            ),
+        }
+        fake_db, patches = self._make_run_job_patches(tmp_path)
+        matrix_status = json.dumps(
+            {
+                "success": False,
+                "status": "dependency_blocked",
+                "blocked_reasons": ["firecrawl provider is unavailable"],
+            }
+        )
+
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patch("tools.web_tools.web_search_matrix", return_value=matrix_status, create=True), \
+             patch("hermes_cli.tools_config._get_platform_tools", return_value={"web", "file"}), \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            success, output, final_response, error = run_job(job)
+
+        assert success is False
+        assert final_response == ""
+        assert "dependency_blocked" in output
+        assert "firecrawl provider is unavailable" in output
+        assert "firecrawl provider is unavailable" in error
+        mock_agent_cls.assert_not_called()
+
     def test_run_job_empty_response_returns_empty_not_placeholder(self, tmp_path):
         """Empty final_response should stay empty for delivery logic (issue #2234).
 

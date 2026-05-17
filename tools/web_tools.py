@@ -1371,6 +1371,169 @@ def check_auxiliary_model() -> bool:
     return client is not None
 
 
+_WEB_PROVIDER_CONFIG_VARS = {
+    "brave-free": ("BRAVE_SEARCH_API_KEY",),
+    "ddgs": (),
+    "exa": ("EXA_API_KEY",),
+    "firecrawl": (
+        "FIRECRAWL_API_KEY",
+        "FIRECRAWL_API_URL",
+        "FIRECRAWL_GATEWAY_URL",
+        "TOOL_GATEWAY_DOMAIN",
+        "TOOL_GATEWAY_USER_TOKEN",
+    ),
+    "parallel": ("PARALLEL_API_KEY",),
+    "searxng": ("SEARXNG_URL",),
+    "tavily": ("TAVILY_API_KEY",),
+}
+_WEB_MATRIX_CAPABILITIES = ("search", "extract", "crawl")
+
+
+def _normalize_matrix_items(value: Any, *, allowed: Optional[set[str]] = None) -> list[str]:
+    """Normalize tool args that may arrive as a string or list."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_items = [part.strip() for part in value.split(",")]
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = [str(part).strip() for part in value]
+    else:
+        raw_items = [str(value).strip()]
+
+    normalized: list[str] = []
+    for item in raw_items:
+        lowered = item.lower()
+        if not lowered:
+            continue
+        if allowed is not None and lowered not in allowed:
+            continue
+        if lowered not in normalized:
+            normalized.append(lowered)
+    return normalized
+
+
+def _safe_provider_bool(provider: Any, method_name: str) -> bool:
+    try:
+        method = getattr(provider, method_name)
+        return bool(method())
+    except Exception:
+        return False
+
+
+def _provider_config_presence(provider_name: str) -> dict[str, list[str]]:
+    env_names = _WEB_PROVIDER_CONFIG_VARS.get(provider_name, ())
+    present = [name for name in env_names if _has_env(name)]
+    missing = [name for name in env_names if name not in present]
+    return {"present": present, "missing": missing}
+
+
+def _provider_matrix_row(provider: Any) -> dict[str, Any]:
+    name = str(getattr(provider, "name", "") or "").strip().lower()
+    capabilities = {
+        "search": _safe_provider_bool(provider, "supports_search"),
+        "extract": _safe_provider_bool(provider, "supports_extract"),
+        "crawl": _safe_provider_bool(provider, "supports_crawl"),
+    }
+    available = _safe_provider_bool(provider, "is_available")
+    config = _provider_config_presence(name)
+    return {
+        "name": name,
+        "display_name": str(getattr(provider, "display_name", name) or name),
+        "available": available,
+        "configured": bool(config["present"]) or available,
+        "capabilities": capabilities,
+        "config": config,
+    }
+
+
+def web_search_matrix(
+    require_capabilities: Optional[List[str]] = None,
+    require_providers: Optional[List[str]] = None,
+) -> str:
+    """Return a safe web-provider capability matrix for agents and cron jobs.
+
+    The result reports provider names, capability flags, availability, and
+    env-var presence by variable name only. It never includes env values.
+    """
+    required_caps = _normalize_matrix_items(
+        require_capabilities,
+        allowed=set(_WEB_MATRIX_CAPABILITIES),
+    )
+    required_providers = _normalize_matrix_items(require_providers)
+
+    try:
+        from hermes_cli.plugins import discover_plugins
+
+        discover_plugins()
+    except Exception as exc:
+        logger.debug("Could not discover web provider plugins: %s", exc)
+
+    from agent.web_search_registry import (
+        get_active_crawl_provider,
+        get_active_extract_provider,
+        get_active_search_provider,
+        list_providers,
+    )
+
+    providers = [_provider_matrix_row(provider) for provider in list_providers()]
+    providers_by_name = {row["name"]: row for row in providers}
+
+    def _active_row(provider: Any, capability: str) -> Optional[dict[str, Any]]:
+        if provider is None:
+            return None
+        row = _provider_matrix_row(provider)
+        return {
+            "name": row["name"],
+            "display_name": row["display_name"],
+            "available": row["available"],
+            "capability": capability,
+        }
+
+    active = {
+        "search": _active_row(get_active_search_provider(), "search"),
+        "extract": _active_row(get_active_extract_provider(), "extract"),
+        "crawl": _active_row(get_active_crawl_provider(), "crawl"),
+    }
+
+    blocked_reasons: list[str] = []
+    if not providers:
+        blocked_reasons.append("no web providers are registered")
+
+    for name in required_providers:
+        provider = providers_by_name.get(name)
+        if provider is None:
+            blocked_reasons.append(f"required provider '{name}' is not registered")
+            continue
+        if not provider["available"]:
+            blocked_reasons.append(f"required provider '{name}' is not available")
+
+    for capability in required_caps:
+        if not any(
+            row["available"] and row["capabilities"].get(capability)
+            for row in providers
+        ):
+            blocked_reasons.append(
+                f"no available web provider supports {capability}"
+            )
+
+    status = "dependency_blocked" if blocked_reasons else "ok"
+    return json.dumps(
+        {
+            "success": not blocked_reasons,
+            "status": status,
+            "requirements": {
+                "capabilities": required_caps,
+                "providers": required_providers,
+            },
+            "active": active,
+            "providers": providers,
+            "blocked_reasons": blocked_reasons,
+        },
+        indent=2,
+        ensure_ascii=False,
+    )
+
+
 
 
 if __name__ == "__main__":
@@ -1527,6 +1690,53 @@ WEB_EXTRACT_SCHEMA = {
     }
 }
 
+WEB_SEARCH_MATRIX_SCHEMA = {
+    "name": "web_search_matrix",
+    "description": (
+        "Report the configured web provider capability matrix. Returns provider "
+        "names, availability, supported capabilities, active search/extract/crawl "
+        "providers, and env-var presence by variable name only. Use this before "
+        "scheduled research source capture to verify web dependencies without "
+        "exposing secret values."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "require_capabilities": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": ["search", "extract", "crawl"],
+                },
+                "description": (
+                    "Optional capabilities that must have at least one available "
+                    "provider. If unmet, the result status is dependency_blocked."
+                ),
+            },
+            "require_providers": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": [
+                        "brave-free",
+                        "ddgs",
+                        "exa",
+                        "firecrawl",
+                        "parallel",
+                        "searxng",
+                        "tavily",
+                    ],
+                },
+                "description": (
+                    "Optional provider names that must be registered and available. "
+                    "Use ['firecrawl'] for jobs that require Firecrawl-backed capture."
+                ),
+            },
+        },
+        "required": [],
+    },
+}
+
 registry.register(
     name="web_search",
     toolset="web",
@@ -1547,5 +1757,17 @@ registry.register(
     requires_env=_web_requires_env(),
     is_async=True,
     emoji="📄",
+    max_result_size_chars=100_000,
+)
+registry.register(
+    name="web_search_matrix",
+    toolset="web",
+    schema=WEB_SEARCH_MATRIX_SCHEMA,
+    handler=lambda args, **kw: web_search_matrix(
+        require_capabilities=args.get("require_capabilities"),
+        require_providers=args.get("require_providers"),
+    ),
+    check_fn=lambda: True,
+    emoji="🔎",
     max_result_size_chars=100_000,
 )

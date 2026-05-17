@@ -85,6 +85,133 @@ def _resolve_cron_enabled_toolsets(job: dict, cfg: dict) -> list[str] | None:
         )
         return None
 
+
+def _cron_job_requires_web_matrix(job: dict, prompt: str) -> bool:
+    """Return True when a cron job declares the ontology web preflight."""
+    text = " ".join(
+        str(part or "")
+        for part in (
+            job.get("name"),
+            job.get("prompt"),
+            prompt,
+        )
+    ).lower()
+    if "web_search_matrix" in text:
+        return True
+    return (
+        "ontology" in text
+        and "research" in text
+        and (
+            "firecrawl" in text
+            or "source capture" in text
+            or "external evidence" in text
+        )
+    )
+
+
+def _cron_toolsets_expose_web_matrix(enabled_toolsets: list[str] | None) -> bool:
+    """Check whether the resolved cron toolsets expose web_search_matrix."""
+    toolsets_to_check = enabled_toolsets or ["hermes-cron"]
+    try:
+        from toolsets import resolve_multiple_toolsets
+
+        return "web_search_matrix" in resolve_multiple_toolsets(toolsets_to_check)
+    except Exception as exc:
+        logger.warning("Cron web dependency toolset check failed: %s", exc)
+        return False
+
+
+def _web_dependency_blocked_doc(
+    job_id: str,
+    job_name: str,
+    prompt: str,
+    reason: str,
+    status_payload: dict | None = None,
+) -> tuple[bool, str, str, str]:
+    now_iso = _hermes_now().strftime("%Y-%m-%d %H:%M:%S")
+    payload_text = json.dumps(status_payload or {}, indent=2, ensure_ascii=False)
+    output = f"""# Cron Job: {job_name} (DEPENDENCY BLOCKED)
+
+**Job ID:** {job_id}
+**Run Time:** {now_iso}
+**Status:** dependency_blocked
+
+## Prompt
+
+{prompt}
+
+## Dependency Blocker
+
+{reason}
+
+## Web Provider Matrix
+
+```json
+{payload_text}
+```
+"""
+    return False, output, "", f"dependency_blocked: {reason}"
+
+
+def _run_web_matrix_dependency_preflight(
+    job: dict,
+    prompt: str,
+    enabled_toolsets: list[str] | None,
+) -> tuple[bool, str, str, str] | None:
+    """Block ontology research cron runs before fallback capture if web deps fail."""
+    if not _cron_job_requires_web_matrix(job, prompt):
+        return None
+
+    job_id = job.get("id", "?")
+    job_name = str(job.get("name") or job.get("prompt") or job_id or "cron job")
+    if not _cron_toolsets_expose_web_matrix(enabled_toolsets):
+        return _web_dependency_blocked_doc(
+            job_id,
+            job_name,
+            prompt,
+            "web_search_matrix is not exposed by this job's enabled toolsets",
+            {
+                "success": False,
+                "status": "dependency_blocked",
+                "blocked_reasons": [
+                    "web_search_matrix is not exposed by this job's enabled toolsets"
+                ],
+                "enabled_toolsets": enabled_toolsets,
+            },
+        )
+
+    try:
+        from tools.web_tools import web_search_matrix
+
+        raw_status = web_search_matrix(
+            require_capabilities=["search", "extract"],
+            require_providers=["firecrawl"],
+        )
+        status = json.loads(raw_status)
+    except Exception as exc:
+        return _web_dependency_blocked_doc(
+            job_id,
+            job_name,
+            prompt,
+            f"web_search_matrix preflight failed: {exc}",
+            {
+                "success": False,
+                "status": "dependency_blocked",
+                "blocked_reasons": [str(exc)],
+            },
+        )
+
+    blocked = status.get("status") == "dependency_blocked" or status.get("success") is False
+    if not blocked:
+        return None
+
+    reasons = status.get("blocked_reasons")
+    if isinstance(reasons, list) and reasons:
+        reason = "; ".join(str(item) for item in reasons)
+    else:
+        reason = "web provider dependencies are unavailable"
+    return _web_dependency_blocked_doc(job_id, job_name, prompt, reason, status)
+
 # Valid delivery platforms — used to validate user-supplied platform names
 # in cron delivery targets, preventing env var enumeration via crafted names.
 _KNOWN_DELIVERY_PLATFORMS = frozenset({
@@ -1337,6 +1464,15 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
 
         # Max iterations
         max_iterations = _cfg.get("agent", {}).get("max_turns") or _cfg.get("max_turns") or 90
+        enabled_toolsets = _resolve_cron_enabled_toolsets(job, _cfg)
+
+        preflight_result = _run_web_matrix_dependency_preflight(
+            job,
+            prompt,
+            enabled_toolsets,
+        )
+        if preflight_result is not None:
+            return preflight_result
 
         # Provider routing
         pr = _cfg.get("provider_routing", {})
@@ -1441,7 +1577,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             providers_order=pr.get("order"),
             provider_sort=pr.get("sort"),
             openrouter_min_coding_score=(_cfg.get("openrouter") or {}).get("min_coding_score"),
-            enabled_toolsets=_resolve_cron_enabled_toolsets(job, _cfg),
+            enabled_toolsets=enabled_toolsets,
             disabled_toolsets=["cronjob", "messaging", "clarify"],
             quiet_mode=True,
             # Cron jobs should always inherit the user's SOUL.md identity from
