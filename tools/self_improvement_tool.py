@@ -35,6 +35,122 @@ BENCHMARK_CONTRACT_VERSION = "v1"
 _BENCHMARK_HISTORY_LIMIT = 200
 _ONTOLOGY_SCAN_SUFFIXES = {".json", ".yaml", ".yml", ".md"}
 _ONTOLOGY_SCAN_PRUNED_DIRS = {".git"}
+_TEXT_EVIDENCE_EXCLUDED_KEYS = {
+    "command",
+    "prompt",
+    "command_args",
+    "ctx_worktree_path",
+    "latest_path",
+    "last_message_path",
+    "record_path",
+    "workdir",
+    "worktree_path",
+}
+_CLAIM_TEXT_KEYS = {
+    "detail",
+    "final_message",
+    "last_agent_message",
+    "notes",
+    "outcome_note",
+    "reason",
+    "result",
+    "summary",
+    "title",
+}
+_CLAIM_CONTAINER_KEYS = {
+    "active_agenda",
+    "current_strategy",
+    "lane_links",
+    "self_improvement_focus",
+}
+_DURABLE_EVIDENCE_KEYS = {
+    "artifact_path",
+    "artifact_paths",
+    "artifacts",
+    "changed_files",
+    "changed_paths",
+    "checks",
+    "ci",
+    "commit",
+    "commit_sha",
+    "commit_shas",
+    "commits",
+    "decision",
+    "decisions",
+    "durable_artifacts",
+    "evidence",
+    "files_changed",
+    "operator_decision_support",
+    "pr_url",
+    "pr_urls",
+    "proof_artifact",
+    "proof_artifacts",
+    "pull_request",
+    "pull_request_url",
+    "pull_requests",
+    "risk_reduction",
+    "test_results",
+    "tests",
+    "verification",
+}
+_STATUS_ONLY_PATTERNS = (
+    re.compile(r"\bactionable\b", re.IGNORECASE),
+    re.compile(r"\bactive work\b", re.IGNORECASE),
+    re.compile(r"\bin[- ]progress\b", re.IGNORECASE),
+    re.compile(r"\bnext steps?\b", re.IGNORECASE),
+    re.compile(r"\bqueued\b", re.IGNORECASE),
+    re.compile(r"\bselected\b", re.IGNORECASE),
+    re.compile(r"\bstatus(?:\s+update)?\b", re.IGNORECASE),
+    re.compile(r"\bsummary\b", re.IGNORECASE),
+    re.compile(r"\btriage(?:d|s|)\b", re.IGNORECASE),
+    re.compile(r"\bworking on\b", re.IGNORECASE),
+)
+_DURABLE_TEXT_PATTERNS = (
+    ("commit", re.compile(r"\b(?:commit|committed|sha)\b[^.\n]{0,120}\b[0-9a-f]{7,40}\b", re.IGNORECASE)),
+    ("commit", re.compile(r"\b[0-9a-f]{7,40}\b[^.\n]{0,120}\b(?:commit|sha)\b", re.IGNORECASE)),
+    ("pull_request", re.compile(r"https://github\.com/[^\s)]+/[^\s)]+/pull/\d+", re.IGNORECASE)),
+    ("pull_request", re.compile(r"\b(?:PR|pull request)\s*#?\d+\b", re.IGNORECASE)),
+    (
+        "verification",
+        re.compile(
+            r"\b(?:pytest|npm test|uv run pytest|ruff|mypy|git diff --check|GitHub Actions|CI)\b"
+            r"[^.\n]{0,160}\b(?:passed|pass|success|succeeded|green|\d+\s+passed|0\s+failed)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    ("changed_files", re.compile(r"\bCHANGED_FILES\b|\bchanged files?\b", re.IGNORECASE)),
+    (
+        "artifact",
+        re.compile(
+            r"\b(?:durable|checked-in|repo-visible)\b[^.\n]{0,120}\b(?:artifact|evidence|record)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "state_transition",
+        re.compile(
+            r"\b(?:merged|pushed|opened|created|closed|resolved|completed)\b"
+            r"[^.\n]{0,120}\b(?:PR|pull request|branch|issue|commit|state|artifact|file|test)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "operator_decision_support",
+        re.compile(
+            r"\b(?:blocked|blocker|missing|unavailable|permission|403|401|unable to)\b"
+            r"[^.\n]{0,160}\b(?:operator|token|scope|credential|auth|permission|artifact|secret|manual)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "capability_change",
+        re.compile(
+            r"\b(?:added|implemented|fixed|hardened|repaired|wired|enabled)\b"
+            r"[^.\n]{0,160}\b(?:tool|runtime|service|gateway|config|workflow|benchmark|check|test|schema)\b",
+            re.IGNORECASE,
+        ),
+    ),
+)
 
 
 SELF_IMPROVEMENT_EVIDENCE_SCHEMA = {
@@ -675,6 +791,247 @@ def _save_benchmark_history(path: Path, payload: dict[str, Any]) -> None:
     atomic_json_write(path, payload)
 
 
+def _normalize_evidence_key(key: Any) -> str:
+    text = str(key or "").strip()
+    text = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", text)
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", text)
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+
+
+def _value_has_content(value: Any) -> bool:
+    if value is None or value is False:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, dict):
+        return any(_value_has_content(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_value_has_content(item) for item in value)
+    return True
+
+
+def _collect_record_text(value: Any, key: str = "") -> list[str]:
+    normalized_key = _normalize_evidence_key(key)
+    if normalized_key in _TEXT_EVIDENCE_EXCLUDED_KEYS:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for child_key, child_value in value.items():
+            parts.extend(_collect_record_text(child_value, str(child_key)))
+        return parts
+    if isinstance(value, list):
+        parts = []
+        for child_value in value:
+            parts.extend(_collect_record_text(child_value, key))
+        return parts
+    return []
+
+
+def _record_has_claim_field(value: Any, key: str = "") -> bool:
+    normalized_key = _normalize_evidence_key(key)
+    if normalized_key in _CLAIM_TEXT_KEYS and _value_has_content(value):
+        return True
+    if normalized_key in _CLAIM_CONTAINER_KEYS and _value_has_content(value):
+        return True
+    if normalized_key in _TEXT_EVIDENCE_EXCLUDED_KEYS:
+        return False
+    if isinstance(value, dict):
+        return any(_record_has_claim_field(child_value, str(child_key)) for child_key, child_value in value.items())
+    if isinstance(value, list):
+        return any(_record_has_claim_field(child_value, key) for child_value in value)
+    return False
+
+
+def _structured_durable_signals(value: Any, key: str = "") -> set[str]:
+    normalized_key = _normalize_evidence_key(key)
+    signals: set[str] = set()
+    if normalized_key in _DURABLE_EVIDENCE_KEYS and _value_has_content(value):
+        signals.add(normalized_key)
+    if isinstance(value, dict):
+        for child_key, child_value in value.items():
+            signals.update(_structured_durable_signals(child_value, str(child_key)))
+    elif isinstance(value, list):
+        for child_value in value:
+            signals.update(_structured_durable_signals(child_value, key))
+    return signals
+
+
+def _text_durable_signals(text: str) -> set[str]:
+    return {label for label, pattern in _DURABLE_TEXT_PATTERNS if pattern.search(text)}
+
+
+def _status_only_markers(text: str) -> set[str]:
+    return {pattern.pattern for pattern in _STATUS_ONLY_PATTERNS if pattern.search(text)}
+
+
+def _record_claimed_timestamp(record: dict[str, Any]) -> Optional[datetime]:
+    return _record_timestamp(
+        record,
+        "completed_at",
+        "updated_at",
+        "updatedAt",
+        "occurredAt",
+        "occurred_at",
+        "created_at",
+        "createdAt",
+        "started_at",
+        "process_started_at",
+        "timestamp",
+        "date",
+    )
+
+
+def _record_claims_work(record: dict[str, Any], text: str) -> bool:
+    if _record_has_claim_field(record):
+        return True
+    if record.get("active") is True and _status_only_markers(text):
+        return True
+    status = str(record.get("status") or "").strip().lower()
+    if status in {"active", "in_progress", "running", "queued"} and _status_only_markers(text):
+        return True
+    return False
+
+
+def _iter_recent_claimed_work_items(
+    *,
+    journal_payload: Any,
+    codex_payload: Any,
+    ctx_payload: Any,
+    now: datetime,
+    freshness_hours: int,
+) -> Iterable[dict[str, Any]]:
+    source_records = (
+        ("journal_entries", _iter_records(journal_payload, "entries")),
+        ("codex_runs", _iter_codex_records(codex_payload)),
+        ("ctx_bindings", _iter_ctx_records(ctx_payload)),
+    )
+    for source, records in source_records:
+        for record in records:
+            timestamp = _record_claimed_timestamp(record)
+            if timestamp is not None:
+                age_hours = max(0.0, (now - timestamp).total_seconds() / 3600)
+                if age_hours > freshness_hours:
+                    continue
+            text = "\n".join(_collect_record_text(record))
+            if not _record_claims_work(record, text):
+                continue
+            yield {
+                "source": source,
+                "id": (
+                    record.get("id")
+                    or record.get("run_id")
+                    or record.get("session_id")
+                    or record.get("external_key")
+                ),
+                "timestamp": timestamp.isoformat() if timestamp is not None else None,
+                "record": record,
+                "text": text,
+            }
+
+
+def _assess_make_work_item(item: dict[str, Any]) -> dict[str, Any]:
+    record = item.get("record") or {}
+    text = str(item.get("text") or "")
+    durable_signals = _structured_durable_signals(record)
+    durable_signals.update(_text_durable_signals(text))
+    status_markers = _status_only_markers(text)
+    durable = bool(durable_signals)
+    issue = None
+    if not durable and status_markers:
+        issue = "status_language_without_durable_evidence"
+    elif not durable:
+        issue = "claimed_work_without_durable_evidence"
+
+    return {
+        "source": item.get("source"),
+        "id": item.get("id"),
+        "timestamp": item.get("timestamp"),
+        "durable": durable,
+        "signals": sorted(durable_signals),
+        "status_language": bool(status_markers),
+        "issue": issue,
+    }
+
+
+def _evaluate_anti_make_work_check(
+    *,
+    journal_path: Path,
+    codex_runs_path: Path,
+    ctx_bindings_path: Path,
+    now: datetime,
+    freshness_hours: int,
+) -> dict[str, Any]:
+    journal_payload = _load_json(journal_path)
+    codex_payload = _load_json(codex_runs_path)
+    ctx_payload = _load_json(ctx_bindings_path)
+    assessments = [
+        _assess_make_work_item(item)
+        for item in _iter_recent_claimed_work_items(
+            journal_payload=journal_payload,
+            codex_payload=codex_payload,
+            ctx_payload=ctx_payload,
+            now=now,
+            freshness_hours=freshness_hours,
+        )
+    ]
+    assessed_count = len(assessments)
+    durable_count = sum(1 for item in assessments if item["durable"])
+    shallow_items = [item for item in assessments if not item["durable"]]
+    status_only_count = sum(1 for item in shallow_items if item["status_language"])
+
+    if assessed_count == 0:
+        score = 1.0
+        detail = "No claimed work items required anti-make-work evidence."
+    elif not shallow_items:
+        score = 1.0
+        detail = "Claimed work includes durable evidence."
+    else:
+        score = durable_count / assessed_count
+        if status_only_count:
+            score = min(score, 0.55 if durable_count else 0.0)
+        else:
+            score = min(score, 0.4)
+        examples = [
+            f"{item.get('source')}:{item.get('id') or 'unknown'}"
+            for item in shallow_items[:3]
+        ]
+        detail = (
+            "Claimed work lacks durable state-change evidence: "
+            + ", ".join(examples)
+        )
+
+    return _build_benchmark_item(
+        "anti_make_work_check",
+        "Anti make-work check",
+        score=score,
+        weight=25,
+        detail=detail,
+        critical=True,
+        metrics={
+            "assessed_work_item_count": assessed_count,
+            "durable_evidence_count": durable_count,
+            "shallow_work_item_count": len(shallow_items),
+            "status_language_only_count": status_only_count,
+            "durable_examples": [item for item in assessments if item["durable"]][:5],
+            "shallow_examples": shallow_items[:5],
+        },
+    )
+
+
+def _weighted_project_score(checks: dict[str, dict[str, Any]]) -> float:
+    total_weight = sum(max(0, int(check.get("weight") or 0)) for check in checks.values())
+    if total_weight <= 0:
+        return 0.0
+    weighted_score = sum(
+        float(check.get("score") or 0.0) * max(0, int(check.get("weight") or 0))
+        for check in checks.values()
+    )
+    return round((weighted_score / total_weight) * 100, 2)
+
+
 def evaluate_self_improvement_benchmark(
     *,
     journal_path: Path = DEFAULT_JOURNAL_PATH,
@@ -742,8 +1099,18 @@ def evaluate_self_improvement_benchmark(
             "freshness_spread_hours": gate.get("freshness_spread_hours"),
         },
     )
-    checks = {"reliability_gate": reliability_gate}
-    project_score = round(reliability_gate["score"] * 100, 2)
+    anti_make_work_check = _evaluate_anti_make_work_check(
+        journal_path=journal_path,
+        codex_runs_path=codex_runs_path,
+        ctx_bindings_path=ctx_bindings_path,
+        now=current,
+        freshness_hours=freshness_hours,
+    )
+    checks = {
+        "reliability_gate": reliability_gate,
+        "anti_make_work_check": anti_make_work_check,
+    }
+    project_score = _weighted_project_score(checks)
     critical_failures = [
         name
         for name, check in checks.items()

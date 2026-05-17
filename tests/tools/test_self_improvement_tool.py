@@ -71,6 +71,10 @@ def test_all_fresh_cross_source_skew_keeps_reliability_gate_healthy(tmp_path):
     assert reliability_gate["status"] == "pass"
     assert reliability_gate["detail"] == "Reliability floor is healthy."
     assert reliability_gate["metrics"]["warning_count"] == 0
+    anti_make_work = benchmark["checks"]["anti_make_work_check"]
+    assert anti_make_work["score"] == 1.0
+    assert anti_make_work["status"] == "pass"
+    assert anti_make_work["metrics"]["assessed_work_item_count"] == 0
     assert benchmark["critical_failures"] == []
 
 
@@ -110,6 +114,149 @@ def test_ontology_scan_ignores_git_worktree_runtime_artifacts(tmp_path):
     assert gate["ontology_alerts"] == []
     assert gate["warnings"] == []
     assert gate["contradictions"] == []
+
+
+def test_status_language_only_work_fails_anti_make_work_check(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "status-only",
+                    "occurredAt": recent,
+                    "summary": "Status update: HAD-1019 is in progress and actionable.",
+                    "notes": "Working on the active item; next step is to keep monitoring.",
+                    "linearIssues": ["HAD-1019"],
+                    "commitShas": [],
+                    "reposTouched": [],
+                }
+            ]
+        },
+    )
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_status": {
+                    "run_id": "codex_status",
+                    "status": "completed",
+                    "completed_at": recent,
+                    "final_message": "STATUS\nIn progress. Summary captured; no blockers.",
+                    "exit_code": 0,
+                }
+            }
+        },
+    )
+    _write_json(
+        ctx_path,
+        {"sessions": {"ctx_1": {"session_id": "ctx_1", "active": False, "updated_at": recent}}},
+    )
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    reliability_gate = benchmark["checks"]["reliability_gate"]
+    assert reliability_gate["status"] == "pass"
+
+    anti_make_work = benchmark["checks"]["anti_make_work_check"]
+    assert anti_make_work["status"] == "fail"
+    assert anti_make_work["score"] == 0.0
+    assert anti_make_work["metrics"]["assessed_work_item_count"] == 2
+    assert anti_make_work["metrics"]["status_language_only_count"] == 2
+    assert "anti_make_work_check" in benchmark["critical_failures"]
+    assert benchmark["project_score"] < 100.0
+
+
+def test_durable_work_evidence_passes_anti_make_work_check(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "durable",
+                    "occurredAt": recent,
+                    "summary": "Implemented HAD-1019 benchmark hardening.",
+                    "notes": (
+                        "PR #1019 opened with commit abc1234; "
+                        "pytest tests/tools/test_self_improvement_tool.py passed."
+                    ),
+                    "linearIssues": ["HAD-1019"],
+                    "commitShas": ["abc1234"],
+                    "pullRequests": ["https://github.com/taboularasa/hermes-agent/pull/1019"],
+                    "tests": ["pytest tests/tools/test_self_improvement_tool.py passed"],
+                    "reposTouched": ["hermes-agent"],
+                }
+            ]
+        },
+    )
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_durable": {
+                    "run_id": "codex_durable",
+                    "status": "completed",
+                    "completed_at": recent,
+                    "final_message": (
+                        "CHANGED_FILES\n"
+                        "- tools/self_improvement_tool.py\n"
+                        "VERIFICATION\n"
+                        "- pytest tests/tools/test_self_improvement_tool.py -q passed\n"
+                        "COMMIT\n"
+                        "- abc1234\n"
+                        "PULL_REQUEST\n"
+                        "- https://github.com/taboularasa/hermes-agent/pull/1019"
+                    ),
+                    "exit_code": 0,
+                }
+            }
+        },
+    )
+    _write_json(
+        ctx_path,
+        {"sessions": {"ctx_1": {"session_id": "ctx_1", "active": False, "updated_at": recent}}},
+    )
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    anti_make_work = benchmark["checks"]["anti_make_work_check"]
+    assert anti_make_work["status"] == "pass"
+    assert anti_make_work["score"] == 1.0
+    assert anti_make_work["metrics"]["assessed_work_item_count"] == 2
+    assert anti_make_work["metrics"]["durable_evidence_count"] == 2
+    assert anti_make_work["metrics"]["shallow_work_item_count"] == 0
+    assert benchmark["critical_failures"] == []
 
 
 def test_stale_active_ctx_still_degrades_reliability_floor(tmp_path):
