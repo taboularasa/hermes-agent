@@ -1016,6 +1016,167 @@ class TestRunJobSessionPersistence:
         kwargs = mock_agent_cls.call_args.kwargs
         assert kwargs["enabled_toolsets"] == ["terminal"]
 
+    def test_ontology_research_job_augments_explicit_toolsets(self, tmp_path):
+        job = {
+            "id": "ontology-tools",
+            "name": "Scheduled ontology research",
+            "prompt": (
+                "Run ontology research. Start with "
+                "ontology_context(action=\"ontology_engineering\"), then call "
+                "web_search_matrix before external evidence capture."
+            ),
+            "enabled_toolsets": ["terminal"],
+        }
+        fake_db, patches = self._make_run_job_patches(tmp_path)
+        matrix_status = json.dumps(
+            {
+                "success": True,
+                "status": "ok",
+                "blocked_reasons": [],
+                "providers": [],
+            }
+        )
+
+        from tools.registry import registry
+
+        registry.register(
+            name="ontology_context",
+            toolset="hadto-ontology",
+            schema={
+                "name": "ontology_context",
+                "description": "test",
+                "parameters": {"type": "object", "properties": {}},
+            },
+            handler=lambda args, **kw: "{}",
+            check_fn=lambda: True,
+        )
+        try:
+            with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                 patch("tools.web_tools.web_search_matrix", return_value=matrix_status), \
+                 patch("run_agent.AIAgent") as mock_agent_cls:
+                mock_agent = MagicMock()
+                mock_agent.run_conversation.return_value = {"final_response": "ok"}
+                mock_agent_cls.return_value = mock_agent
+                success, _output, final_response, error = run_job(job)
+        finally:
+            registry.deregister("ontology_context")
+
+        assert success is True
+        assert final_response == "ok"
+        assert error is None
+        kwargs = mock_agent_cls.call_args.kwargs
+        assert kwargs["enabled_toolsets"] == ["terminal", "web", "hadto-ontology"]
+
+    def test_non_ontology_job_does_not_gain_ontology_toolsets(self, tmp_path):
+        job = {
+            "id": "plain-tools",
+            "name": "Plain maintenance",
+            "prompt": "Check disk usage and report only anomalies.",
+            "enabled_toolsets": ["terminal"],
+        }
+        fake_db, patches = self._make_run_job_patches(tmp_path)
+
+        from tools.registry import registry
+
+        registry.register(
+            name="ontology_context",
+            toolset="hadto-ontology",
+            schema={
+                "name": "ontology_context",
+                "description": "test",
+                "parameters": {"type": "object", "properties": {}},
+            },
+            handler=lambda args, **kw: "{}",
+            check_fn=lambda: True,
+        )
+        try:
+            with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                 patch("run_agent.AIAgent") as mock_agent_cls:
+                mock_agent = MagicMock()
+                mock_agent.run_conversation.return_value = {"final_response": "ok"}
+                mock_agent_cls.return_value = mock_agent
+                success, _output, final_response, error = run_job(job)
+        finally:
+            registry.deregister("ontology_context")
+
+        assert success is True
+        assert final_response == "ok"
+        assert error is None
+        kwargs = mock_agent_cls.call_args.kwargs
+        assert kwargs["enabled_toolsets"] == ["terminal"]
+
+    def test_ontology_research_missing_ontology_context_blocks_before_agent(self, tmp_path):
+        job = {
+            "id": "ontology-missing-context",
+            "name": "Scheduled ontology research",
+            "prompt": (
+                "Run ontology research. Start with "
+                "ontology_context(action=\"ontology_engineering\"), then call "
+                "web_search_matrix."
+            ),
+            "enabled_toolsets": ["web"],
+        }
+        fake_db, patches = self._make_run_job_patches(tmp_path)
+
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            success, output, final_response, error = run_job(job)
+
+        assert success is False
+        assert final_response == ""
+        assert "dependency_blocked" in output
+        assert "ontology_context" in output
+        assert "ontology_context" in error
+        mock_agent_cls.assert_not_called()
+
+    def test_ontology_research_firecrawl_dependency_blocks_before_agent(self, tmp_path):
+        job = {
+            "id": "ontology-web-deps",
+            "name": "Scheduled ontology research",
+            "prompt": (
+                "Run scheduled ontology research. Before source capture, "
+                "call web_search_matrix and require Firecrawl."
+            ),
+            "enabled_toolsets": ["web", "hadto-ontology"],
+        }
+        fake_db, patches = self._make_run_job_patches(tmp_path)
+        matrix_status = json.dumps(
+            {
+                "success": False,
+                "status": "dependency_blocked",
+                "blocked_reasons": ["required provider 'firecrawl' is not available"],
+                "firecrawl_surfaces": {"search": False, "extract": False},
+            }
+        )
+
+        from tools.registry import registry
+
+        registry.register(
+            name="ontology_context",
+            toolset="hadto-ontology",
+            schema={
+                "name": "ontology_context",
+                "description": "test",
+                "parameters": {"type": "object", "properties": {}},
+            },
+            handler=lambda args, **kw: "{}",
+            check_fn=lambda: True,
+        )
+        try:
+            with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                 patch("tools.web_tools.web_search_matrix", return_value=matrix_status), \
+                 patch("run_agent.AIAgent") as mock_agent_cls:
+                success, output, final_response, error = run_job(job)
+        finally:
+            registry.deregister("ontology_context")
+
+        assert success is False
+        assert final_response == ""
+        assert "dependency_blocked" in output
+        assert "required provider 'firecrawl' is not available" in output
+        assert "required provider 'firecrawl' is not available" in error
+        mock_agent_cls.assert_not_called()
+
     def test_run_job_empty_response_returns_empty_not_placeholder(self, tmp_path):
         """Empty final_response should stay empty for delivery logic (issue #2234).
 
