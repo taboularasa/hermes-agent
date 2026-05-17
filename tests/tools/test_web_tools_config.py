@@ -482,6 +482,88 @@ class TestWebSearchSchema:
         assert result == '{"success": true}'
         mock_search.assert_called_once_with("docs", limit=5)
 
+    def test_web_search_matrix_reports_provider_presence_without_values(self, monkeypatch):
+        import tools.web_tools
+
+        class FakeProvider:
+            name = "firecrawl"
+            display_name = "Firecrawl"
+
+            def is_available(self):
+                return True
+
+            def supports_search(self):
+                return True
+
+            def supports_extract(self):
+                return True
+
+            def supports_crawl(self):
+                return True
+
+        monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-secret-value")
+        with patch("hermes_cli.plugins.discover_plugins"), \
+             patch("agent.web_search_registry.list_providers", return_value=[FakeProvider()]), \
+             patch("agent.web_search_registry.get_active_search_provider", return_value=FakeProvider()), \
+             patch("agent.web_search_registry.get_active_extract_provider", return_value=FakeProvider()), \
+             patch("agent.web_search_registry.get_active_crawl_provider", return_value=FakeProvider()):
+            result = json.loads(
+                tools.web_tools.web_search_matrix(
+                    require_capabilities=["search", "extract"],
+                    require_providers=["firecrawl"],
+                )
+            )
+
+        assert result["success"] is True
+        assert result["status"] == "ok"
+        assert result["active"]["search"]["name"] == "firecrawl"
+        firecrawl = result["providers"][0]
+        assert firecrawl["name"] == "firecrawl"
+        assert firecrawl["available"] is True
+        assert firecrawl["capabilities"] == {
+            "search": True,
+            "extract": True,
+            "crawl": True,
+        }
+        assert "FIRECRAWL_API_KEY" in firecrawl["config"]["present"]
+        assert "fc-secret-value" not in json.dumps(result)
+
+    def test_web_search_matrix_dependency_blocked_when_firecrawl_unavailable(self, monkeypatch):
+        import tools.web_tools
+
+        class FakeProvider:
+            name = "firecrawl"
+            display_name = "Firecrawl"
+
+            def is_available(self):
+                return False
+
+            def supports_search(self):
+                return True
+
+            def supports_extract(self):
+                return True
+
+            def supports_crawl(self):
+                return True
+
+        monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+        with patch("hermes_cli.plugins.discover_plugins"), \
+             patch("agent.web_search_registry.list_providers", return_value=[FakeProvider()]), \
+             patch("agent.web_search_registry.get_active_search_provider", return_value=None), \
+             patch("agent.web_search_registry.get_active_extract_provider", return_value=None), \
+             patch("agent.web_search_registry.get_active_crawl_provider", return_value=None):
+            result = json.loads(
+                tools.web_tools.web_search_matrix(
+                    require_capabilities=["search", "extract"],
+                    require_providers=["firecrawl"],
+                )
+            )
+
+        assert result["success"] is False
+        assert result["status"] == "dependency_blocked"
+        assert any("firecrawl" in reason.lower() for reason in result["blocked_reasons"])
+
     def test_web_search_clamps_limit_before_backend_call(self):
         import tools.web_tools
 
