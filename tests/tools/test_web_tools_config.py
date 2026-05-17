@@ -509,6 +509,80 @@ class TestWebSearchSchema:
         fake_search.assert_called_once_with("docs", 100)
 
 
+class TestWebSearchMatrix:
+    """Test suite for web_search_matrix provider coverage reporting."""
+
+    class FakeProvider:
+        def __init__(self, name, *, available=True, response=None):
+            self.name = name
+            self.display_name = name.title()
+            self._available = available
+            self._response = response or {
+                "success": True,
+                "data": {
+                    "web": [
+                        {
+                            "title": f"{name} result",
+                            "url": f"https://{name}.example/result",
+                            "description": "result",
+                            "position": 1,
+                        }
+                    ]
+                },
+            }
+
+        def supports_search(self):
+            return True
+
+        def is_available(self):
+            return self._available
+
+        def search(self, query, limit):
+            return self._response
+
+    def test_matrix_reports_degraded_coverage_for_unavailable_provider(self):
+        import tools.web_tools
+
+        exa = self.FakeProvider("exa")
+        firecrawl = self.FakeProvider("firecrawl", available=False)
+        providers = {"exa": exa, "firecrawl": firecrawl}
+
+        with patch("agent.web_search_registry.list_providers", return_value=[exa, firecrawl]), \
+             patch("agent.web_search_registry.get_provider", side_effect=lambda name: providers.get(name)), \
+             patch("tools.interrupt.is_interrupted", return_value=False):
+            result = json.loads(tools.web_tools.web_search_matrix_tool("ontology source registry", limit=2))
+
+        assert result["success"] is True
+        assert result["coverage_status"] == "degraded"
+        assert result["degraded_coverage"] is True
+        assert result["providers_succeeded"] == 1
+        by_provider = {item["provider"]: item for item in result["providers"]}
+        assert by_provider["exa"]["status"] == "ok"
+        assert by_provider["firecrawl"]["status"] == "unavailable"
+
+    def test_required_provider_failure_makes_matrix_unsuccessful(self):
+        import tools.web_tools
+
+        exa = self.FakeProvider("exa")
+        firecrawl = self.FakeProvider("firecrawl", available=False)
+        providers = {"exa": exa, "firecrawl": firecrawl}
+
+        with patch("agent.web_search_registry.list_providers", return_value=[exa, firecrawl]), \
+             patch("agent.web_search_registry.get_provider", side_effect=lambda name: providers.get(name)), \
+             patch("tools.interrupt.is_interrupted", return_value=False):
+            result = json.loads(
+                tools.web_tools.web_search_matrix_tool(
+                    "ontology source registry",
+                    providers=["exa", "firecrawl"],
+                    required_providers=["firecrawl"],
+                )
+            )
+
+        assert result["success"] is False
+        assert result["coverage_status"] == "degraded"
+        assert "firecrawl" in result["error"]
+
+
 class TestWebSearchErrorHandling:
     """Test suite for web_search_tool() error responses."""
 

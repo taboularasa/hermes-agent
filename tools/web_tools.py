@@ -839,6 +839,249 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         return tool_error(error_msg)
 
 
+_WEB_SEARCH_MATRIX_PROVIDER_ORDER = (
+    "exa",
+    "firecrawl",
+    "parallel",
+    "tavily",
+    "searxng",
+    "brave-free",
+    "ddgs",
+)
+
+
+def _coerce_provider_list(value: Any) -> List[str]:
+    """Normalize a caller-supplied provider list without logging secrets."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_items = value.split(",")
+    elif isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = []
+
+    normalized: List[str] = []
+    for item in raw_items:
+        name = str(item or "").strip().lower()
+        if name and name not in normalized:
+            normalized.append(name)
+    return normalized[:12]
+
+
+def _web_search_matrix_provider_names(providers: Any = None) -> List[str]:
+    """Return provider names to query for matrix search."""
+    explicit = _coerce_provider_list(providers)
+    if explicit:
+        return explicit
+
+    from agent.web_search_registry import list_providers
+
+    registered = {provider.name for provider in list_providers()}
+    ordered = [
+        name for name in _WEB_SEARCH_MATRIX_PROVIDER_ORDER
+        if name in registered
+    ]
+    ordered.extend(sorted(registered - set(ordered)))
+    return ordered
+
+
+def _provider_supports_search(provider: Any) -> bool:
+    try:
+        return bool(provider.supports_search())
+    except Exception:
+        return False
+
+
+def _provider_is_available(provider: Any) -> bool:
+    try:
+        return bool(provider.is_available())
+    except Exception:
+        return False
+
+
+def _matrix_search_results(response_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    data = response_data.get("data")
+    if isinstance(data, dict):
+        web_results = data.get("web")
+        if isinstance(web_results, list):
+            return web_results
+    return []
+
+
+def check_web_search_matrix_available() -> bool:
+    """Return True when any registered search provider can run matrix search."""
+    try:
+        from agent.web_search_registry import list_providers
+
+        return any(
+            _provider_supports_search(provider) and _provider_is_available(provider)
+            for provider in list_providers()
+        )
+    except Exception:
+        return False
+
+
+def web_search_matrix_tool(
+    query: str,
+    limit: int = 5,
+    providers: Any = None,
+    required_providers: Any = None,
+) -> str:
+    """Run one query across multiple web providers and report coverage."""
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 5
+    limit = min(max(limit, 1), 20)
+
+    provider_names = _web_search_matrix_provider_names(providers)
+    required = set(_coerce_provider_list(required_providers))
+
+    if not provider_names:
+        return json.dumps(
+            {
+                "success": False,
+                "coverage_status": "failed",
+                "error": (
+                    "No web search providers are registered. Run `hermes tools` "
+                    "or install a web provider plugin before scheduled research."
+                ),
+                "query": query,
+                "providers": [],
+                "degraded_coverage": True,
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+
+    from agent.web_search_registry import get_provider
+    from tools.interrupt import is_interrupted
+
+    provider_reports: List[Dict[str, Any]] = []
+    ok_count = 0
+    required_failures: List[str] = []
+
+    for provider_name in provider_names:
+        if is_interrupted():
+            return tool_error("Interrupted", success=False)
+
+        provider = get_provider(provider_name)
+        if provider is None:
+            report = {
+                "provider": provider_name,
+                "status": "unavailable",
+                "error": "provider is not registered",
+                "results": [],
+            }
+            provider_reports.append(report)
+            if provider_name in required:
+                required_failures.append(provider_name)
+            continue
+
+        if not _provider_supports_search(provider):
+            report = {
+                "provider": provider_name,
+                "status": "unsupported",
+                "error": "provider does not support search",
+                "results": [],
+            }
+            provider_reports.append(report)
+            if provider_name in required:
+                required_failures.append(provider_name)
+            continue
+
+        if not _provider_is_available(provider):
+            report = {
+                "provider": provider_name,
+                "display_name": getattr(provider, "display_name", provider_name),
+                "status": "unavailable",
+                "error": "provider credentials or endpoint are unavailable",
+                "results": [],
+            }
+            provider_reports.append(report)
+            if provider_name in required:
+                required_failures.append(provider_name)
+            continue
+
+        try:
+            logger.info("Web search matrix via %s: '%s' (limit: %d)", provider_name, query, limit)
+            response_data = provider.search(query, limit)
+        except Exception as exc:
+            report = {
+                "provider": provider_name,
+                "display_name": getattr(provider, "display_name", provider_name),
+                "status": "error",
+                "error": f"search failed: {type(exc).__name__}: {exc}",
+                "results": [],
+            }
+            provider_reports.append(report)
+            if provider_name in required:
+                required_failures.append(provider_name)
+            continue
+
+        if not isinstance(response_data, dict) or response_data.get("success") is False:
+            error = (
+                response_data.get("error")
+                if isinstance(response_data, dict)
+                else "provider returned a non-dict response"
+            )
+            report = {
+                "provider": provider_name,
+                "display_name": getattr(provider, "display_name", provider_name),
+                "status": "error",
+                "error": str(error or "search failed"),
+                "results": [],
+            }
+            provider_reports.append(report)
+            if provider_name in required:
+                required_failures.append(provider_name)
+            continue
+
+        results = _matrix_search_results(response_data)
+        ok_count += 1
+        provider_reports.append(
+            {
+                "provider": provider_name,
+                "display_name": getattr(provider, "display_name", provider_name),
+                "status": "ok",
+                "result_count": len(results),
+                "results": results,
+            }
+        )
+
+    total = len(provider_reports)
+    failed_or_unavailable = [
+        item for item in provider_reports
+        if item.get("status") != "ok"
+    ]
+    coverage_status = "complete"
+    if ok_count == 0:
+        coverage_status = "failed"
+    elif failed_or_unavailable:
+        coverage_status = "degraded"
+
+    success = ok_count > 0 and not required_failures
+    response = {
+        "success": success,
+        "query": query,
+        "coverage_status": coverage_status,
+        "degraded_coverage": coverage_status != "complete",
+        "providers_requested": total,
+        "providers_succeeded": ok_count,
+        "providers": provider_reports,
+    }
+    if required:
+        response["required_providers"] = sorted(required)
+    if required_failures:
+        response["error"] = (
+            "Required search providers unavailable or failed: "
+            + ", ".join(sorted(set(required_failures)))
+        )
+
+    return json.dumps(response, indent=2, ensure_ascii=False)
+
+
 async def web_extract_tool(
     urls: List[str],
     format: str = None,
@@ -1510,6 +1753,40 @@ WEB_SEARCH_SCHEMA = {
     }
 }
 
+WEB_SEARCH_MATRIX_SCHEMA = {
+    "name": "web_search_matrix",
+    "description": "Run the same web search across multiple configured providers and report provider-by-provider coverage. Use this first for scheduled ontology, literature, or source-registry research that needs broad source discovery. Returns successful results plus explicit unavailable-provider entries so degraded coverage is visible instead of silently falling back to one source.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "The search query to run across the provider matrix."
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum results per provider. Defaults to 5.",
+                "minimum": 1,
+                "maximum": 20,
+                "default": 5
+            },
+            "providers": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional provider names to query. Defaults to registered web providers in Exa, Firecrawl, Parallel, Tavily, then free-provider order.",
+                "maxItems": 12
+            },
+            "required_providers": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional providers that must succeed for success=true. Use this when a protocol explicitly requires Firecrawl or another named provider.",
+                "maxItems": 12
+            }
+        },
+        "required": ["query"]
+    }
+}
+
 WEB_EXTRACT_SCHEMA = {
     "name": "web_extract",
     "description": "Extract content from web page URLs. Returns page content in markdown format. Also works with PDF URLs (arxiv papers, documents, etc.) — pass the PDF link directly and it converts to markdown text. Pages under 5000 chars return full markdown; larger pages are LLM-summarized and capped at ~5000 chars per page. Pages over 2M chars are refused. If a URL fails or times out, use the browser tool to access it instead.",
@@ -1536,6 +1813,21 @@ registry.register(
     requires_env=_web_requires_env(),
     emoji="🔍",
     max_result_size_chars=100_000,
+)
+registry.register(
+    name="web_search_matrix",
+    toolset="web",
+    schema=WEB_SEARCH_MATRIX_SCHEMA,
+    handler=lambda args, **kw: web_search_matrix_tool(
+        args.get("query", ""),
+        limit=args.get("limit", 5),
+        providers=args.get("providers"),
+        required_providers=args.get("required_providers"),
+    ),
+    check_fn=check_web_search_matrix_available,
+    requires_env=_web_requires_env(),
+    emoji="🔎",
+    max_result_size_chars=200_000,
 )
 registry.register(
     name="web_extract",
