@@ -1766,11 +1766,22 @@ async def web_extract_tool(
                 "title": r.get("title", ""),
                 "content": r.get("content", ""),
                 "error": r.get("error"),
+                **({"provider_status": r["provider_status"]} if "provider_status" in r else {}),
                 **({  "blocked_by_policy": r["blocked_by_policy"]} if "blocked_by_policy" in r else {}),
             }
             for r in response.get("results", [])
         ]
         trimmed_response = {"results": trimmed_results}
+        provider_status = next(
+            (
+                r.get("provider_status")
+                for r in response.get("results", [])
+                if isinstance(r.get("provider_status"), dict)
+            ),
+            None,
+        )
+        if provider_status:
+            trimmed_response["provider_status"] = provider_status
 
         if trimmed_response.get("results") == []:
             result_json = tool_error("Content was inaccessible or not found")
