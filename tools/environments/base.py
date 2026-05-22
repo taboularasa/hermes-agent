@@ -52,6 +52,11 @@ def _get_activity_callback() -> Callable[[str], None] | None:
     return getattr(_activity_callback_local, "callback", None)
 
 
+def get_activity_callback() -> Callable[[str], None] | None:
+    """Return the current thread's registered agent activity callback."""
+    return _get_activity_callback()
+
+
 def touch_activity_if_due(
     state: dict,
     label: str,

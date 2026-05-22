@@ -1,6 +1,7 @@
 """Tests for model_tools.py — function call dispatch, agent-loop interception, legacy toolsets."""
 
 import json
+import time
 from unittest.mock import ANY, call, patch
 
 import pytest
@@ -111,6 +112,35 @@ class TestHandleFunctionCall:
         assert post_duration == transform_duration
         # pre_tool_call does NOT get duration_ms (nothing has run yet).
         assert "duration_ms" not in kwargs_by_hook["pre_tool_call"]
+
+    def test_long_dispatch_heartbeats_activity_callback(self, monkeypatch):
+        from tools.environments.base import set_activity_callback
+
+        touches: list[str] = []
+
+        def slow_dispatch(*_args, **_kwargs):
+            time.sleep(0.04)
+            return '{"ok": true}'
+
+        monkeypatch.setenv("HERMES_TOOL_HEARTBEAT_INTERVAL", "0.01")
+        monkeypatch.setenv("HERMES_TOOL_HEARTBEAT_MAX_SECONDS", "1")
+        set_activity_callback(touches.append)
+        try:
+            with (
+                patch("model_tools.registry.dispatch", side_effect=slow_dispatch),
+                patch("hermes_cli.plugins.invoke_hook", return_value=[]),
+            ):
+                result = handle_function_call(
+                    "web_search",
+                    {"q": "test"},
+                    task_id="t1",
+                    skip_pre_tool_call_hook=True,
+                )
+        finally:
+            set_activity_callback(None)
+
+        assert json.loads(result) == {"ok": True}
+        assert any("executing tool: web_search" in touch for touch in touches)
 
 
 # =========================================================================
