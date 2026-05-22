@@ -393,6 +393,10 @@ def _iter_ctx_timestamps(payload: Any) -> Iterable[datetime]:
             yield parsed
 
 
+def _ctx_record_is_active(record: dict[str, Any]) -> bool:
+    return record.get("active") is True
+
+
 def _latest_timestamp(values: Iterable[datetime]) -> Optional[datetime]:
     return max(values, default=None)
 
@@ -417,6 +421,46 @@ def _summarize_source(
         "age_hours": round(age_hours, 2),
         "latest_timestamp": latest.isoformat(),
     }
+
+
+def _summarize_ctx_bindings(
+    payload: Any,
+    freshness_hours: int,
+    now: datetime,
+) -> dict[str, Any]:
+    if payload is None:
+        summary = _summarize_source("ctx_bindings", None, freshness_hours, now)
+        summary.update(
+            {
+                "record_count": None,
+                "active_count": None,
+                "freshness_required": True,
+                "detail": "ctx bindings evidence unavailable.",
+            }
+        )
+        return summary
+
+    records = list(_iter_ctx_records(payload))
+    latest = _latest_timestamp(_iter_ctx_timestamps(payload))
+    active_count = sum(1 for record in records if _ctx_record_is_active(record))
+    summary = _summarize_source("ctx_bindings", latest, freshness_hours, now)
+    summary.update(
+        {
+            "record_count": len(records),
+            "active_count": active_count,
+            "freshness_required": bool(active_count),
+        }
+    )
+
+    if active_count == 0 and summary["status"] in {"missing", "stale"}:
+        summary["status"] = "inactive"
+        summary["detail"] = (
+            "No active ctx bindings; retired binding timestamps are informational."
+            if latest is not None
+            else "No ctx bindings recorded; no active ctx sessions require freshness."
+        )
+
+    return summary
 
 
 def _extract_timestamps_from_text(text: str) -> Iterable[datetime]:
@@ -713,7 +757,7 @@ def _find_stale_active_ctx(
 ) -> list[dict[str, Any]]:
     stale: list[dict[str, Any]] = []
     for record in _iter_ctx_records(payload):
-        if not record.get("active"):
+        if not _ctx_record_is_active(record):
             continue
         updated = _record_timestamp(record, "updated_at", "updatedAt", "created_at", "createdAt")
         if updated is None:
@@ -734,7 +778,7 @@ def _find_stale_active_ctx(
 def _find_planning_contradictions(codex_payload: Any, ctx_payload: Any) -> list[dict[str, Any]]:
     contradictions: list[dict[str, Any]] = []
     for record in _iter_ctx_records(ctx_payload):
-        if not record.get("active"):
+        if not _ctx_record_is_active(record):
             continue
         worktree_path = str(record.get("worktree_path") or "").strip()
         reason = str(record.get("reason") or "").strip().lower()
@@ -828,12 +872,13 @@ def evaluate_self_improvement_evidence(
     journal_latest = _latest_timestamp(_iter_journal_timestamps(journal_payload))
     codex_latest = _latest_timestamp(_iter_codex_timestamps(codex_payload))
     ctx_latest = _latest_timestamp(_iter_ctx_timestamps(ctx_payload))
+    ctx_summary = _summarize_ctx_bindings(ctx_payload, freshness_hours, current)
     ontology_latest = _parse_time(ontology_summary.get("latest_timestamp"))
 
     sources = {
         "journal_entries": _summarize_source("journal_entries", journal_latest, freshness_hours, current),
         "codex_runs": _summarize_source("codex_runs", codex_latest, freshness_hours, current),
-        "ctx_bindings": _summarize_source("ctx_bindings", ctx_latest, freshness_hours, current),
+        "ctx_bindings": ctx_summary,
         "ontology_intelligence": {
             "source": "ontology_intelligence",
             "status": ontology_summary.get("status"),
@@ -848,7 +893,12 @@ def evaluate_self_improvement_evidence(
 
     latest_timestamps = [
         item
-        for item in (journal_latest, codex_latest, ctx_latest, ontology_latest)
+        for item in (
+            journal_latest,
+            codex_latest,
+            None if ctx_summary.get("status") == "inactive" else ctx_latest,
+            ontology_latest,
+        )
         if item is not None
     ]
     freshness_spread_hours = None
@@ -914,6 +964,8 @@ def evaluate_self_improvement_evidence(
         provenance_items[1]["notes"] = f"{len(stale_active_codex)} active run(s) exceed {active_stale_hours}h"
     if stale_active_ctx:
         provenance_items[2]["notes"] = f"{len(stale_active_ctx)} active session(s) exceed {active_stale_hours}h"
+    elif ctx_summary.get("status") == "inactive":
+        provenance_items[2]["notes"] = str(ctx_summary.get("detail") or "ctx inactive")
     if ontology_alerts:
         provenance_items[3]["notes"] = " | ".join(ontology_alerts)
 

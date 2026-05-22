@@ -220,6 +220,70 @@ def test_required_ontology_artifacts_drive_staleness_when_unrelated_future_times
     assert "reliability_gate" in benchmark["critical_failures"]
 
 
+def test_stale_retired_ctx_bindings_are_inactive_not_degraded(tmp_path):
+    now = datetime(2026, 5, 22, 15, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+    stale_retired = (now - timedelta(hours=144)).isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(journal_path, {"entries": [{"occurredAt": recent}]})
+    _write_json(
+        codex_path,
+        {"runs": {"codex_1": {"run_id": "codex_1", "status": "completed", "completed_at": recent}}},
+    )
+    _write_json(
+        ctx_path,
+        {
+            "sessions": {
+                "ctx_retired": {
+                    "session_id": "ctx_retired",
+                    "active": False,
+                    "reason": "ctx binding retired: worktree missing",
+                    "updated_at": stale_retired,
+                }
+            }
+        },
+    )
+
+    gate = self_improvement_tool.evaluate_self_improvement_evidence(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        now=now,
+    )
+
+    ctx_source = gate["sources"]["ctx_bindings"]
+    assert gate["status"] == "healthy"
+    assert ctx_source["status"] == "inactive"
+    assert ctx_source["age_hours"] == 144.0
+    assert ctx_source["freshness_required"] is False
+    assert ctx_source["active_count"] == 0
+    assert gate["warnings"] == []
+    assert gate["contradictions"] == []
+    assert gate["freshness_spread_hours"] == 0.0
+    assert "No active ctx bindings" in gate["provenance"]["items"][2]["notes"]
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+    reliability_gate = benchmark["checks"]["reliability_gate"]
+    assert reliability_gate["score"] == 1.0
+    assert reliability_gate["status"] == "pass"
+    assert reliability_gate["metrics"]["stale_source_count"] == 0
+    assert benchmark["critical_failures"] == []
+
+
 def test_status_language_only_work_fails_anti_make_work_check(tmp_path):
     now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
     recent = now.isoformat()
