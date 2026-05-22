@@ -10,6 +10,11 @@ def _write_json(path: Path, payload) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
 def _seed_ontology_repo(tmp_path: Path, *, generated_at: str, status: str = "fresh") -> Path:
     repo = tmp_path / "ontology"
     _write_json(
@@ -19,6 +24,18 @@ def _seed_ontology_repo(tmp_path: Path, *, generated_at: str, status: str = "fre
             "status": status,
             "platform": {"total_cqs": 10, "total_answered": 10},
         },
+    )
+    _write_json(
+        repo / "evolution" / "delta_report.json",
+        {
+            "generated_at": generated_at,
+            "status": status,
+            "current": {"platform": {"total_cqs": 10, "total_answered": 10}},
+        },
+    )
+    _write_text(
+        repo / "evolution" / "daily_report.md",
+        f"# Ontology Evolution Daily Report\n\nGenerated at: `{generated_at}`\n",
     )
     return repo
 
@@ -139,6 +156,57 @@ def test_ontology_scan_ignores_git_worktree_runtime_artifacts(tmp_path):
     assert gate["ontology_alerts"] == []
     assert gate["warnings"] == []
     assert gate["contradictions"] == []
+
+
+def test_stale_required_ontology_artifacts_are_not_masked_by_future_fixture_timestamps(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+    stale = (now - timedelta(hours=96)).isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=stale)
+
+    _write_json(journal_path, {"entries": [{"occurredAt": recent}]})
+    _write_json(
+        codex_path,
+        {"runs": {"codex_1": {"run_id": "codex_1", "status": "completed", "completed_at": recent}}},
+    )
+    _write_json(
+        ctx_path,
+        {"sessions": {"ctx_1": {"session_id": "ctx_1", "active": False, "updated_at": recent}}},
+    )
+    _write_text(
+        ontology_root / "tests" / "fixtures" / "future.yaml",
+        "freshness_cutoff: '2027-05-16T17:55:00Z'\n",
+    )
+    _write_json(
+        ontology_root / "ops" / "status.json",
+        {"generated_at": recent, "status": "fresh"},
+    )
+
+    gate = self_improvement_tool.evaluate_self_improvement_evidence(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        now=now,
+    )
+
+    assert gate["status"] == "degraded"
+    assert gate["sources"]["ontology_intelligence"]["status"] == "stale"
+    assert gate["ontology"]["status"] == "stale"
+    assert gate["ontology"]["latest_timestamp"] == stale
+    assert gate["ontology"]["age_hours"] == 96.0
+    assert [item["source"] for item in gate["ontology"]["artifacts"]] == [
+        "ontology_metrics",
+        "ontology_delta_report",
+        "ontology_daily_report",
+    ]
+    assert {item["status"] for item in gate["ontology"]["artifacts"]} == {"stale"}
+    assert "ontology_intelligence evidence stale" in gate["warnings"]
+    assert "ontology intelligence artifacts are stale, missing, or degraded" in gate["contradictions"]
 
 
 def test_status_language_only_work_fails_anti_make_work_check(tmp_path):
