@@ -830,6 +830,66 @@ def _find_planning_contradictions(codex_payload: Any, ctx_payload: Any) -> list[
     return contradictions
 
 
+def _build_ctx_remediation(
+    ctx_bindings_path: Path,
+    ctx_summary: dict[str, Any],
+    stale_active_ctx: list[dict[str, Any]],
+    planning_contradictions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    status = str(ctx_summary.get("status") or "")
+    ctx_contradictions = [
+        item
+        for item in planning_contradictions
+        if str(item.get("type") or "").startswith("ctx_")
+    ]
+    required = status in {"missing", "stale", "degraded"} or bool(stale_active_ctx or ctx_contradictions)
+
+    if not required:
+        return {
+            "required": False,
+            "path": str(ctx_bindings_path),
+            "action": "none",
+            "reason": str(
+                ctx_summary.get("detail")
+                or "ctx session-binding evidence is current."
+            ),
+            "active_count": ctx_summary.get("active_count"),
+            "stale_active_count": 0,
+            "contradiction_count": 0,
+        }
+
+    actions: list[str] = []
+    reasons: list[str] = []
+    if status == "missing":
+        actions.append("restore or regenerate ctx session-binding evidence")
+        reasons.append("ctx session-binding evidence is unavailable")
+    elif status == "stale":
+        actions.append("refresh active ctx session bindings or retire sessions that are no longer live")
+        reasons.append(f"ctx session-binding evidence is stale ({ctx_summary.get('age_hours')}h)")
+    elif status == "degraded":
+        actions.append("repair degraded ctx session-binding evidence before selecting new work")
+        reasons.append("ctx session-binding evidence is degraded")
+
+    if stale_active_ctx:
+        actions.append("retire stale active ctx bindings or refresh them from the live ctx runtime")
+        reasons.append(f"{len(stale_active_ctx)} active ctx binding(s) exceed freshness limits")
+    if ctx_contradictions:
+        actions.append("repair ctx binding store contradictions")
+        reasons.append(f"{len(ctx_contradictions)} ctx binding contradiction(s) detected")
+
+    return {
+        "required": True,
+        "path": str(ctx_bindings_path),
+        "action": "; ".join(dict.fromkeys(actions)),
+        "reasons": list(dict.fromkeys(reasons)),
+        "active_count": ctx_summary.get("active_count"),
+        "stale_active_count": len(stale_active_ctx),
+        "stale_active_sessions": stale_active_ctx[:5],
+        "contradiction_count": len(ctx_contradictions),
+        "contradictions": ctx_contradictions[:5],
+    }
+
+
 def _build_provenance_item(tag: str, path: Path, summary: dict[str, Any]) -> dict[str, Any]:
     return {
         "tag": tag,
@@ -890,6 +950,12 @@ def evaluate_self_improvement_evidence(
     stale_active_codex = _find_stale_active_codex(codex_payload, current, active_stale_hours)
     stale_active_ctx = _find_stale_active_ctx(ctx_payload, current, active_stale_hours)
     planning_contradictions = _find_planning_contradictions(codex_payload, ctx_payload)
+    ctx_remediation = _build_ctx_remediation(
+        ctx_bindings_path,
+        ctx_summary,
+        stale_active_ctx,
+        planning_contradictions,
+    )
 
     latest_timestamps = [
         item
@@ -981,6 +1047,7 @@ def evaluate_self_improvement_evidence(
         "warnings": warnings,
         "ontology": ontology_summary,
         "ontology_alerts": ontology_alerts,
+        "ctx_remediation": ctx_remediation,
         "contradictions": contradictions,
         "reasons": reasons,
         "suppression": {
@@ -1787,11 +1854,13 @@ def _evaluate_leading_indicator_drift_check(
 
 def _build_issue_selection_summary(
     checks: dict[str, dict[str, Any]],
+    gate: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     guardrail_checks = {
         name: check
         for name, check in checks.items()
         if name in {
+            "reliability_gate",
             "anti_make_work_check",
             "operator_value_alignment",
             "leading_indicator_drift",
@@ -1799,20 +1868,38 @@ def _build_issue_selection_summary(
         and check.get("status") != "pass"
     }
     quantity_guardrail_active = bool(guardrail_checks)
+    reliability_blocked = "reliability_gate" in guardrail_checks
+    gate = gate or {}
+    ctx_remediation = gate.get("ctx_remediation") or {}
+    ontology_repair = (gate.get("ontology") or {}).get("external_repair") or {}
+    remediation_actions = [
+        str(item.get("action") or "").strip()
+        for item in (ctx_remediation, ontology_repair)
+        if item.get("required") and str(item.get("action") or "").strip()
+    ]
+    if reliability_blocked:
+        recommended_focus = "self-improvement evidence freshness repair"
+        detail = (
+            "Repair self-improvement evidence freshness before selecting throughput or operator-value work: "
+            + "; ".join(remediation_actions or ["inspect reliability gate provenance"])
+        )
+    elif quantity_guardrail_active:
+        recommended_focus = "operator decision support plus verified system change"
+        detail = (
+            "Do not select issues because they increase task count; "
+            "prefer work with operator decision support and verified change evidence."
+        )
+    else:
+        recommended_focus = "normal lane selection"
+        detail = "Benchmark guardrails permit normal lane selection."
+
     return {
         "quantity_guardrail_active": quantity_guardrail_active,
         "suppress_raw_throughput_selection": quantity_guardrail_active,
         "blocked_checks": sorted(guardrail_checks),
-        "recommended_focus": (
-            "operator decision support plus verified system change"
-            if quantity_guardrail_active
-            else "normal lane selection"
-        ),
-        "detail": (
-            "Do not select issues because they increase task count; prefer work with operator decision support and verified change evidence."
-            if quantity_guardrail_active
-            else "Benchmark guardrails permit normal lane selection."
-        ),
+        "recommended_focus": recommended_focus,
+        "detail": detail,
+        "remediation_actions": remediation_actions,
     }
 
 
@@ -1894,6 +1981,9 @@ def evaluate_self_improvement_benchmark(
             "warning_count": len(gate.get("warnings") or []),
             "contradiction_count": len(gate.get("contradictions") or []),
             "freshness_spread_hours": gate.get("freshness_spread_hours"),
+            "ctx_remediation_required": bool(
+                (gate.get("ctx_remediation") or {}).get("required")
+            ),
         },
     )
     anti_make_work_check = _evaluate_anti_make_work_check(
@@ -1932,7 +2022,7 @@ def evaluate_self_improvement_benchmark(
         for name, check in checks.items()
         if check.get("critical") and check.get("status") == "fail"
     ]
-    issue_selection = _build_issue_selection_summary(checks)
+    issue_selection = _build_issue_selection_summary(checks, gate)
     operator_summary = _build_operator_summary(checks, issue_selection)
     previous_project_score = _latest_history_project_score(history)
     direction = _score_direction(project_score, previous_project_score, threshold=0.1)

@@ -281,7 +281,48 @@ def test_stale_retired_ctx_bindings_are_inactive_not_degraded(tmp_path):
     assert reliability_gate["score"] == 1.0
     assert reliability_gate["status"] == "pass"
     assert reliability_gate["metrics"]["stale_source_count"] == 0
+    assert reliability_gate["metrics"]["ctx_remediation_required"] is False
     assert benchmark["critical_failures"] == []
+
+
+def test_missing_ctx_bindings_block_issue_selection_with_repair_guidance(tmp_path):
+    now = datetime(2026, 5, 22, 15, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "missing" / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(journal_path, {"entries": [{"occurredAt": recent}]})
+    _write_json(
+        codex_path,
+        {"runs": {"codex_1": {"run_id": "codex_1", "status": "completed", "completed_at": recent}}},
+    )
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    reliability_gate = benchmark["checks"]["reliability_gate"]
+    ctx_remediation = benchmark["gate"]["ctx_remediation"]
+    issue_selection = benchmark["issue_selection"]
+    assert reliability_gate["status"] == "fail"
+    assert reliability_gate["metrics"]["ctx_remediation_required"] is True
+    assert ctx_remediation["required"] is True
+    assert ctx_remediation["path"] == str(ctx_path)
+    assert "restore or regenerate ctx session-binding evidence" in ctx_remediation["action"]
+    assert benchmark["critical_failures"] == ["reliability_gate"]
+    assert issue_selection["blocked_checks"] == ["reliability_gate"]
+    assert issue_selection["recommended_focus"] == "self-improvement evidence freshness repair"
+    assert issue_selection["remediation_actions"] == [ctx_remediation["action"]]
+    assert "Repair self-improvement evidence freshness" in issue_selection["detail"]
 
 
 def test_status_language_only_work_fails_anti_make_work_check(tmp_path):
@@ -781,6 +822,9 @@ def test_stale_active_ctx_still_degrades_reliability_floor(tmp_path):
     assert "stale active ctx bindings detected" in gate["warnings"]
     assert "stale active ctx bindings detected" in gate["contradictions"]
     assert len(gate["stale_active_ctx"]) == 1
+    assert gate["ctx_remediation"]["required"] is True
+    assert gate["ctx_remediation"]["stale_active_count"] == 1
+    assert "retire stale active ctx bindings" in gate["ctx_remediation"]["action"]
 
     benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
         journal_path=journal_path,
@@ -794,7 +838,10 @@ def test_stale_active_ctx_still_degrades_reliability_floor(tmp_path):
     reliability_gate = benchmark["checks"]["reliability_gate"]
     assert reliability_gate["status"] == "fail"
     assert reliability_gate["metrics"]["warning_count"] >= 1
+    assert reliability_gate["metrics"]["ctx_remediation_required"] is True
     assert "reliability_gate" in benchmark["critical_failures"]
+    assert "reliability_gate" in benchmark["issue_selection"]["blocked_checks"]
+    assert benchmark["issue_selection"]["recommended_focus"] == "self-improvement evidence freshness repair"
 
 
 def test_degraded_ontology_status_still_degrades_reliability_floor(tmp_path):
