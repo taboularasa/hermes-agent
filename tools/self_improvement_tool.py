@@ -45,7 +45,21 @@ _LEADING_INDICATOR_HARBINGERS = (
     "correlation_explosion",
 )
 _ONTOLOGY_SCAN_SUFFIXES = {".json", ".yaml", ".yml", ".md"}
-_ONTOLOGY_SCAN_PRUNED_DIRS = {".git"}
+_ONTOLOGY_SCAN_PRUNED_DIRS = {
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "__pycache__",
+    "node_modules",
+    "tests",
+}
+_ONTOLOGY_REQUIRED_ARTIFACTS = (
+    ("ontology_metrics", Path("evolution/metrics.json")),
+    ("ontology_delta_report", Path("evolution/delta_report.json")),
+    ("ontology_daily_report", Path("evolution/daily_report.md")),
+)
+_FUTURE_TIMESTAMP_TOLERANCE_SECONDS = 5 * 60
 _TEXT_EVIDENCE_EXCLUDED_KEYS = {
     "command",
     "prompt",
@@ -431,7 +445,7 @@ def _scan_ontology_file(path: Path) -> tuple[list[datetime], list[str]]:
     except Exception:
         return timestamps, [f"{path.name} unreadable"]
 
-    if path.suffix == ".json":
+    if path.suffix.lower() == ".json":
         try:
             payload = json.loads(text)
         except Exception:
@@ -461,6 +475,128 @@ def _scan_ontology_file(path: Path) -> tuple[list[datetime], list[str]]:
     return timestamps, alerts
 
 
+def _is_future_timestamp(value: datetime, now: datetime) -> bool:
+    return (value - now).total_seconds() > _FUTURE_TIMESTAMP_TOLERANCE_SECONDS
+
+
+def _summarize_ontology_artifact(
+    root: Path,
+    name: str,
+    relative_path: Path,
+    freshness_hours: int,
+    now: datetime,
+) -> dict[str, Any]:
+    path = root / relative_path
+    if not path.exists():
+        return {
+            "source": name,
+            "relative_path": str(relative_path),
+            "path": str(path),
+            "status": "missing",
+            "latest_timestamp": None,
+            "age_hours": None,
+            "reasons": [f"{name} missing"],
+            "alerts": [],
+        }
+
+    timestamps, alerts = _scan_ontology_file(path)
+    valid_timestamps = [item for item in timestamps if not _is_future_timestamp(item, now)]
+    future_timestamps = [item for item in timestamps if _is_future_timestamp(item, now)]
+    latest = _latest_timestamp(valid_timestamps)
+    reasons: list[str] = []
+    status = "fresh"
+    age_hours = None
+
+    if latest is None:
+        status = "missing"
+        reasons.append(f"{name} timestamp missing")
+    else:
+        age_hours = max(0.0, (now - latest).total_seconds() / 3600)
+        if age_hours > freshness_hours:
+            status = "stale"
+            reasons.append(f"{name} stale ({round(age_hours, 2)}h)")
+
+    artifact_alerts = [f"{name} {alert}" for alert in alerts]
+    if future_timestamps:
+        status = "degraded"
+        future_latest = _latest_timestamp(future_timestamps)
+        if future_latest is not None:
+            artifact_alerts.append(f"{name} future timestamp ignored ({future_latest.isoformat()})")
+    if artifact_alerts:
+        status = "degraded"
+        reasons.extend(artifact_alerts)
+
+    return {
+        "source": name,
+        "relative_path": str(relative_path),
+        "path": str(path),
+        "status": status,
+        "latest_timestamp": latest.isoformat() if latest is not None else None,
+        "age_hours": round(age_hours, 2) if age_hours is not None else None,
+        "reasons": reasons,
+        "alerts": artifact_alerts,
+    }
+
+
+def _required_ontology_artifacts_exist(root: Path) -> bool:
+    return any((root / relative_path).exists() for _, relative_path in _ONTOLOGY_REQUIRED_ARTIFACTS)
+
+
+def _summarize_required_ontology_artifacts(
+    root: Path,
+    freshness_hours: int,
+    now: datetime,
+) -> dict[str, Any]:
+    artifacts = [
+        _summarize_ontology_artifact(root, name, relative_path, freshness_hours, now)
+        for name, relative_path in _ONTOLOGY_REQUIRED_ARTIFACTS
+    ]
+    statuses = {str(item.get("status") or "") for item in artifacts}
+    if "degraded" in statuses:
+        status = "degraded"
+    elif "missing" in statuses:
+        status = "missing"
+    elif "stale" in statuses:
+        status = "stale"
+    else:
+        status = "fresh"
+
+    timestamps = [
+        parsed
+        for item in artifacts
+        if (parsed := _parse_time(item.get("latest_timestamp"))) is not None
+    ]
+    watermark = min(timestamps) if timestamps else None
+    ages = [
+        float(item["age_hours"])
+        for item in artifacts
+        if item.get("age_hours") is not None
+    ]
+    age_hours = max(ages, default=None)
+    reasons = [
+        reason
+        for item in artifacts
+        for reason in item.get("reasons", [])
+        if str(reason).strip()
+    ]
+    alerts = [
+        alert
+        for item in artifacts
+        for alert in item.get("alerts", [])
+        if str(alert).strip()
+    ]
+
+    return {
+        "status": status,
+        "latest_timestamp": watermark.isoformat() if watermark is not None else None,
+        "age_hours": round(age_hours, 2) if age_hours is not None else None,
+        "reasons": reasons,
+        "alerts": alerts,
+        "artifacts": artifacts,
+        "contract": "ontology_evolution_artifacts.v1",
+    }
+
+
 def _iter_ontology_files(root: Path) -> Iterable[Path]:
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [
@@ -485,12 +621,20 @@ def _summarize_ontology(root: Path, freshness_hours: int, now: datetime) -> dict
             "alerts": [],
         }
 
+    if _required_ontology_artifacts_exist(root):
+        return _summarize_required_ontology_artifacts(root, freshness_hours, now)
+
     timestamps: list[datetime] = []
     alerts: list[str] = []
     for path in _iter_ontology_files(root):
         file_timestamps, file_alerts = _scan_ontology_file(path)
-        timestamps.extend(file_timestamps)
+        valid_timestamps = [item for item in file_timestamps if not _is_future_timestamp(item, now)]
+        future_timestamps = [item for item in file_timestamps if _is_future_timestamp(item, now)]
+        timestamps.extend(valid_timestamps)
         alerts.extend(file_alerts)
+        future_latest = _latest_timestamp(future_timestamps)
+        if future_latest is not None:
+            alerts.append(f"{path.name} future timestamp ignored ({future_latest.isoformat()})")
 
     latest = _latest_timestamp(timestamps)
     if latest is None:
