@@ -45,7 +45,13 @@ _LEADING_INDICATOR_HARBINGERS = (
     "correlation_explosion",
 )
 _ONTOLOGY_SCAN_SUFFIXES = {".json", ".yaml", ".yml", ".md"}
-_ONTOLOGY_SCAN_PRUNED_DIRS = {".git"}
+_ONTOLOGY_SCAN_PRUNED_DIRS = {".git", "__pycache__", ".pytest_cache", "tests"}
+_ONTOLOGY_REQUIRED_ARTIFACTS = (
+    ("ontology_metrics", Path("evolution/metrics.json")),
+    ("ontology_delta_report", Path("evolution/delta_report.json")),
+    ("ontology_daily_report", Path("evolution/daily_report.md")),
+)
+_FUTURE_TIMESTAMP_TOLERANCE_SECONDS = 300
 _TEXT_EVIDENCE_EXCLUDED_KEYS = {
     "command",
     "prompt",
@@ -475,6 +481,110 @@ def _iter_ontology_files(root: Path) -> Iterable[Path]:
                 yield path
 
 
+def _split_future_timestamps(
+    timestamps: Iterable[datetime],
+    now: datetime,
+) -> tuple[list[datetime], list[datetime]]:
+    valid: list[datetime] = []
+    future: list[datetime] = []
+    for timestamp in timestamps:
+        if (timestamp - now).total_seconds() > _FUTURE_TIMESTAMP_TOLERANCE_SECONDS:
+            future.append(timestamp)
+        else:
+            valid.append(timestamp)
+    return valid, future
+
+
+def _artifact_summary_from_timestamps(
+    *,
+    name: str,
+    path: Path,
+    timestamps: Iterable[datetime],
+    alerts: Iterable[str],
+    freshness_hours: int,
+    now: datetime,
+) -> dict[str, Any]:
+    valid_timestamps, future_timestamps = _split_future_timestamps(timestamps, now)
+    latest = _latest_timestamp(valid_timestamps)
+    alert_reasons = [str(item).strip() for item in alerts if str(item).strip()]
+    reasons = list(alert_reasons)
+
+    if latest is None:
+        status = "missing"
+        age_hours = None
+        latest_timestamp = None
+        if future_timestamps:
+            reasons.append(f"{name} only has future timestamps")
+    else:
+        age_hours = round(max(0.0, (now - latest).total_seconds() / 3600), 2)
+        latest_timestamp = latest.isoformat()
+        status = "fresh" if age_hours <= freshness_hours else "stale"
+        if status == "stale":
+            reasons.append(f"{name} stale ({age_hours}h)")
+
+    if alert_reasons and status in {"fresh", "stale"}:
+        status = "degraded"
+
+    return {
+        "source": name,
+        "path": str(path),
+        "status": status,
+        "age_hours": age_hours,
+        "latest_timestamp": latest_timestamp,
+        "future_timestamp_count": len(future_timestamps),
+        "ignored_future_timestamps": [
+            timestamp.isoformat() for timestamp in sorted(future_timestamps)[-5:]
+        ],
+        "reasons": reasons,
+    }
+
+
+def _summarize_required_ontology_artifacts(
+    root: Path,
+    freshness_hours: int,
+    now: datetime,
+) -> dict[str, dict[str, Any]]:
+    summaries: dict[str, dict[str, Any]] = {}
+    for name, relative_path in _ONTOLOGY_REQUIRED_ARTIFACTS:
+        path = root / relative_path
+        if not path.exists():
+            summaries[name] = {
+                "source": name,
+                "path": str(path),
+                "status": "missing",
+                "age_hours": None,
+                "latest_timestamp": None,
+                "future_timestamp_count": 0,
+                "ignored_future_timestamps": [],
+                "reasons": [f"{name} missing"],
+            }
+            continue
+        timestamps, alerts = _scan_ontology_file(path)
+        summaries[name] = _artifact_summary_from_timestamps(
+            name=name,
+            path=path,
+            timestamps=timestamps,
+            alerts=alerts,
+            freshness_hours=freshness_hours,
+            now=now,
+        )
+    return summaries
+
+
+def _ontology_external_repair(root: Path, required_artifacts: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    invalid_artifacts = [
+        summary
+        for summary in required_artifacts.values()
+        if str(summary.get("status") or "") in {"stale", "missing", "degraded"}
+    ]
+    return {
+        "required": bool(invalid_artifacts),
+        "repository": str(root),
+        "action": "refresh ontology evolution reporting artifacts",
+        "artifacts": invalid_artifacts,
+    }
+
+
 def _summarize_ontology(root: Path, freshness_hours: int, now: datetime) -> dict[str, Any]:
     if not root.exists():
         return {
@@ -483,6 +593,7 @@ def _summarize_ontology(root: Path, freshness_hours: int, now: datetime) -> dict
             "age_hours": None,
             "reasons": ["ontology root missing"],
             "alerts": [],
+            "required_artifacts": {},
         }
 
     timestamps: list[datetime] = []
@@ -492,14 +603,34 @@ def _summarize_ontology(root: Path, freshness_hours: int, now: datetime) -> dict
         timestamps.extend(file_timestamps)
         alerts.extend(file_alerts)
 
-    latest = _latest_timestamp(timestamps)
+    required_artifacts = _summarize_required_ontology_artifacts(root, freshness_hours, now)
+    required_latest = [
+        parsed
+        for summary in required_artifacts.values()
+        if (parsed := _parse_time(summary.get("latest_timestamp"))) is not None
+    ]
+    invalid_required = [
+        summary
+        for summary in required_artifacts.values()
+        if str(summary.get("status") or "") in {"stale", "missing", "degraded"}
+    ]
+    external_repair = _ontology_external_repair(root, required_artifacts)
+
+    valid_timestamps, future_timestamps = _split_future_timestamps(timestamps, now)
+    latest = _latest_timestamp(required_latest) or _latest_timestamp(valid_timestamps)
     if latest is None:
+        reasons = ["ontology intelligence timestamp missing"]
+        if future_timestamps:
+            reasons.append("ontology intelligence only has future timestamps")
         return {
             "status": "missing",
             "latest_timestamp": None,
             "age_hours": None,
-            "reasons": ["ontology intelligence timestamp missing"],
+            "reasons": reasons,
             "alerts": alerts,
+            "ignored_future_timestamp_count": len(future_timestamps),
+            "required_artifacts": required_artifacts,
+            "external_repair": external_repair,
         }
 
     age_hours = max(0.0, (now - latest).total_seconds() / 3600)
@@ -507,6 +638,14 @@ def _summarize_ontology(root: Path, freshness_hours: int, now: datetime) -> dict
     reasons: list[str] = []
     if status == "stale":
         reasons.append(f"ontology_intelligence stale ({round(age_hours, 2)}h)")
+    for summary in invalid_required:
+        for reason in summary.get("reasons") or [f"{summary.get('source')} {summary.get('status')}"]:
+            text = str(reason).strip()
+            if text and text not in reasons:
+                reasons.append(text)
+    if invalid_required:
+        required_statuses = {str(summary.get("status") or "") for summary in invalid_required}
+        status = "degraded" if required_statuses.intersection({"missing", "degraded"}) else "stale"
     if alerts:
         status = "degraded"
         reasons.extend(alerts)
@@ -516,6 +655,9 @@ def _summarize_ontology(root: Path, freshness_hours: int, now: datetime) -> dict
         "age_hours": round(age_hours, 2),
         "reasons": reasons,
         "alerts": alerts,
+        "ignored_future_timestamp_count": len(future_timestamps),
+        "required_artifacts": required_artifacts,
+        "external_repair": external_repair,
     }
 
 
