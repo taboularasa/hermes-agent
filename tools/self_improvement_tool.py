@@ -452,7 +452,7 @@ def _summarize_ctx_bindings(
         }
     )
 
-    if active_count == 0 and summary["status"] in {"missing", "stale"}:
+    if active_count == 0:
         summary["status"] = "inactive"
         summary["detail"] = (
             "No active ctx bindings; retired binding timestamps are informational."
