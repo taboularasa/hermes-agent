@@ -98,8 +98,13 @@ def test_all_fresh_cross_source_skew_keeps_reliability_gate_healthy(tmp_path):
         now=now,
     )
 
+    ctx_source = gate["sources"]["ctx_bindings"]
     assert gate["status"] == "healthy"
-    assert {entry["status"] for entry in gate["sources"].values()} == {"fresh"}
+    assert {entry["status"] for entry in gate["sources"].values()} == {"fresh", "inactive"}
+    assert ctx_source["status"] == "inactive"
+    assert ctx_source["freshness_required"] is False
+    assert ctx_source["active_count"] == 0
+    assert ctx_source["detail"] == "No active ctx bindings; retired binding timestamps are informational."
     assert gate["warnings"] == []
     assert gate["contradictions"] == []
     assert gate["freshness_spread_hours"] == 20.0
