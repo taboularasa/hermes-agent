@@ -92,11 +92,17 @@ _DURABLE_EVIDENCE_KEYS = {
     "commit_sha",
     "commit_shas",
     "commits",
+    "control_ownership_preserved",
+    "control_preservation",
+    "control_preserved",
     "decision",
     "decisions",
     "durable_artifacts",
     "evidence",
     "files_changed",
+    "incident_risk_reduced",
+    "ownership_preservation",
+    "ownership_preserved",
     "operator_decision_support",
     "pr_url",
     "pr_urls",
@@ -106,9 +112,38 @@ _DURABLE_EVIDENCE_KEYS = {
     "pull_request_url",
     "pull_requests",
     "risk_reduction",
+    "risk_reduced",
+    "system_capability_changed",
     "test_results",
     "tests",
     "verification",
+}
+_ALLOWED_VALUE_CATEGORIES = (
+    ("operator_decision_support", "operator decision support"),
+    ("durable_asset_created", "durable asset created"),
+    ("control_ownership_preserved", "control/ownership preserved"),
+    ("incident_risk_reduced", "incident risk reduced"),
+    ("system_capability_changed", "system capability changed"),
+)
+_ALLOWED_VALUE_CATEGORY_LABELS = {
+    category: label for category, label in _ALLOWED_VALUE_CATEGORIES
+}
+_VALUE_CATEGORY_REMEDIATION = {
+    "operator_decision_support": (
+        "document the operator decision, blocker, trade-off, or manual choice the work enables"
+    ),
+    "durable_asset_created": (
+        "link a commit, PR, changed file, generated artifact, or verification result"
+    ),
+    "control_ownership_preserved": (
+        "show preserved ownership, authority, rollback state, or protected control boundary"
+    ),
+    "incident_risk_reduced": (
+        "name the incident risk and the mitigation, prevention, or recovery evidence"
+    ),
+    "system_capability_changed": (
+        "identify the behavior, tool, workflow, config, schema, or test capability changed"
+    ),
 }
 _STATUS_ONLY_PATTERNS = (
     re.compile(r"\bactionable\b", re.IGNORECASE),
@@ -144,6 +179,14 @@ _DURABLE_TEXT_PATTERNS = (
         ),
     ),
     (
+        "durable_asset_created",
+        re.compile(
+            r"\b(?:created|wrote|added|published|generated)\b"
+            r"[^.\n]{0,160}\b(?:asset|artifact|file|record|report|branch|commit|PR|pull request|test)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
         "state_transition",
         re.compile(
             r"\b(?:merged|pushed|opened|created|closed|resolved|completed)\b"
@@ -172,6 +215,38 @@ _DURABLE_TEXT_PATTERNS = (
         re.compile(
             r"\b(?:decision|decide|choose|approval|blocker|risk|trade[- ]off|manual step|recommended)\b"
             r"[^.\n]{0,160}\b(?:operator|human|user)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "control_ownership_preserved",
+        re.compile(
+            r"\b(?:preserved|retained|kept|protected)\b"
+            r"[^.\n]{0,160}\b(?:control|ownership|authority|rollback|handoff|state|boundary)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "control_ownership_preserved",
+        re.compile(
+            r"\b(?:control|ownership|authority|rollback|handoff|state|boundary)\b"
+            r"[^.\n]{0,160}\b(?:preserved|retained|kept|protected)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "incident_risk_reduced",
+        re.compile(
+            r"\b(?:reduced|mitigated|lowered|prevented|removed|closed)\b"
+            r"[^.\n]{0,160}\b(?:incident|risk|outage|regression|failure|security|data loss|rollback)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "incident_risk_reduced",
+        re.compile(
+            r"\b(?:incident|risk|outage|regression|failure|security|data loss|rollback)\b"
+            r"[^.\n]{0,160}\b(?:reduced|mitigated|lowered|prevented|removed|closed)\b",
             re.IGNORECASE,
         ),
     ),
@@ -218,6 +293,58 @@ _VERIFIED_SYSTEM_CHANGE_SIGNALS = {
     "test_results",
     "tests",
     "verification",
+}
+_VALUE_CATEGORY_SIGNAL_MAP = {
+    "operator_decision_support": _OPERATOR_DECISION_SUPPORT_SIGNALS,
+    "durable_asset_created": {
+        "artifact",
+        "artifact_path",
+        "artifact_paths",
+        "artifacts",
+        "changed_files",
+        "changed_paths",
+        "checks",
+        "ci",
+        "commit",
+        "commit_sha",
+        "commit_shas",
+        "commits",
+        "durable_artifacts",
+        "durable_asset_created",
+        "evidence",
+        "files_changed",
+        "pr_url",
+        "pr_urls",
+        "proof_artifact",
+        "proof_artifacts",
+        "pull_request",
+        "pull_request_url",
+        "pull_requests",
+        "state_transition",
+        "test_results",
+        "tests",
+        "verification",
+    },
+    "control_ownership_preserved": {
+        "control_ownership_preserved",
+        "control_preservation",
+        "control_preserved",
+        "ownership_preservation",
+        "ownership_preserved",
+    },
+    "incident_risk_reduced": {
+        "incident_risk_reduced",
+        "risk_reduced",
+        "risk_reduction",
+    },
+    "system_capability_changed": {
+        "capability_change",
+        "changed_files",
+        "changed_paths",
+        "files_changed",
+        "state_transition",
+        "system_capability_changed",
+    },
 }
 
 
@@ -1190,6 +1317,43 @@ def _status_only_markers(text: str) -> set[str]:
     return {pattern.pattern for pattern in _STATUS_ONLY_PATTERNS if pattern.search(text)}
 
 
+def _value_categories_from_signals(signals: set[str]) -> list[str]:
+    categories: list[str] = []
+    for category, _label in _ALLOWED_VALUE_CATEGORIES:
+        if signals.intersection(_VALUE_CATEGORY_SIGNAL_MAP.get(category, set())):
+            categories.append(category)
+    return categories
+
+
+def _value_category_labels(categories: Iterable[str]) -> list[str]:
+    return [
+        _ALLOWED_VALUE_CATEGORY_LABELS[category]
+        for category in categories
+        if category in _ALLOWED_VALUE_CATEGORY_LABELS
+    ]
+
+
+def _allowed_value_category_guidance() -> list[dict[str, str]]:
+    return [
+        {
+            "category": category,
+            "label": label,
+            "remediation": _VALUE_CATEGORY_REMEDIATION[category],
+        }
+        for category, label in _ALLOWED_VALUE_CATEGORIES
+    ]
+
+
+def _make_work_remediation(categories: list[str]) -> Optional[str]:
+    if categories:
+        return None
+    guidance = "; ".join(
+        f"{label}: {_VALUE_CATEGORY_REMEDIATION[category]}"
+        for category, label in _ALLOWED_VALUE_CATEGORIES
+    )
+    return f"Add evidence for at least one allowed value category: {guidance}."
+
+
 def _record_claimed_timestamp(record: dict[str, Any]) -> Optional[datetime]:
     return _record_timestamp(
         record,
@@ -1261,12 +1425,14 @@ def _assess_make_work_item(item: dict[str, Any]) -> dict[str, Any]:
     durable_signals = _structured_durable_signals(record)
     durable_signals.update(_text_durable_signals(text))
     status_markers = _status_only_markers(text)
-    durable = bool(durable_signals)
+    value_categories = _value_categories_from_signals(durable_signals)
+    category_labels = _value_category_labels(value_categories)
+    durable = bool(value_categories)
     issue = None
     if not durable and status_markers:
-        issue = "status_language_without_durable_evidence"
+        issue = "status_language_without_value_category_evidence"
     elif not durable:
-        issue = "claimed_work_without_durable_evidence"
+        issue = "claimed_work_without_value_category_evidence"
 
     return {
         "source": item.get("source"),
@@ -1274,8 +1440,11 @@ def _assess_make_work_item(item: dict[str, Any]) -> dict[str, Any]:
         "timestamp": item.get("timestamp"),
         "durable": durable,
         "signals": sorted(durable_signals),
+        "value_categories": value_categories,
+        "value_category_labels": category_labels,
         "status_language": bool(status_markers),
         "issue": issue,
+        "remediation": _make_work_remediation(value_categories),
     }
 
 
@@ -1341,13 +1510,26 @@ def _evaluate_anti_make_work_check(
     durable_count = sum(1 for item in assessments if item["durable"])
     shallow_items = [item for item in assessments if not item["durable"]]
     status_only_count = sum(1 for item in shallow_items if item["status_language"])
+    value_category_counts = {
+        category: sum(
+            1
+            for item in assessments
+            if category in set(item.get("value_categories") or [])
+        )
+        for category, _label in _ALLOWED_VALUE_CATEGORIES
+    }
 
     if assessed_count == 0:
         score = 1.0
         detail = "No claimed work items required anti-make-work evidence."
     elif not shallow_items:
         score = 1.0
-        detail = "Claimed work includes durable evidence."
+        passing_labels = [
+            label
+            for category, label in _ALLOWED_VALUE_CATEGORIES
+            if value_category_counts.get(category)
+        ]
+        detail = "Claimed work includes allowed value-category evidence: " + ", ".join(passing_labels)
     else:
         score = durable_count / assessed_count
         if status_only_count:
@@ -1358,9 +1540,12 @@ def _evaluate_anti_make_work_check(
             f"{item.get('source')}:{item.get('id') or 'unknown'}"
             for item in shallow_items[:3]
         ]
+        allowed_labels = ", ".join(label for _category, label in _ALLOWED_VALUE_CATEGORIES)
         detail = (
-            "Claimed work lacks durable state-change evidence: "
+            "Claimed work lacks allowed value-category evidence "
+            f"({allowed_labels}): "
             + ", ".join(examples)
+            + ". Remediation: add category evidence to each shallow claimed-work record."
         )
 
     return _build_benchmark_item(
@@ -1375,6 +1560,8 @@ def _evaluate_anti_make_work_check(
             "durable_evidence_count": durable_count,
             "shallow_work_item_count": len(shallow_items),
             "status_language_only_count": status_only_count,
+            "allowed_value_categories": _allowed_value_category_guidance(),
+            "value_category_counts": value_category_counts,
             "durable_examples": [item for item in assessments if item["durable"]][:5],
             "shallow_examples": shallow_items[:5],
         },
