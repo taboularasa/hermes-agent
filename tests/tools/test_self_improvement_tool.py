@@ -533,6 +533,83 @@ def test_raw_throughput_does_not_pass_operator_value_alignment(tmp_path):
     assert "decision support" in benchmark["summary"]["operator_value_alignment"]
 
 
+def test_leading_indicator_plateau_hold_keeps_operator_value_guardrail_active(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    history_path = tmp_path / "history.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "volume-1",
+                    "occurredAt": recent,
+                    "summary": "Implemented HAD-1101 benchmark update.",
+                    "changedFiles": ["tools/self_improvement_tool.py"],
+                    "tests": ["pytest tests/tools/test_self_improvement_tool.py passed"],
+                },
+                {
+                    "id": "volume-2",
+                    "occurredAt": recent,
+                    "summary": "Opened PR #1101 with commit abc1234.",
+                    "pullRequests": ["https://github.com/taboularasa/hermes-agent/pull/1101"],
+                    "commitShas": ["abc1234"],
+                },
+            ]
+        },
+    )
+    _write_json(codex_path, {"runs": {"codex_1": {"run_id": "codex_1", "completed_at": recent}}})
+    _write_json(ctx_path, {"sessions": {"ctx_1": {"session_id": "ctx_1", "updated_at": recent}}})
+    _write_json(
+        history_path,
+        {
+            "version": 1,
+            "evaluations": [
+                {
+                    "evaluated_at": (now - timedelta(hours=42 - idx * 6)).isoformat(),
+                    "checks": {
+                        "operator_value_alignment": {
+                            "score": score,
+                            "status": "pass" if score >= 0.85 else "fail",
+                        }
+                    },
+                }
+                for idx, score in enumerate([0.878, 0.878, 0.878, 0.878, 0.878, 0.45, 0.45])
+            ],
+        },
+    )
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=history_path,
+        now=now,
+        persist=False,
+    )
+
+    operator_value = benchmark["checks"]["operator_value_alignment"]
+    assert operator_value["status"] == "fail"
+    assert operator_value["score"] == 0.45
+
+    drift = benchmark["checks"]["leading_indicator_drift"]
+    assert drift["status"] == "pass"
+    assert drift["metrics"]["triggered_harbingers"] == []
+    assert drift["metrics"]["stabilization_hold"]["active"] is True
+    assert "stabilization hold" in drift["detail"]
+    assert "leading_indicator_drift" not in benchmark["critical_failures"]
+    assert "operator_value_alignment" in benchmark["critical_failures"]
+    assert benchmark["issue_selection"]["quantity_guardrail_active"] is True
+    assert benchmark["issue_selection"]["suppress_raw_throughput_selection"] is True
+
+
 def test_leading_indicator_drift_fails_when_operator_value_regresses(tmp_path):
     now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
     recent = now.isoformat()
@@ -604,6 +681,76 @@ def test_leading_indicator_drift_fails_when_operator_value_regresses(tmp_path):
     assert "leading_indicator_drift" in benchmark["critical_failures"]
     assert benchmark["direction"] == "negative"
     assert benchmark["trend"] == "regressing"
+
+
+def test_leading_indicator_drift_reports_exact_degraded_plateau_hold():
+    scores = [0.878, 0.878, 0.878, 0.878, 0.878, 0.4292, 0.4292, 0.4292]
+    history = {
+        "version": 1,
+        "evaluations": [
+            {
+                "checks": {
+                    "operator_value_alignment": {
+                        "score": score,
+                        "status": "pass" if score >= 0.85 else "fail",
+                    }
+                }
+            }
+            for score in scores[:-1]
+        ],
+    }
+    operator_value = {"score": scores[-1], "status": "fail", "metrics": {}}
+
+    drift = self_improvement_tool._evaluate_leading_indicator_drift_check(
+        operator_value,
+        history,
+        {"operator_value_alignment": operator_value},
+    )
+
+    scorecard = drift["metrics"]["harbinger_scorecard"]
+    assert drift["status"] == "pass"
+    assert drift["score"] == 0.85
+    assert drift["metrics"]["triggered_harbingers"] == []
+    assert drift["metrics"]["recommended_mitigations"] == []
+    assert drift["metrics"]["stabilization_hold"]["active"] is True
+    assert drift["metrics"]["stabilization_hold"]["state"] == "stabilization_hold"
+    assert drift["metrics"]["stabilization_hold"]["recent_scores"] == [0.4292, 0.4292, 0.4292]
+    assert scorecard["critical_slowing_down"]["triggered"] is False
+    assert scorecard["critical_slowing_down"]["evidence"]["active_signal"] is True
+    assert scorecard["variance_explosion"]["triggered"] is False
+    assert scorecard["variance_explosion"]["evidence"]["active_signal"] is True
+
+
+def test_leading_indicator_drift_passes_recovered_low_variance_state():
+    scores = [0.878, 0.878, 0.4292, 0.878, 0.878, 0.878]
+    history = {
+        "version": 1,
+        "evaluations": [
+            {
+                "checks": {
+                    "operator_value_alignment": {
+                        "score": score,
+                        "status": "pass" if score >= 0.85 else "fail",
+                    }
+                }
+            }
+            for score in scores[:-1]
+        ],
+    }
+    operator_value = {"score": scores[-1], "status": "pass", "metrics": {}}
+
+    drift = self_improvement_tool._evaluate_leading_indicator_drift_check(
+        operator_value,
+        history,
+        {"operator_value_alignment": operator_value},
+    )
+
+    assert drift["status"] == "pass"
+    assert drift["score"] == 1.0
+    assert drift["metrics"]["triggered_harbingers"] == []
+    assert drift["metrics"]["stabilization_hold"]["active"] is False
+    assert drift["metrics"]["stabilization_hold"]["state"] == "recovered_low_variance"
+    assert drift["detail"] == "Operator-value leading indicator is stable or improving."
 
 
 def test_leading_indicator_drift_flags_critical_slowing_down(tmp_path):

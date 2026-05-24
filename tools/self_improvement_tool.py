@@ -1541,6 +1541,79 @@ def _population_stddev(values: list[float]) -> float:
     return (sum((value - mean) ** 2 for value in values) / len(values)) ** 0.5
 
 
+def _detect_stabilization_hold(scores: list[float]) -> dict[str, Any]:
+    hold_window = 3
+    delta_tolerance = 0.001
+    range_tolerance = 0.005
+    min_recovery_gap = 0.05
+
+    recent_scores = scores[-hold_window:] if len(scores) >= hold_window else list(scores)
+    recent_deltas = [
+        recent_scores[idx] - recent_scores[idx - 1]
+        for idx in range(1, len(recent_scores))
+    ]
+    prior_scores = scores[:-hold_window]
+    prior_peak = max(prior_scores) if prior_scores else None
+    current_score = scores[-1] if scores else None
+    recovery_gap = (
+        prior_peak - current_score
+        if prior_peak is not None and current_score is not None
+        else 0.0
+    )
+    recent_range = max(recent_scores) - min(recent_scores) if recent_scores else 0.0
+    low_variance_hold = (
+        len(recent_scores) == hold_window
+        and recent_range <= range_tolerance
+        and len(recent_deltas) == hold_window - 1
+        and all(abs(delta) <= delta_tolerance for delta in recent_deltas)
+    )
+    active = (
+        len(scores) >= 6
+        and current_score is not None
+        and _check_status(current_score) != "pass"
+        and recovery_gap >= min_recovery_gap
+        and low_variance_hold
+    )
+    recovered = (
+        len(scores) >= 6
+        and current_score is not None
+        and _check_status(current_score) == "pass"
+        and low_variance_hold
+    )
+    state = "none"
+    if active:
+        state = "stabilization_hold"
+    elif recovered:
+        state = "recovered_low_variance"
+
+    return {
+        "active": active,
+        "recovered": recovered,
+        "settled": active or recovered,
+        "state": state,
+        "sample_count": len(scores),
+        "hold_window": hold_window,
+        "recent_scores": [round(score, 4) for score in recent_scores],
+        "recent_deltas": [round(delta, 4) for delta in recent_deltas],
+        "prior_peak": _rounded_float(prior_peak),
+        "current_score": _rounded_float(current_score),
+        "recovery_gap": round(recovery_gap, 4),
+        "recent_range": round(recent_range, 4),
+        "delta_tolerance": delta_tolerance,
+        "range_tolerance": range_tolerance,
+        "mitigation": (
+            "Hold the operator-value guardrail steady instead of escalating inactive drift."
+            if active
+            else ""
+        ),
+        "next_action": (
+            "Require recovery in operator-value evidence before treating the plateau as resolved."
+            if active
+            else ""
+        ),
+    }
+
+
 def _coerce_check_status(value: Any) -> str:
     score = _coerce_score(value)
     if isinstance(value, dict):
@@ -1631,7 +1704,11 @@ def _harbinger_payload(
     }
 
 
-def _detect_critical_slowing_down(scores: list[float]) -> dict[str, Any]:
+def _detect_critical_slowing_down(
+    scores: list[float],
+    stabilization_hold: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    stabilization_hold = stabilization_hold or _detect_stabilization_hold(scores)
     recent_scores = [round(score, 4) for score in scores[-5:]]
     prior_peak = max(scores[:-1]) if len(scores) > 1 else (scores[-1] if scores else None)
     current_score = scores[-1] if scores else None
@@ -1640,12 +1717,13 @@ def _detect_critical_slowing_down(scores: list[float]) -> dict[str, Any]:
     recent_deltas = deltas[-3:]
     flat_or_negative_count = sum(1 for delta in recent_deltas if delta <= 0.01)
     average_recent_delta = sum(recent_deltas) / len(recent_deltas) if recent_deltas else None
-    triggered = (
+    active_signal = (
         len(scores) >= 5
         and recovery_gap >= 0.05
         and len(recent_deltas) >= 3
         and flat_or_negative_count == len(recent_deltas)
     )
+    triggered = active_signal and not stabilization_hold["settled"]
 
     return _harbinger_payload(
         triggered=triggered,
@@ -1658,24 +1736,33 @@ def _detect_critical_slowing_down(scores: list[float]) -> dict[str, Any]:
             "recent_deltas": [round(delta, 4) for delta in recent_deltas],
             "average_recent_delta": _rounded_float(average_recent_delta),
             "flat_or_negative_delta_count": flat_or_negative_count,
+            "active_signal": active_signal,
+            "stabilization_hold_active": stabilization_hold["active"],
+            "settled_operator_value_state": stabilization_hold["state"],
+            "stabilization_hold": stabilization_hold,
         },
         mitigation="Stop expanding self-improvement scope until the lagging operator-value signal recovers.",
         next_action="Select the next maintenance item only if it restores operator decision support plus verified change evidence.",
     )
 
 
-def _detect_variance_explosion(scores: list[float]) -> dict[str, Any]:
+def _detect_variance_explosion(
+    scores: list[float],
+    stabilization_hold: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    stabilization_hold = stabilization_hold or _detect_stabilization_hold(scores)
     recent_scores = scores[-4:]
     baseline_scores = scores[:-4]
     baseline_stddev = _population_stddev(baseline_scores)
     recent_stddev = _population_stddev(recent_scores)
     recent_range = max(recent_scores) - min(recent_scores) if recent_scores else 0.0
-    triggered = (
+    active_signal = (
         len(scores) >= 6
         and len(recent_scores) >= 4
         and recent_range >= 0.2
         and recent_stddev >= max(0.08, baseline_stddev * 3)
     )
+    triggered = active_signal and not stabilization_hold["settled"]
 
     return _harbinger_payload(
         triggered=triggered,
@@ -1686,6 +1773,10 @@ def _detect_variance_explosion(scores: list[float]) -> dict[str, Any]:
             "baseline_stddev": round(baseline_stddev, 4),
             "recent_stddev": round(recent_stddev, 4),
             "recent_range": round(recent_range, 4),
+            "active_signal": active_signal,
+            "stabilization_hold_active": stabilization_hold["active"],
+            "settled_operator_value_state": stabilization_hold["state"],
+            "stabilization_hold": stabilization_hold,
         },
         mitigation="Treat the benchmark as unstable and stop optimizing for throughput until score variance narrows.",
         next_action="Run one focused stabilization pass and require the next run to include low-variance evidence before broadening lane selection.",
@@ -1761,9 +1852,16 @@ def _build_leading_indicator_scorecard(
 ) -> dict[str, Any]:
     series = _benchmark_indicator_series(history, current_checks)
     operator_scores = _check_score_series(series, "operator_value_alignment")
+    stabilization_hold = _detect_stabilization_hold(operator_scores)
     scorecard = {
-        "critical_slowing_down": _detect_critical_slowing_down(operator_scores),
-        "variance_explosion": _detect_variance_explosion(operator_scores),
+        "critical_slowing_down": _detect_critical_slowing_down(
+            operator_scores,
+            stabilization_hold,
+        ),
+        "variance_explosion": _detect_variance_explosion(
+            operator_scores,
+            stabilization_hold,
+        ),
         "flickering": _detect_flickering(series),
         "correlation_explosion": _detect_correlation_explosion(series),
     }
@@ -1775,6 +1873,7 @@ def _build_leading_indicator_scorecard(
     return {
         "series_sample_count": len(series),
         "operator_value_score_series": [round(score, 4) for score in operator_scores[-8:]],
+        "stabilization_hold": stabilization_hold,
         "scorecard": scorecard,
         "triggered_harbingers": triggered_harbingers,
         "recommended_mitigations": [
@@ -1814,6 +1913,12 @@ def _evaluate_leading_indicator_drift_check(
             + ", ".join(triggered_harbingers)
             + "; run mitigation before expanding self-improvement scope."
         )
+    elif indicator_payload["stabilization_hold"]["active"]:
+        score = 0.85
+        detail = (
+            "Operator-value leading indicator is in stabilization hold after a degraded plateau; "
+            "keep operator-value guardrails active until recovery."
+        )
     elif previous_score is None:
         score = 1.0
         detail = "No prior operator-value score; drift not assessed."
@@ -1833,9 +1938,10 @@ def _evaluate_leading_indicator_drift_check(
             "current_operator_value_score": round(current_score, 4),
             "operator_value_delta": delta,
             "prior_operator_value_sample_count": len(prior_scores),
-            "leading_indicator_contract_version": "harbinger_scorecard.v1",
+            "leading_indicator_contract_version": "harbinger_scorecard.v2",
             "series_sample_count": indicator_payload["series_sample_count"],
             "operator_value_score_series": indicator_payload["operator_value_score_series"],
+            "stabilization_hold": indicator_payload["stabilization_hold"],
             "triggered_harbingers": triggered_harbingers,
             "harbinger_scorecard": indicator_payload["scorecard"],
             "recommended_mitigations": indicator_payload["recommended_mitigations"],
