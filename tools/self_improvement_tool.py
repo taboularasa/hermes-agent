@@ -80,6 +80,49 @@ _CLAIM_CONTAINER_KEYS = {
     "lane_links",
     "self_improvement_focus",
 }
+_OPERATOR_DECISION_SUPPORT_STRUCTURED_KEYS = {
+    "blocker",
+    "blockers",
+    "decision",
+    "decisions",
+    "manual_step",
+    "manual_steps",
+    "next_decision",
+    "next_operator_decision",
+    "operator_decision_support",
+    "recommended_next_decision",
+    "selected_issue",
+    "selected_issue_id",
+    "selected_work",
+    "trade_off",
+    "trade_offs",
+    "tradeoff",
+    "tradeoffs",
+}
+_OPERATOR_DECISION_SUPPORT_EVIDENCE_FIELDS = {
+    "blocker": "blocker",
+    "blockers": "blocker",
+    "decision": "decision",
+    "decisions": "decision",
+    "decision_owner": "owner",
+    "manual_step": "manual_step",
+    "manual_steps": "manual_step",
+    "next_decision": "next_decision",
+    "next_operator_decision": "next_decision",
+    "operator_decision_support": "operator_decision_support",
+    "operator_owner": "owner",
+    "owner": "owner",
+    "owners": "owner",
+    "recommended_next_decision": "next_decision",
+    "selected_issue": "selected_work",
+    "selected_issue_id": "selected_work",
+    "selected_work": "selected_work",
+    "trade_off": "tradeoff",
+    "trade_offs": "tradeoff",
+    "tradeoff": "tradeoff",
+    "tradeoffs": "tradeoff",
+    "work_owner": "owner",
+}
 _DURABLE_EVIDENCE_KEYS = {
     "artifact_path",
     "artifact_paths",
@@ -117,6 +160,7 @@ _DURABLE_EVIDENCE_KEYS = {
     "test_results",
     "tests",
     "verification",
+    *_OPERATOR_DECISION_SUPPORT_STRUCTURED_KEYS,
 }
 _ALLOWED_VALUE_CATEGORIES = (
     ("operator_decision_support", "operator decision support"),
@@ -264,6 +308,7 @@ _OPERATOR_DECISION_SUPPORT_SIGNALS = {
     "decisions",
     "operator_decision_support",
     "risk_reduction",
+    *_OPERATOR_DECISION_SUPPORT_STRUCTURED_KEYS,
 }
 _VERIFIED_SYSTEM_CHANGE_SIGNALS = {
     "artifact",
@@ -1280,6 +1325,114 @@ def _collect_record_text(value: Any, key: str = "") -> list[str]:
     return []
 
 
+def _redact_operator_evidence_value(text: str) -> str:
+    redacted = re.sub(
+        r"\b(Bearer\s+)[A-Za-z0-9._~+/=-]{12,}",
+        r"\1[REDACTED]",
+        text,
+        flags=re.IGNORECASE,
+    )
+    redacted = re.sub(
+        r"\b(token|api[_-]?key|password|secret)\s*[:=]\s*[^\s,;]+",
+        r"\1=[REDACTED]",
+        redacted,
+        flags=re.IGNORECASE,
+    )
+    return redacted
+
+
+def _compact_operator_evidence_value(value: Any, *, limit: int = 240) -> Optional[str]:
+    if not _value_has_content(value):
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+    elif isinstance(value, (int, float, bool)):
+        text = str(value)
+    else:
+        try:
+            text = json.dumps(value, ensure_ascii=True, sort_keys=True, default=str)
+        except TypeError:
+            text = str(value)
+    text = text.replace("\\n", " ").replace("\\r", " ").replace("\\t", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return None
+    text = _redact_operator_evidence_value(text)
+    if len(text) > limit:
+        return text[: limit - 3].rstrip() + "..."
+    return text
+
+
+def _dedupe_operator_evidence(items: Iterable[dict[str, str]]) -> list[dict[str, str]]:
+    deduped: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in items:
+        key = (
+            str(item.get("field") or ""),
+            str(item.get("source_key") or ""),
+            str(item.get("value") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
+def _collect_operator_decision_support_evidence(value: Any, key: str = "") -> list[dict[str, str]]:
+    normalized_key = _normalize_evidence_key(key)
+    if normalized_key in _TEXT_EVIDENCE_EXCLUDED_KEYS:
+        return []
+
+    field = _OPERATOR_DECISION_SUPPORT_EVIDENCE_FIELDS.get(normalized_key)
+    if field:
+        compact_value = _compact_operator_evidence_value(value)
+        if compact_value is not None:
+            return [
+                {
+                    "field": field,
+                    "source_key": normalized_key,
+                    "value": compact_value,
+                }
+            ]
+        return []
+
+    if isinstance(value, dict):
+        evidence: list[dict[str, str]] = []
+        for child_key, child_value in value.items():
+            evidence.extend(
+                _collect_operator_decision_support_evidence(child_value, str(child_key))
+            )
+        return _dedupe_operator_evidence(evidence)
+    if isinstance(value, list):
+        evidence = []
+        for child_value in value:
+            evidence.extend(_collect_operator_decision_support_evidence(child_value, key))
+        return _dedupe_operator_evidence(evidence)
+    return []
+
+
+def _operator_decision_support_text_evidence(text: str) -> list[dict[str, str]]:
+    evidence: list[dict[str, str]] = []
+    for label, pattern in _DURABLE_TEXT_PATTERNS:
+        if label != "operator_decision_support":
+            continue
+        match = pattern.search(text)
+        if not match:
+            continue
+        compact_value = _compact_operator_evidence_value(match.group(0))
+        if compact_value is None:
+            continue
+        evidence.append(
+            {
+                "field": "operator_decision_support",
+                "source_key": "text_match",
+                "value": compact_value,
+            }
+        )
+    return _dedupe_operator_evidence(evidence)
+
+
 def _record_has_claim_field(value: Any, key: str = "") -> bool:
     normalized_key = _normalize_evidence_key(key)
     if normalized_key in _CLAIM_TEXT_KEYS and _value_has_content(value):
@@ -1450,9 +1603,17 @@ def _assess_make_work_item(item: dict[str, Any]) -> dict[str, Any]:
 
 def _assess_operator_value_item(item: dict[str, Any]) -> dict[str, Any]:
     make_work = _assess_make_work_item(item)
+    record = item.get("record") or {}
+    text = str(item.get("text") or "")
     durable_signals = set(make_work.get("signals") or [])
     decision_support_signals = durable_signals.intersection(_OPERATOR_DECISION_SUPPORT_SIGNALS)
     verified_change_signals = durable_signals.intersection(_VERIFIED_SYSTEM_CHANGE_SIGNALS)
+    operator_decision_support_evidence = _collect_operator_decision_support_evidence(record)
+    if decision_support_signals and not operator_decision_support_evidence:
+        operator_decision_support_evidence = _operator_decision_support_text_evidence(text)
+    operator_decision_support_evidence = _dedupe_operator_evidence(
+        operator_decision_support_evidence
+    )[:8]
 
     item_score = 0.0
     issue = make_work.get("issue")
@@ -1478,6 +1639,7 @@ def _assess_operator_value_item(item: dict[str, Any]) -> dict[str, Any]:
         "signals": sorted(durable_signals),
         "operator_decision_support": bool(decision_support_signals),
         "operator_decision_support_signals": sorted(decision_support_signals),
+        "operator_decision_support_evidence": operator_decision_support_evidence,
         "verified_system_change": bool(verified_change_signals),
         "verified_system_change_signals": sorted(verified_change_signals),
         "aligned": bool(decision_support_signals and verified_change_signals),
@@ -1568,6 +1730,21 @@ def _evaluate_anti_make_work_check(
     )
 
 
+def _operator_value_example(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source": item.get("source"),
+        "id": item.get("id"),
+        "timestamp": item.get("timestamp"),
+        "score": item.get("score"),
+        "issue": item.get("issue"),
+        "aligned": item.get("aligned"),
+        "verified_system_change": item.get("verified_system_change"),
+        "verified_system_change_signals": item.get("verified_system_change_signals") or [],
+        "operator_decision_support_signals": item.get("operator_decision_support_signals") or [],
+        "evidence": item.get("operator_decision_support_evidence") or [],
+    }
+
+
 def _evaluate_operator_value_alignment_check(
     *,
     journal_path: Path,
@@ -1596,6 +1773,28 @@ def _evaluate_operator_value_alignment_check(
     verified_change_count = sum(1 for item in assessments if item["verified_system_change"])
     aligned_count = sum(1 for item in assessments if item["aligned"])
     issue_items = [item for item in assessments if item.get("issue")]
+    decision_support_examples = [
+        _operator_value_example(item)
+        for item in assessments
+        if item["operator_decision_support"]
+    ][:5]
+    missing_decision_support_examples = [
+        _operator_value_example(item)
+        for item in assessments
+        if item["verified_system_change"] and not item["operator_decision_support"]
+    ][:5]
+    decision_support_fields = sorted(
+        {
+            evidence.get("field")
+            for item in decision_support_examples
+            for evidence in item.get("evidence", [])
+            if evidence.get("field")
+        }
+    )
+    decision_support_evidence_count = sum(
+        len(item.get("evidence") or [])
+        for item in decision_support_examples
+    )
 
     if assessed_count == 0:
         score = 1.0
@@ -1615,6 +1814,12 @@ def _evaluate_operator_value_alignment_check(
             detail = "Claimed work supports operator decisions, but lacks verified system change."
         else:
             detail = "Operator-value evidence is incomplete across claimed work."
+        if decision_support_fields:
+            detail += (
+                " Decision-support evidence fields: "
+                + ", ".join(decision_support_fields)
+                + "."
+            )
 
     return _build_benchmark_item(
         "operator_value_alignment",
@@ -1627,6 +1832,8 @@ def _evaluate_operator_value_alignment_check(
             "assessed_work_item_count": assessed_count,
             "durable_evidence_count": durable_count,
             "operator_decision_support_count": decision_support_count,
+            "operator_decision_support_evidence_count": decision_support_evidence_count,
+            "operator_decision_support_fields": decision_support_fields,
             "verified_system_change_count": verified_change_count,
             "aligned_work_item_count": aligned_count,
             "operator_decision_support_rate": (
@@ -1647,6 +1854,8 @@ def _evaluate_operator_value_alignment_check(
             "quantity_guardrail_basis": "average_evidence_quality_not_item_count",
             "issue_examples": issue_items[:5],
             "aligned_examples": [item for item in assessments if item["aligned"]][:5],
+            "operator_decision_support_examples": decision_support_examples,
+            "missing_operator_decision_support_examples": missing_decision_support_examples,
         },
     )
 
@@ -2196,14 +2405,51 @@ def _build_issue_selection_summary(
     }
 
 
+def _operator_decision_support_summary(metrics: dict[str, Any]) -> str:
+    fields = [
+        str(item)
+        for item in metrics.get("operator_decision_support_fields", [])
+        if str(item).strip()
+    ]
+    if fields:
+        examples = metrics.get("operator_decision_support_examples") or []
+        first = examples[0] if examples else {}
+        source = first.get("source") or "unknown"
+        item_id = first.get("id") or "unknown"
+        return (
+            "Operator decision-support evidence captured "
+            f"({', '.join(fields)}) in {source}:{item_id}."
+        )
+
+    missing = metrics.get("missing_operator_decision_support_examples") or []
+    if missing:
+        examples = [
+            f"{item.get('source')}:{item.get('id') or 'unknown'}"
+            for item in missing[:3]
+        ]
+        return (
+            "Operator decision-support evidence missing for verified system changes: "
+            + ", ".join(examples)
+            + "."
+        )
+
+    if int(metrics.get("assessed_work_item_count") or 0) == 0:
+        return "No claimed work items required operator decision-support evidence."
+    return "No explicit operator decision-support evidence was captured."
+
+
 def _build_operator_summary(
     checks: dict[str, dict[str, Any]],
     issue_selection: dict[str, Any],
 ) -> dict[str, str]:
     operator_value = checks["operator_value_alignment"]
     drift = checks["leading_indicator_drift"]
+    operator_value_metrics = operator_value.get("metrics") or {}
     return {
         "operator_value_alignment": str(operator_value.get("detail") or ""),
+        "operator_decision_support_evidence": _operator_decision_support_summary(
+            operator_value_metrics
+        ),
         "leading_indicator_drift": str(drift.get("detail") or ""),
         "issue_selection": str(issue_selection.get("detail") or ""),
     }
@@ -2323,6 +2569,25 @@ def evaluate_self_improvement_benchmark(
     if leading_indicator_drift.get("status") == "fail":
         direction = "negative"
         trend = "regressing"
+    operator_value_metrics = operator_value_alignment.get("metrics", {})
+    operator_value_checks = {
+        "operator_decision_support_rate": (
+            operator_value_metrics.get("operator_decision_support_rate")
+        ),
+        "verified_system_change_rate": (
+            operator_value_metrics.get("verified_system_change_rate")
+        ),
+        "aligned_work_rate": (
+            operator_value_metrics.get("aligned_work_rate")
+        ),
+        "operator_value_score": operator_value_alignment.get("score"),
+        "operator_decision_support_evidence": (
+            operator_value_metrics.get("operator_decision_support_examples") or []
+        ),
+        "missing_operator_decision_support": (
+            operator_value_metrics.get("missing_operator_decision_support_examples") or []
+        ),
+    }
 
     benchmark = {
         "contract_version": BENCHMARK_CONTRACT_VERSION,
@@ -2335,18 +2600,7 @@ def evaluate_self_improvement_benchmark(
         "checks": checks,
         "critical_failures": critical_failures,
         "operator_value_score": operator_value_alignment.get("score"),
-        "operator_value_checks": {
-            "operator_decision_support_rate": (
-                operator_value_alignment.get("metrics", {}).get("operator_decision_support_rate")
-            ),
-            "verified_system_change_rate": (
-                operator_value_alignment.get("metrics", {}).get("verified_system_change_rate")
-            ),
-            "aligned_work_rate": (
-                operator_value_alignment.get("metrics", {}).get("aligned_work_rate")
-            ),
-            "operator_value_score": operator_value_alignment.get("score"),
-        },
+        "operator_value_checks": operator_value_checks,
         "anti_make_work": {
             "status": anti_make_work_check.get("status"),
             "score": anti_make_work_check.get("score"),
@@ -2369,6 +2623,8 @@ def evaluate_self_improvement_benchmark(
                 "direction": benchmark["direction"],
                 "critical_failures": benchmark["critical_failures"],
                 "operator_value_score": benchmark["operator_value_score"],
+                "operator_value_checks": benchmark["operator_value_checks"],
+                "issue_selection": benchmark["issue_selection"],
                 "checks": {
                     name: {
                         "score": check.get("score"),
