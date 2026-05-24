@@ -627,6 +627,115 @@ def test_raw_throughput_does_not_pass_operator_value_alignment(tmp_path):
     assert "decision support" in benchmark["summary"]["operator_value_alignment"]
 
 
+def test_operator_value_report_preserves_decision_support_evidence(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "decision-report",
+                    "occurredAt": recent,
+                    "summary": "Implemented HAD-1020 operator-value reporting.",
+                    "selectedWork": "HAD-1020: raise operator-value alignment in reporting.",
+                    "nextDecision": "Operator chooses whether to backfill history or continue with the next benchmark issue.",
+                    "blocker": "No local blocker; PR publication still depends on GitHub auth.",
+                    "owner": "operator",
+                    "tradeoff": "Keep verified system-change evidence strict while adding compact decision-support excerpts.",
+                    "changedFiles": ["tools/self_improvement_tool.py"],
+                    "tests": ["pytest tests/tools/test_self_improvement_tool.py passed"],
+                }
+            ]
+        },
+    )
+    _write_json(codex_path, {"runs": {"codex_1": {"run_id": "codex_1", "completed_at": recent}}})
+    _write_json(ctx_path, {"sessions": {"ctx_1": {"session_id": "ctx_1", "updated_at": recent}}})
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    operator_value = benchmark["checks"]["operator_value_alignment"]
+    assert operator_value["status"] == "pass"
+    assert operator_value["metrics"]["operator_decision_support_count"] == 1
+    assert operator_value["metrics"]["verified_system_change_count"] == 1
+    evidence = operator_value["metrics"]["operator_decision_support_examples"][0]["evidence"]
+    assert [item["field"] for item in evidence] == [
+        "selected_work",
+        "next_decision",
+        "blocker",
+        "owner",
+        "tradeoff",
+    ]
+    assert "backfill history" in evidence[1]["value"]
+    assert benchmark["operator_value_checks"]["operator_decision_support_evidence"] == [
+        operator_value["metrics"]["operator_decision_support_examples"][0]
+    ]
+    assert "selected_work" in benchmark["summary"]["operator_decision_support_evidence"]
+    assert "next_decision" in benchmark["summary"]["operator_decision_support_evidence"]
+
+
+def test_benchmark_history_persists_operator_decision_support_snapshot(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    history_path = tmp_path / "history.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "history-decision-report",
+                    "occurredAt": recent,
+                    "summary": "Implemented HAD-1020 benchmark history reporting.",
+                    "selectedWork": "HAD-1020 benchmark history snapshot.",
+                    "nextDecision": "Operator can decide whether the compact report is enough for the next self-improvement issue.",
+                    "changedFiles": ["tools/self_improvement_tool.py"],
+                    "tests": ["pytest tests/tools/test_self_improvement_tool.py passed"],
+                }
+            ]
+        },
+    )
+    _write_json(codex_path, {"runs": {"codex_1": {"run_id": "codex_1", "completed_at": recent}}})
+    _write_json(ctx_path, {"sessions": {"ctx_1": {"session_id": "ctx_1", "updated_at": recent}}})
+
+    self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=history_path,
+        now=now,
+        persist=True,
+    )
+
+    history = json.loads(history_path.read_text(encoding="utf-8"))
+    run = history["runs"][-1]
+    assert run["operator_value_checks"]["operator_decision_support_rate"] == 1.0
+    evidence = run["operator_value_checks"]["operator_decision_support_evidence"][0]["evidence"]
+    assert [item["field"] for item in evidence] == ["selected_work", "next_decision"]
+    assert "compact report" in evidence[1]["value"]
+    assert run["issue_selection"]["recommended_focus"] == "normal lane selection"
+
+
 def test_leading_indicator_plateau_hold_keeps_operator_value_guardrail_active(tmp_path):
     now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
     recent = now.isoformat()
