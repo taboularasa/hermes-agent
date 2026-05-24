@@ -390,10 +390,100 @@ def test_status_language_only_work_fails_anti_make_work_check(tmp_path):
     anti_make_work = benchmark["checks"]["anti_make_work_check"]
     assert anti_make_work["status"] == "fail"
     assert anti_make_work["score"] == 0.0
+    assert "allowed value-category evidence" in anti_make_work["detail"]
+    assert "operator decision support" in anti_make_work["detail"]
+    assert "durable asset created" in anti_make_work["detail"]
+    assert "control/ownership preserved" in anti_make_work["detail"]
+    assert "incident risk reduced" in anti_make_work["detail"]
+    assert "system capability changed" in anti_make_work["detail"]
+    assert "Remediation" in anti_make_work["detail"]
     assert anti_make_work["metrics"]["assessed_work_item_count"] == 2
     assert anti_make_work["metrics"]["status_language_only_count"] == 2
+    assert [
+        item["label"]
+        for item in anti_make_work["metrics"]["allowed_value_categories"]
+    ] == [
+        "operator decision support",
+        "durable asset created",
+        "control/ownership preserved",
+        "incident risk reduced",
+        "system capability changed",
+    ]
+    assert anti_make_work["metrics"]["value_category_counts"] == {
+        "operator_decision_support": 0,
+        "durable_asset_created": 0,
+        "control_ownership_preserved": 0,
+        "incident_risk_reduced": 0,
+        "system_capability_changed": 0,
+    }
+    for example in anti_make_work["metrics"]["shallow_examples"]:
+        assert example["value_categories"] == []
+        assert example["remediation"].startswith("Add evidence for at least one allowed value category")
+        assert example["issue"] == "status_language_without_value_category_evidence"
     assert "anti_make_work_check" in benchmark["critical_failures"]
+    assert "reliability_gate" not in benchmark["critical_failures"]
+    assert benchmark["issue_selection"]["blocked_checks"] == [
+        "anti_make_work_check",
+        "operator_value_alignment",
+    ]
     assert benchmark["project_score"] < 100.0
+
+
+def test_operator_decision_support_passes_anti_make_work_value_category(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "decision-support",
+                    "occurredAt": recent,
+                    "summary": "Prepared operator decision support for HAD-1100.",
+                    "operatorDecisionSupport": (
+                        "Operator can choose between preserving strict anti-make-work "
+                        "enforcement or relaxing the check, with risk and remediation called out."
+                    ),
+                }
+            ]
+        },
+    )
+    _write_json(
+        codex_path,
+        {"runs": {"codex_1": {"run_id": "codex_1", "status": "completed", "completed_at": recent}}},
+    )
+    _write_json(
+        ctx_path,
+        {"sessions": {"ctx_1": {"session_id": "ctx_1", "active": False, "updated_at": recent}}},
+    )
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    anti_make_work = benchmark["checks"]["anti_make_work_check"]
+    assert anti_make_work["status"] == "pass"
+    assert anti_make_work["metrics"]["assessed_work_item_count"] == 1
+    assert anti_make_work["metrics"]["durable_evidence_count"] == 1
+    assert anti_make_work["metrics"]["value_category_counts"]["operator_decision_support"] == 1
+    assert anti_make_work["metrics"]["value_category_counts"]["durable_asset_created"] == 0
+    assert anti_make_work["metrics"]["shallow_work_item_count"] == 0
+    assert anti_make_work["metrics"]["durable_examples"][0]["value_categories"] == [
+        "operator_decision_support"
+    ]
+    assert anti_make_work["metrics"]["durable_examples"][0]["remediation"] is None
 
 
 def test_durable_work_evidence_passes_anti_make_work_check(tmp_path):
@@ -473,6 +563,10 @@ def test_durable_work_evidence_passes_anti_make_work_check(tmp_path):
     assert anti_make_work["metrics"]["assessed_work_item_count"] == 2
     assert anti_make_work["metrics"]["durable_evidence_count"] == 2
     assert anti_make_work["metrics"]["shallow_work_item_count"] == 0
+    assert anti_make_work["metrics"]["value_category_counts"]["durable_asset_created"] == 2
+    assert anti_make_work["metrics"]["value_category_counts"]["system_capability_changed"] == 2
+    assert "durable asset created" in anti_make_work["detail"]
+    assert "system capability changed" in anti_make_work["detail"]
     assert benchmark["critical_failures"] == []
 
 
