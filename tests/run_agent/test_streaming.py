@@ -862,6 +862,60 @@ class TestCodexStreamCallbacks:
 
         assert touch_calls.count("receiving stream response") == 3
 
+    def test_codex_stream_recovers_output_items_when_sdk_completed_output_is_none(self):
+        from run_agent import AIAgent
+
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://chatgpt.com/backend-api/codex",
+            model="gpt-5.3-codex",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "codex_responses"
+        agent.provider = "openai-codex"
+        agent._interrupt_requested = False
+
+        done_item = SimpleNamespace(
+            type="message",
+            status="completed",
+            content=[SimpleNamespace(type="output_text", text="Recovered")],
+        )
+
+        class _SdkCrashStream:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def __iter__(self):
+                yield SimpleNamespace(
+                    type="response.output_item.done",
+                    item=done_item,
+                )
+                yield SimpleNamespace(
+                    type="response.output_text.delta",
+                    delta="Recovered",
+                )
+                raise TypeError("'NoneType' object is not iterable")
+
+            def get_final_response(self):
+                raise AssertionError("SDK parser crash should recover before final response lookup")
+
+        mock_client = MagicMock()
+        mock_client.responses.stream.return_value = _SdkCrashStream()
+
+        response = agent._run_codex_stream(
+            {"model": "gpt-5.3-codex"},
+            client=mock_client,
+        )
+
+        assert response.status == "completed"
+        assert response.output == [done_item]
+        assert response.output_text == "Recovered"
+
     def test_codex_remote_protocol_error_falls_back_to_create_stream(self):
         from run_agent import AIAgent
         import httpx
