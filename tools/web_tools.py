@@ -2039,12 +2039,24 @@ async def web_extract_tool(
                 "content": r.get("content", ""),
                 "error": r.get("error"),
             }
+            if "provider_status" in r:
+                trimmed["provider_status"] = r["provider_status"]
             if "blocked_by_policy" in r:
                 trimmed["blocked_by_policy"] = r["blocked_by_policy"]
             if "degradation" in r:
                 trimmed["degradation"] = r["degradation"]
             trimmed_results.append(trimmed)
         trimmed_response = {"results": trimmed_results}
+        provider_status = next(
+            (
+                r.get("provider_status")
+                for r in response.get("results", [])
+                if isinstance(r.get("provider_status"), dict)
+            ),
+            None,
+        )
+        if provider_status:
+            trimmed_response["provider_status"] = provider_status
         if extract_provider_name or extract_degradations:
             trimmed_response["meta"] = {
                 "extract_provider": extract_provider_name,

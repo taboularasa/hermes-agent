@@ -23,6 +23,7 @@ import inspect
 import os
 import sys
 from typing import Any, Dict, List
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -473,3 +474,54 @@ class TestErrorResponseShapes:
         assert len(result["results"]) >= 1
         assert "error" in result["results"][0]
         assert result["results"][0]["url"] == "https://example.com"
+
+
+class TestFirecrawlCreditDegradation:
+    """Credit exhaustion is reported as optional degraded coverage."""
+
+    def test_search_credit_exhaustion_includes_stable_degradation_status(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import plugins.web.firecrawl.provider as firecrawl_provider
+
+        client = MagicMock()
+        client.search.side_effect = RuntimeError(
+            "Payment Required: Insufficient credits to perform this request"
+        )
+        monkeypatch.setattr(firecrawl_provider, "_get_firecrawl_client", lambda: client)
+
+        provider = firecrawl_provider.FirecrawlWebSearchProvider()
+        result = provider.search("ontology research provider matrix", limit=3)
+
+        assert result["success"] is False
+        assert result["provider_status"]["provider"] == "firecrawl"
+        assert result["provider_status"]["status"] == "degraded"
+        assert result["provider_status"]["reason"] == "credit_exhausted"
+        assert result["provider_status"]["operator_action_required"] is False
+        assert "optional degraded coverage" in result["error"]
+        assert "direct HTTP/browser capture" in result["error"]
+        assert "unless the run explicitly requires Firecrawl-only" in result["error"]
+
+    def test_extract_credit_exhaustion_includes_fallback_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import plugins.web.firecrawl.provider as firecrawl_provider
+
+        client = MagicMock()
+        client.scrape.side_effect = RuntimeError(
+            "Payment Required: Insufficient credits to perform this request"
+        )
+        monkeypatch.setattr(firecrawl_provider, "_get_firecrawl_client", lambda: client)
+        monkeypatch.setattr(firecrawl_provider, "check_website_access", lambda _url: None)
+
+        provider = firecrawl_provider.FirecrawlWebSearchProvider()
+        result = asyncio.run(provider.extract(["https://example.com/provider.pdf"]))
+
+        assert len(result) == 1
+        entry = result[0]
+        assert entry["url"] == "https://example.com/provider.pdf"
+        assert entry["provider_status"]["provider"] == "firecrawl"
+        assert entry["provider_status"]["status"] == "degraded"
+        assert entry["provider_status"]["operator_action_required"] is False
+        assert "Parallel, Tavily, or Exa" in entry["provider_status"]["fallback_path"]
+        assert "do not ask the operator to replenish credits" in entry["provider_status"]["policy"]

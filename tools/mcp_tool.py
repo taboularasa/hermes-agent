@@ -1996,6 +1996,10 @@ _stdio_pids: Dict[int, str] = {}  # pid -> server_name
 # sessions (e.g. concurrent cron jobs or live user chats).
 _orphan_stdio_pids: set = set()
 
+# Keep orphan cleanup tests from patching process-global os/time functions.
+_orphan_cleanup_kill = os.kill
+_orphan_cleanup_sleep = time.sleep
+
 
 def _snapshot_child_pids() -> set:
     """Return a set of current child process PIDs.
@@ -3356,7 +3360,6 @@ def _kill_orphaned_mcp_children(include_active: bool = False) -> None:
     sessions can still be in flight.
     """
     import signal as _signal
-    import time as _time
 
     with _lock:
         pids: Dict[int, str] = {}
@@ -3375,13 +3378,13 @@ def _kill_orphaned_mcp_children(include_active: bool = False) -> None:
     # Phase 1: SIGTERM (graceful)
     for pid, server_name in pids.items():
         try:
-            os.kill(pid, _signal.SIGTERM)
+            _orphan_cleanup_kill(pid, _signal.SIGTERM)
             logger.debug("Sent SIGTERM to orphaned MCP process %d (%s)", pid, server_name)
         except (ProcessLookupError, PermissionError, OSError):
             pass
 
     # Phase 2: Wait for graceful exit
-    _time.sleep(2)
+    _orphan_cleanup_sleep(2)
 
     # Phase 3: SIGKILL any survivors
     _sigkill = getattr(_signal, "SIGKILL", _signal.SIGTERM)
@@ -3392,7 +3395,7 @@ def _kill_orphaned_mcp_children(include_active: bool = False) -> None:
         if not _pid_exists(pid):
             continue  # Good — exited after SIGTERM
         try:
-            os.kill(pid, _sigkill)
+            _orphan_cleanup_kill(pid, _sigkill)
             logger.warning(
                 "Force-killed MCP process %d (%s) after SIGTERM timeout",
                 pid, server_name,

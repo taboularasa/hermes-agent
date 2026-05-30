@@ -55,6 +55,27 @@ from tools.website_policy import check_website_access
 
 logger = logging.getLogger(__name__)
 
+_FIRECRAWL_CREDIT_EXHAUSTION_PATTERNS = (
+    "payment required",
+    "insufficient credits",
+    "credit exhausted",
+    "credits exhausted",
+    "top up",
+    "billing",
+)
+
+_FIRECRAWL_ONTOLOGY_FALLBACK_PATH = (
+    "Use Parallel, Tavily, or Exa for source discovery, then preserve selected "
+    "sources with direct HTTP/browser capture or web_extract through a "
+    "non-Firecrawl extract backend."
+)
+
+_FIRECRAWL_DEGRADED_POLICY = (
+    "Treat Firecrawl as optional degraded coverage for ontology research when "
+    "fallback evidence exists; do not ask the operator to replenish credits "
+    "unless the run explicitly requires Firecrawl-only crawl or anti-bot coverage."
+)
+
 
 # ---------------------------------------------------------------------------
 # Lazy Firecrawl SDK proxy
@@ -355,6 +376,41 @@ def _extract_scrape_payload(scrape_result: Any) -> Dict[str, Any]:
     return result_plain
 
 
+def _is_credit_exhaustion_error(error: Any) -> bool:
+    """Return True for Firecrawl payment/credit exhaustion responses."""
+    text = str(error or "").lower()
+    return any(pattern in text for pattern in _FIRECRAWL_CREDIT_EXHAUSTION_PATTERNS)
+
+
+def _credit_exhaustion_status(error: Any) -> Dict[str, Any]:
+    """Stable provider-status payload for recurring research reports."""
+    return {
+        "provider": "firecrawl",
+        "status": "degraded",
+        "reason": "credit_exhausted",
+        "operator_action_required": False,
+        "policy": _FIRECRAWL_DEGRADED_POLICY,
+        "fallback_path": _FIRECRAWL_ONTOLOGY_FALLBACK_PATH,
+        "source_error": str(error or ""),
+    }
+
+
+def _annotate_credit_exhaustion(result: Dict[str, Any], error: Any) -> Dict[str, Any]:
+    """Attach optional-degradation metadata when Firecrawl credits are exhausted."""
+    if not _is_credit_exhaustion_error(error):
+        return result
+
+    status = _credit_exhaustion_status(error)
+    base_error = str(result.get("error") or error or "")
+    if "optional degraded coverage" not in base_error:
+        result["error"] = (
+            f"{base_error}. Firecrawl degraded: {status['policy']} "
+            f"Fallback path: {status['fallback_path']}"
+        )
+    result["provider_status"] = status
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Provider class
 # ---------------------------------------------------------------------------
@@ -414,7 +470,10 @@ class FirecrawlWebSearchProvider(WebSearchProvider):
             return {"success": True, "data": {"web": web_results}}
         except Exception as exc:  # noqa: BLE001
             logger.warning("Firecrawl search error: %s", exc)
-            return {"success": False, "error": f"Firecrawl search failed: {exc}"}
+            return _annotate_credit_exhaustion(
+                {"success": False, "error": f"Firecrawl search failed: {exc}"},
+                exc,
+            )
 
     async def extract(self, urls: List[str], **kwargs: Any) -> List[Dict[str, Any]]:
         """Extract content from one or more URLs via Firecrawl.
@@ -564,13 +623,16 @@ class FirecrawlWebSearchProvider(WebSearchProvider):
             except Exception as scrape_err:  # noqa: BLE001
                 logger.debug("Firecrawl scrape failed for %s: %s", url, scrape_err)
                 results.append(
-                    {
-                        "url": url,
-                        "title": "",
-                        "content": "",
-                        "raw_content": "",
-                        "error": str(scrape_err),
-                    }
+                    _annotate_credit_exhaustion(
+                        {
+                            "url": url,
+                            "title": "",
+                            "content": "",
+                            "raw_content": "",
+                            "error": str(scrape_err),
+                        },
+                        scrape_err,
+                    )
                 )
 
         return results
@@ -746,12 +808,15 @@ class FirecrawlWebSearchProvider(WebSearchProvider):
             logger.warning("Firecrawl crawl error: %s", exc)
             return {
                 "results": [
-                    {
-                        "url": url,
-                        "title": "",
-                        "content": "",
-                        "error": f"Firecrawl crawl failed: {exc}",
-                    }
+                    _annotate_credit_exhaustion(
+                        {
+                            "url": url,
+                            "title": "",
+                            "content": "",
+                            "error": f"Firecrawl crawl failed: {exc}",
+                        },
+                        exc,
+                    )
                 ]
             }
 
