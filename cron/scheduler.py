@@ -87,6 +87,74 @@ def _resolve_cron_enabled_toolsets(job: dict, cfg: dict) -> list[str] | None:
         return None
 
 
+def _cron_job_contract_text(job: dict, prompt: str) -> str:
+    parts = [
+        job.get("name"),
+        job.get("prompt"),
+        prompt,
+        job.get("skill"),
+        " ".join(str(item) for item in (job.get("skills") or [])),
+        str(job.get("research_profile") or job.get("research_protocol") or ""),
+    ]
+    return " ".join(str(part or "") for part in parts).lower()
+
+
+def _cron_job_requires_ontology_research_contract(job: dict, prompt: str) -> bool:
+    """Return True for scheduled ontology research jobs that need web/ontology tools."""
+    text = _cron_job_contract_text(job, prompt)
+    if "ontology_context" in text or "web_search_matrix" in text:
+        return True
+    return (
+        "ontology" in text
+        and (
+            "research" in text
+            or "ontology_engineering" in text
+            or "ontology engineering" in text
+            or "source capture" in text
+            or "external evidence" in text
+            or "firecrawl" in text
+        )
+    )
+
+
+def _append_toolset_once(toolsets: list[str], toolset: str | None) -> None:
+    if toolset and toolset not in toolsets:
+        toolsets.append(toolset)
+
+
+def _registered_toolset_for_tool(tool_name: str) -> str | None:
+    try:
+        from hermes_cli.plugins import discover_plugins
+
+        discover_plugins()
+    except Exception as exc:
+        logger.debug("Cron plugin discovery failed while resolving %s: %s", tool_name, exc)
+    try:
+        from tools.registry import registry
+
+        return registry.get_toolset_for_tool(tool_name)
+    except Exception as exc:
+        logger.debug("Cron registry lookup failed for %s: %s", tool_name, exc)
+        return None
+
+
+def _resolve_ontology_cron_enabled_toolsets(
+    job: dict,
+    cfg: dict,
+    prompt: str,
+) -> list[str] | None:
+    enabled_toolsets = _resolve_cron_enabled_toolsets(job, cfg)
+    if not _cron_job_requires_ontology_research_contract(job, prompt):
+        return enabled_toolsets
+    if enabled_toolsets is None:
+        return None
+
+    augmented = [str(toolset) for toolset in enabled_toolsets]
+    _append_toolset_once(augmented, "web")
+    _append_toolset_once(augmented, _registered_toolset_for_tool("ontology_context"))
+    return augmented
+
+
 _CRON_PREFLIGHT_DISABLED_TOOLSETS = ["cronjob", "messaging", "clarify"]
 _WEB_TOOL_NAMES = {"web_search", "web_search_matrix", "web_extract"}
 _FIRECRAWL_ENV_HINTS = [
@@ -1922,7 +1990,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 job_id, _mcp_exc,
             )
 
-        enabled_toolsets = _resolve_cron_enabled_toolsets(job, _cfg)
+        enabled_toolsets = _resolve_ontology_cron_enabled_toolsets(job, _cfg, prompt)
         disabled_toolsets = list(_CRON_PREFLIGHT_DISABLED_TOOLSETS)
         preflight_report = _build_cron_preflight_report(
             job,

@@ -73,13 +73,13 @@ def test_cron_preflight_distinguishes_missing_web_credentials(monkeypatch):
     matrix = _check(report, "tool", "web_search_matrix")
     firecrawl = _check(report, "web_backend", "firecrawl")
 
-    assert matrix["status"] == "unavailable"
-    assert matrix["category"] == "provider_credentials_absent"
+    assert matrix["status"] == "available"
+    assert matrix["category"] == "available"
     assert firecrawl["status"] == "unavailable"
     assert firecrawl["category"] == "provider_credentials_absent"
 
     markdown = scheduler._format_cron_preflight_markdown(report)
-    assert "tool `web_search_matrix`: unavailable (provider_credentials_absent)" in markdown
+    assert "tool `web_search_matrix`: available (available)" in markdown
     assert "web backend `firecrawl`: unavailable (provider_credentials_absent)" in markdown
     assert "downgrade:" in markdown
 
@@ -153,7 +153,7 @@ def test_run_job_includes_preflight_in_prompt_and_report(monkeypatch):
     assert final_response == "ok"
     assert error is None
     assert "## Cron Preflight" in output
-    assert "tool `web_search_matrix`: unavailable (provider_credentials_absent)" in output
+    assert "tool `web_search_matrix`: available (available)" in output
     assert "web backend `firecrawl`: unavailable (provider_credentials_absent)" in output
 
     prompt_arg = agent.run_conversation.call_args.args[0]

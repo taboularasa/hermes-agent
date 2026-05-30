@@ -45,7 +45,13 @@ _LEADING_INDICATOR_HARBINGERS = (
     "correlation_explosion",
 )
 _ONTOLOGY_SCAN_SUFFIXES = {".json", ".yaml", ".yml", ".md"}
-_ONTOLOGY_SCAN_PRUNED_DIRS = {".git"}
+_ONTOLOGY_SCAN_PRUNED_DIRS = {".git", "__pycache__", ".pytest_cache", "tests"}
+_ONTOLOGY_REQUIRED_ARTIFACTS = (
+    ("ontology_metrics", Path("evolution/metrics.json")),
+    ("ontology_delta_report", Path("evolution/delta_report.json")),
+    ("ontology_daily_report", Path("evolution/daily_report.md")),
+)
+_FUTURE_TIMESTAMP_TOLERANCE_SECONDS = 300
 _TEXT_EVIDENCE_EXCLUDED_KEYS = {
     "command",
     "prompt",
@@ -74,6 +80,49 @@ _CLAIM_CONTAINER_KEYS = {
     "lane_links",
     "self_improvement_focus",
 }
+_OPERATOR_DECISION_SUPPORT_STRUCTURED_KEYS = {
+    "blocker",
+    "blockers",
+    "decision",
+    "decisions",
+    "manual_step",
+    "manual_steps",
+    "next_decision",
+    "next_operator_decision",
+    "operator_decision_support",
+    "recommended_next_decision",
+    "selected_issue",
+    "selected_issue_id",
+    "selected_work",
+    "trade_off",
+    "trade_offs",
+    "tradeoff",
+    "tradeoffs",
+}
+_OPERATOR_DECISION_SUPPORT_EVIDENCE_FIELDS = {
+    "blocker": "blocker",
+    "blockers": "blocker",
+    "decision": "decision",
+    "decisions": "decision",
+    "decision_owner": "owner",
+    "manual_step": "manual_step",
+    "manual_steps": "manual_step",
+    "next_decision": "next_decision",
+    "next_operator_decision": "next_decision",
+    "operator_decision_support": "operator_decision_support",
+    "operator_owner": "owner",
+    "owner": "owner",
+    "owners": "owner",
+    "recommended_next_decision": "next_decision",
+    "selected_issue": "selected_work",
+    "selected_issue_id": "selected_work",
+    "selected_work": "selected_work",
+    "trade_off": "tradeoff",
+    "trade_offs": "tradeoff",
+    "tradeoff": "tradeoff",
+    "tradeoffs": "tradeoff",
+    "work_owner": "owner",
+}
 _DURABLE_EVIDENCE_KEYS = {
     "artifact_path",
     "artifact_paths",
@@ -86,11 +135,17 @@ _DURABLE_EVIDENCE_KEYS = {
     "commit_sha",
     "commit_shas",
     "commits",
+    "control_ownership_preserved",
+    "control_preservation",
+    "control_preserved",
     "decision",
     "decisions",
     "durable_artifacts",
     "evidence",
     "files_changed",
+    "incident_risk_reduced",
+    "ownership_preservation",
+    "ownership_preserved",
     "operator_decision_support",
     "pr_url",
     "pr_urls",
@@ -100,9 +155,39 @@ _DURABLE_EVIDENCE_KEYS = {
     "pull_request_url",
     "pull_requests",
     "risk_reduction",
+    "risk_reduced",
+    "system_capability_changed",
     "test_results",
     "tests",
     "verification",
+    *_OPERATOR_DECISION_SUPPORT_STRUCTURED_KEYS,
+}
+_ALLOWED_VALUE_CATEGORIES = (
+    ("operator_decision_support", "operator decision support"),
+    ("durable_asset_created", "durable asset created"),
+    ("control_ownership_preserved", "control/ownership preserved"),
+    ("incident_risk_reduced", "incident risk reduced"),
+    ("system_capability_changed", "system capability changed"),
+)
+_ALLOWED_VALUE_CATEGORY_LABELS = {
+    category: label for category, label in _ALLOWED_VALUE_CATEGORIES
+}
+_VALUE_CATEGORY_REMEDIATION = {
+    "operator_decision_support": (
+        "document the operator decision, blocker, trade-off, or manual choice the work enables"
+    ),
+    "durable_asset_created": (
+        "link a commit, PR, changed file, generated artifact, or verification result"
+    ),
+    "control_ownership_preserved": (
+        "show preserved ownership, authority, rollback state, or protected control boundary"
+    ),
+    "incident_risk_reduced": (
+        "name the incident risk and the mitigation, prevention, or recovery evidence"
+    ),
+    "system_capability_changed": (
+        "identify the behavior, tool, workflow, config, schema, or test capability changed"
+    ),
 }
 _STATUS_ONLY_PATTERNS = (
     re.compile(r"\bactionable\b", re.IGNORECASE),
@@ -134,6 +219,14 @@ _DURABLE_TEXT_PATTERNS = (
         "artifact",
         re.compile(
             r"\b(?:durable|checked-in|repo-visible)\b[^.\n]{0,120}\b(?:artifact|evidence|record)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "durable_asset_created",
+        re.compile(
+            r"\b(?:created|wrote|added|published|generated)\b"
+            r"[^.\n]{0,160}\b(?:asset|artifact|file|record|report|branch|commit|PR|pull request|test)\b",
             re.IGNORECASE,
         ),
     ),
@@ -170,6 +263,38 @@ _DURABLE_TEXT_PATTERNS = (
         ),
     ),
     (
+        "control_ownership_preserved",
+        re.compile(
+            r"\b(?:preserved|retained|kept|protected)\b"
+            r"[^.\n]{0,160}\b(?:control|ownership|authority|rollback|handoff|state|boundary)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "control_ownership_preserved",
+        re.compile(
+            r"\b(?:control|ownership|authority|rollback|handoff|state|boundary)\b"
+            r"[^.\n]{0,160}\b(?:preserved|retained|kept|protected)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "incident_risk_reduced",
+        re.compile(
+            r"\b(?:reduced|mitigated|lowered|prevented|removed|closed)\b"
+            r"[^.\n]{0,160}\b(?:incident|risk|outage|regression|failure|security|data loss|rollback)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "incident_risk_reduced",
+        re.compile(
+            r"\b(?:incident|risk|outage|regression|failure|security|data loss|rollback)\b"
+            r"[^.\n]{0,160}\b(?:reduced|mitigated|lowered|prevented|removed|closed)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
         "capability_change",
         re.compile(
             r"\b(?:added|implemented|fixed|hardened|repaired|wired|enabled)\b"
@@ -183,6 +308,7 @@ _OPERATOR_DECISION_SUPPORT_SIGNALS = {
     "decisions",
     "operator_decision_support",
     "risk_reduction",
+    *_OPERATOR_DECISION_SUPPORT_STRUCTURED_KEYS,
 }
 _VERIFIED_SYSTEM_CHANGE_SIGNALS = {
     "artifact",
@@ -212,6 +338,58 @@ _VERIFIED_SYSTEM_CHANGE_SIGNALS = {
     "test_results",
     "tests",
     "verification",
+}
+_VALUE_CATEGORY_SIGNAL_MAP = {
+    "operator_decision_support": _OPERATOR_DECISION_SUPPORT_SIGNALS,
+    "durable_asset_created": {
+        "artifact",
+        "artifact_path",
+        "artifact_paths",
+        "artifacts",
+        "changed_files",
+        "changed_paths",
+        "checks",
+        "ci",
+        "commit",
+        "commit_sha",
+        "commit_shas",
+        "commits",
+        "durable_artifacts",
+        "durable_asset_created",
+        "evidence",
+        "files_changed",
+        "pr_url",
+        "pr_urls",
+        "proof_artifact",
+        "proof_artifacts",
+        "pull_request",
+        "pull_request_url",
+        "pull_requests",
+        "state_transition",
+        "test_results",
+        "tests",
+        "verification",
+    },
+    "control_ownership_preserved": {
+        "control_ownership_preserved",
+        "control_preservation",
+        "control_preserved",
+        "ownership_preservation",
+        "ownership_preserved",
+    },
+    "incident_risk_reduced": {
+        "incident_risk_reduced",
+        "risk_reduced",
+        "risk_reduction",
+    },
+    "system_capability_changed": {
+        "capability_change",
+        "changed_files",
+        "changed_paths",
+        "files_changed",
+        "state_transition",
+        "system_capability_changed",
+    },
 }
 
 
@@ -387,6 +565,10 @@ def _iter_ctx_timestamps(payload: Any) -> Iterable[datetime]:
             yield parsed
 
 
+def _ctx_record_is_active(record: dict[str, Any]) -> bool:
+    return record.get("active") is True
+
+
 def _latest_timestamp(values: Iterable[datetime]) -> Optional[datetime]:
     return max(values, default=None)
 
@@ -411,6 +593,46 @@ def _summarize_source(
         "age_hours": round(age_hours, 2),
         "latest_timestamp": latest.isoformat(),
     }
+
+
+def _summarize_ctx_bindings(
+    payload: Any,
+    freshness_hours: int,
+    now: datetime,
+) -> dict[str, Any]:
+    if payload is None:
+        summary = _summarize_source("ctx_bindings", None, freshness_hours, now)
+        summary.update(
+            {
+                "record_count": None,
+                "active_count": None,
+                "freshness_required": True,
+                "detail": "ctx bindings evidence unavailable.",
+            }
+        )
+        return summary
+
+    records = list(_iter_ctx_records(payload))
+    latest = _latest_timestamp(_iter_ctx_timestamps(payload))
+    active_count = sum(1 for record in records if _ctx_record_is_active(record))
+    summary = _summarize_source("ctx_bindings", latest, freshness_hours, now)
+    summary.update(
+        {
+            "record_count": len(records),
+            "active_count": active_count,
+            "freshness_required": bool(active_count),
+        }
+    )
+
+    if active_count == 0:
+        summary["status"] = "inactive"
+        summary["detail"] = (
+            "No active ctx bindings; retired binding timestamps are informational."
+            if latest is not None
+            else "No ctx bindings recorded; no active ctx sessions require freshness."
+        )
+
+    return summary
 
 
 def _extract_timestamps_from_text(text: str) -> Iterable[datetime]:
@@ -475,6 +697,110 @@ def _iter_ontology_files(root: Path) -> Iterable[Path]:
                 yield path
 
 
+def _split_future_timestamps(
+    timestamps: Iterable[datetime],
+    now: datetime,
+) -> tuple[list[datetime], list[datetime]]:
+    valid: list[datetime] = []
+    future: list[datetime] = []
+    for timestamp in timestamps:
+        if (timestamp - now).total_seconds() > _FUTURE_TIMESTAMP_TOLERANCE_SECONDS:
+            future.append(timestamp)
+        else:
+            valid.append(timestamp)
+    return valid, future
+
+
+def _artifact_summary_from_timestamps(
+    *,
+    name: str,
+    path: Path,
+    timestamps: Iterable[datetime],
+    alerts: Iterable[str],
+    freshness_hours: int,
+    now: datetime,
+) -> dict[str, Any]:
+    valid_timestamps, future_timestamps = _split_future_timestamps(timestamps, now)
+    latest = _latest_timestamp(valid_timestamps)
+    alert_reasons = [str(item).strip() for item in alerts if str(item).strip()]
+    reasons = list(alert_reasons)
+
+    if latest is None:
+        status = "missing"
+        age_hours = None
+        latest_timestamp = None
+        if future_timestamps:
+            reasons.append(f"{name} only has future timestamps")
+    else:
+        age_hours = round(max(0.0, (now - latest).total_seconds() / 3600), 2)
+        latest_timestamp = latest.isoformat()
+        status = "fresh" if age_hours <= freshness_hours else "stale"
+        if status == "stale":
+            reasons.append(f"{name} stale ({age_hours}h)")
+
+    if alert_reasons and status in {"fresh", "stale"}:
+        status = "degraded"
+
+    return {
+        "source": name,
+        "path": str(path),
+        "status": status,
+        "age_hours": age_hours,
+        "latest_timestamp": latest_timestamp,
+        "future_timestamp_count": len(future_timestamps),
+        "ignored_future_timestamps": [
+            timestamp.isoformat() for timestamp in sorted(future_timestamps)[-5:]
+        ],
+        "reasons": reasons,
+    }
+
+
+def _summarize_required_ontology_artifacts(
+    root: Path,
+    freshness_hours: int,
+    now: datetime,
+) -> dict[str, dict[str, Any]]:
+    summaries: dict[str, dict[str, Any]] = {}
+    for name, relative_path in _ONTOLOGY_REQUIRED_ARTIFACTS:
+        path = root / relative_path
+        if not path.exists():
+            summaries[name] = {
+                "source": name,
+                "path": str(path),
+                "status": "missing",
+                "age_hours": None,
+                "latest_timestamp": None,
+                "future_timestamp_count": 0,
+                "ignored_future_timestamps": [],
+                "reasons": [f"{name} missing"],
+            }
+            continue
+        timestamps, alerts = _scan_ontology_file(path)
+        summaries[name] = _artifact_summary_from_timestamps(
+            name=name,
+            path=path,
+            timestamps=timestamps,
+            alerts=alerts,
+            freshness_hours=freshness_hours,
+            now=now,
+        )
+    return summaries
+
+
+def _ontology_external_repair(root: Path, required_artifacts: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    invalid_artifacts = [
+        summary
+        for summary in required_artifacts.values()
+        if str(summary.get("status") or "") in {"stale", "missing", "degraded"}
+    ]
+    return {
+        "required": bool(invalid_artifacts),
+        "repository": str(root),
+        "action": "refresh ontology evolution reporting artifacts",
+        "artifacts": invalid_artifacts,
+    }
+
+
 def _summarize_ontology(root: Path, freshness_hours: int, now: datetime) -> dict[str, Any]:
     if not root.exists():
         return {
@@ -483,6 +809,7 @@ def _summarize_ontology(root: Path, freshness_hours: int, now: datetime) -> dict
             "age_hours": None,
             "reasons": ["ontology root missing"],
             "alerts": [],
+            "required_artifacts": {},
         }
 
     timestamps: list[datetime] = []
@@ -492,14 +819,34 @@ def _summarize_ontology(root: Path, freshness_hours: int, now: datetime) -> dict
         timestamps.extend(file_timestamps)
         alerts.extend(file_alerts)
 
-    latest = _latest_timestamp(timestamps)
+    required_artifacts = _summarize_required_ontology_artifacts(root, freshness_hours, now)
+    required_latest = [
+        parsed
+        for summary in required_artifacts.values()
+        if (parsed := _parse_time(summary.get("latest_timestamp"))) is not None
+    ]
+    invalid_required = [
+        summary
+        for summary in required_artifacts.values()
+        if str(summary.get("status") or "") in {"stale", "missing", "degraded"}
+    ]
+    external_repair = _ontology_external_repair(root, required_artifacts)
+
+    valid_timestamps, future_timestamps = _split_future_timestamps(timestamps, now)
+    latest = _latest_timestamp(required_latest) or _latest_timestamp(valid_timestamps)
     if latest is None:
+        reasons = ["ontology intelligence timestamp missing"]
+        if future_timestamps:
+            reasons.append("ontology intelligence only has future timestamps")
         return {
             "status": "missing",
             "latest_timestamp": None,
             "age_hours": None,
-            "reasons": ["ontology intelligence timestamp missing"],
+            "reasons": reasons,
             "alerts": alerts,
+            "ignored_future_timestamp_count": len(future_timestamps),
+            "required_artifacts": required_artifacts,
+            "external_repair": external_repair,
         }
 
     age_hours = max(0.0, (now - latest).total_seconds() / 3600)
@@ -507,6 +854,14 @@ def _summarize_ontology(root: Path, freshness_hours: int, now: datetime) -> dict
     reasons: list[str] = []
     if status == "stale":
         reasons.append(f"ontology_intelligence stale ({round(age_hours, 2)}h)")
+    for summary in invalid_required:
+        for reason in summary.get("reasons") or [f"{summary.get('source')} {summary.get('status')}"]:
+            text = str(reason).strip()
+            if text and text not in reasons:
+                reasons.append(text)
+    if invalid_required:
+        required_statuses = {str(summary.get("status") or "") for summary in invalid_required}
+        status = "degraded" if required_statuses.intersection({"missing", "degraded"}) else "stale"
     if alerts:
         status = "degraded"
         reasons.extend(alerts)
@@ -516,6 +871,9 @@ def _summarize_ontology(root: Path, freshness_hours: int, now: datetime) -> dict
         "age_hours": round(age_hours, 2),
         "reasons": reasons,
         "alerts": alerts,
+        "ignored_future_timestamp_count": len(future_timestamps),
+        "required_artifacts": required_artifacts,
+        "external_repair": external_repair,
     }
 
 
@@ -571,7 +929,7 @@ def _find_stale_active_ctx(
 ) -> list[dict[str, Any]]:
     stale: list[dict[str, Any]] = []
     for record in _iter_ctx_records(payload):
-        if not record.get("active"):
+        if not _ctx_record_is_active(record):
             continue
         updated = _record_timestamp(record, "updated_at", "updatedAt", "created_at", "createdAt")
         if updated is None:
@@ -592,7 +950,7 @@ def _find_stale_active_ctx(
 def _find_planning_contradictions(codex_payload: Any, ctx_payload: Any) -> list[dict[str, Any]]:
     contradictions: list[dict[str, Any]] = []
     for record in _iter_ctx_records(ctx_payload):
-        if not record.get("active"):
+        if not _ctx_record_is_active(record):
             continue
         worktree_path = str(record.get("worktree_path") or "").strip()
         reason = str(record.get("reason") or "").strip().lower()
@@ -644,6 +1002,66 @@ def _find_planning_contradictions(codex_payload: Any, ctx_payload: Any) -> list[
     return contradictions
 
 
+def _build_ctx_remediation(
+    ctx_bindings_path: Path,
+    ctx_summary: dict[str, Any],
+    stale_active_ctx: list[dict[str, Any]],
+    planning_contradictions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    status = str(ctx_summary.get("status") or "")
+    ctx_contradictions = [
+        item
+        for item in planning_contradictions
+        if str(item.get("type") or "").startswith("ctx_")
+    ]
+    required = status in {"missing", "stale", "degraded"} or bool(stale_active_ctx or ctx_contradictions)
+
+    if not required:
+        return {
+            "required": False,
+            "path": str(ctx_bindings_path),
+            "action": "none",
+            "reason": str(
+                ctx_summary.get("detail")
+                or "ctx session-binding evidence is current."
+            ),
+            "active_count": ctx_summary.get("active_count"),
+            "stale_active_count": 0,
+            "contradiction_count": 0,
+        }
+
+    actions: list[str] = []
+    reasons: list[str] = []
+    if status == "missing":
+        actions.append("restore or regenerate ctx session-binding evidence")
+        reasons.append("ctx session-binding evidence is unavailable")
+    elif status == "stale":
+        actions.append("refresh active ctx session bindings or retire sessions that are no longer live")
+        reasons.append(f"ctx session-binding evidence is stale ({ctx_summary.get('age_hours')}h)")
+    elif status == "degraded":
+        actions.append("repair degraded ctx session-binding evidence before selecting new work")
+        reasons.append("ctx session-binding evidence is degraded")
+
+    if stale_active_ctx:
+        actions.append("retire stale active ctx bindings or refresh them from the live ctx runtime")
+        reasons.append(f"{len(stale_active_ctx)} active ctx binding(s) exceed freshness limits")
+    if ctx_contradictions:
+        actions.append("repair ctx binding store contradictions")
+        reasons.append(f"{len(ctx_contradictions)} ctx binding contradiction(s) detected")
+
+    return {
+        "required": True,
+        "path": str(ctx_bindings_path),
+        "action": "; ".join(dict.fromkeys(actions)),
+        "reasons": list(dict.fromkeys(reasons)),
+        "active_count": ctx_summary.get("active_count"),
+        "stale_active_count": len(stale_active_ctx),
+        "stale_active_sessions": stale_active_ctx[:5],
+        "contradiction_count": len(ctx_contradictions),
+        "contradictions": ctx_contradictions[:5],
+    }
+
+
 def _build_provenance_item(tag: str, path: Path, summary: dict[str, Any]) -> dict[str, Any]:
     return {
         "tag": tag,
@@ -686,12 +1104,13 @@ def evaluate_self_improvement_evidence(
     journal_latest = _latest_timestamp(_iter_journal_timestamps(journal_payload))
     codex_latest = _latest_timestamp(_iter_codex_timestamps(codex_payload))
     ctx_latest = _latest_timestamp(_iter_ctx_timestamps(ctx_payload))
+    ctx_summary = _summarize_ctx_bindings(ctx_payload, freshness_hours, current)
     ontology_latest = _parse_time(ontology_summary.get("latest_timestamp"))
 
     sources = {
         "journal_entries": _summarize_source("journal_entries", journal_latest, freshness_hours, current),
         "codex_runs": _summarize_source("codex_runs", codex_latest, freshness_hours, current),
-        "ctx_bindings": _summarize_source("ctx_bindings", ctx_latest, freshness_hours, current),
+        "ctx_bindings": ctx_summary,
         "ontology_intelligence": {
             "source": "ontology_intelligence",
             "status": ontology_summary.get("status"),
@@ -703,10 +1122,21 @@ def evaluate_self_improvement_evidence(
     stale_active_codex = _find_stale_active_codex(codex_payload, current, active_stale_hours)
     stale_active_ctx = _find_stale_active_ctx(ctx_payload, current, active_stale_hours)
     planning_contradictions = _find_planning_contradictions(codex_payload, ctx_payload)
+    ctx_remediation = _build_ctx_remediation(
+        ctx_bindings_path,
+        ctx_summary,
+        stale_active_ctx,
+        planning_contradictions,
+    )
 
     latest_timestamps = [
         item
-        for item in (journal_latest, codex_latest, ctx_latest, ontology_latest)
+        for item in (
+            journal_latest,
+            codex_latest,
+            None if ctx_summary.get("status") == "inactive" else ctx_latest,
+            ontology_latest,
+        )
         if item is not None
     ]
     freshness_spread_hours = None
@@ -772,6 +1202,8 @@ def evaluate_self_improvement_evidence(
         provenance_items[1]["notes"] = f"{len(stale_active_codex)} active run(s) exceed {active_stale_hours}h"
     if stale_active_ctx:
         provenance_items[2]["notes"] = f"{len(stale_active_ctx)} active session(s) exceed {active_stale_hours}h"
+    elif ctx_summary.get("status") == "inactive":
+        provenance_items[2]["notes"] = str(ctx_summary.get("detail") or "ctx inactive")
     if ontology_alerts:
         provenance_items[3]["notes"] = " | ".join(ontology_alerts)
 
@@ -787,6 +1219,7 @@ def evaluate_self_improvement_evidence(
         "warnings": warnings,
         "ontology": ontology_summary,
         "ontology_alerts": ontology_alerts,
+        "ctx_remediation": ctx_remediation,
         "contradictions": contradictions,
         "reasons": reasons,
         "suppression": {
@@ -892,6 +1325,114 @@ def _collect_record_text(value: Any, key: str = "") -> list[str]:
     return []
 
 
+def _redact_operator_evidence_value(text: str) -> str:
+    redacted = re.sub(
+        r"\b(Bearer\s+)[A-Za-z0-9._~+/=-]{12,}",
+        r"\1[REDACTED]",
+        text,
+        flags=re.IGNORECASE,
+    )
+    redacted = re.sub(
+        r"\b(token|api[_-]?key|password|secret)\s*[:=]\s*[^\s,;]+",
+        r"\1=[REDACTED]",
+        redacted,
+        flags=re.IGNORECASE,
+    )
+    return redacted
+
+
+def _compact_operator_evidence_value(value: Any, *, limit: int = 240) -> Optional[str]:
+    if not _value_has_content(value):
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+    elif isinstance(value, (int, float, bool)):
+        text = str(value)
+    else:
+        try:
+            text = json.dumps(value, ensure_ascii=True, sort_keys=True, default=str)
+        except TypeError:
+            text = str(value)
+    text = text.replace("\\n", " ").replace("\\r", " ").replace("\\t", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return None
+    text = _redact_operator_evidence_value(text)
+    if len(text) > limit:
+        return text[: limit - 3].rstrip() + "..."
+    return text
+
+
+def _dedupe_operator_evidence(items: Iterable[dict[str, str]]) -> list[dict[str, str]]:
+    deduped: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in items:
+        key = (
+            str(item.get("field") or ""),
+            str(item.get("source_key") or ""),
+            str(item.get("value") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
+def _collect_operator_decision_support_evidence(value: Any, key: str = "") -> list[dict[str, str]]:
+    normalized_key = _normalize_evidence_key(key)
+    if normalized_key in _TEXT_EVIDENCE_EXCLUDED_KEYS:
+        return []
+
+    field = _OPERATOR_DECISION_SUPPORT_EVIDENCE_FIELDS.get(normalized_key)
+    if field:
+        compact_value = _compact_operator_evidence_value(value)
+        if compact_value is not None:
+            return [
+                {
+                    "field": field,
+                    "source_key": normalized_key,
+                    "value": compact_value,
+                }
+            ]
+        return []
+
+    if isinstance(value, dict):
+        evidence: list[dict[str, str]] = []
+        for child_key, child_value in value.items():
+            evidence.extend(
+                _collect_operator_decision_support_evidence(child_value, str(child_key))
+            )
+        return _dedupe_operator_evidence(evidence)
+    if isinstance(value, list):
+        evidence = []
+        for child_value in value:
+            evidence.extend(_collect_operator_decision_support_evidence(child_value, key))
+        return _dedupe_operator_evidence(evidence)
+    return []
+
+
+def _operator_decision_support_text_evidence(text: str) -> list[dict[str, str]]:
+    evidence: list[dict[str, str]] = []
+    for label, pattern in _DURABLE_TEXT_PATTERNS:
+        if label != "operator_decision_support":
+            continue
+        match = pattern.search(text)
+        if not match:
+            continue
+        compact_value = _compact_operator_evidence_value(match.group(0))
+        if compact_value is None:
+            continue
+        evidence.append(
+            {
+                "field": "operator_decision_support",
+                "source_key": "text_match",
+                "value": compact_value,
+            }
+        )
+    return _dedupe_operator_evidence(evidence)
+
+
 def _record_has_claim_field(value: Any, key: str = "") -> bool:
     normalized_key = _normalize_evidence_key(key)
     if normalized_key in _CLAIM_TEXT_KEYS and _value_has_content(value):
@@ -927,6 +1468,43 @@ def _text_durable_signals(text: str) -> set[str]:
 
 def _status_only_markers(text: str) -> set[str]:
     return {pattern.pattern for pattern in _STATUS_ONLY_PATTERNS if pattern.search(text)}
+
+
+def _value_categories_from_signals(signals: set[str]) -> list[str]:
+    categories: list[str] = []
+    for category, _label in _ALLOWED_VALUE_CATEGORIES:
+        if signals.intersection(_VALUE_CATEGORY_SIGNAL_MAP.get(category, set())):
+            categories.append(category)
+    return categories
+
+
+def _value_category_labels(categories: Iterable[str]) -> list[str]:
+    return [
+        _ALLOWED_VALUE_CATEGORY_LABELS[category]
+        for category in categories
+        if category in _ALLOWED_VALUE_CATEGORY_LABELS
+    ]
+
+
+def _allowed_value_category_guidance() -> list[dict[str, str]]:
+    return [
+        {
+            "category": category,
+            "label": label,
+            "remediation": _VALUE_CATEGORY_REMEDIATION[category],
+        }
+        for category, label in _ALLOWED_VALUE_CATEGORIES
+    ]
+
+
+def _make_work_remediation(categories: list[str]) -> Optional[str]:
+    if categories:
+        return None
+    guidance = "; ".join(
+        f"{label}: {_VALUE_CATEGORY_REMEDIATION[category]}"
+        for category, label in _ALLOWED_VALUE_CATEGORIES
+    )
+    return f"Add evidence for at least one allowed value category: {guidance}."
 
 
 def _record_claimed_timestamp(record: dict[str, Any]) -> Optional[datetime]:
@@ -1000,12 +1578,14 @@ def _assess_make_work_item(item: dict[str, Any]) -> dict[str, Any]:
     durable_signals = _structured_durable_signals(record)
     durable_signals.update(_text_durable_signals(text))
     status_markers = _status_only_markers(text)
-    durable = bool(durable_signals)
+    value_categories = _value_categories_from_signals(durable_signals)
+    category_labels = _value_category_labels(value_categories)
+    durable = bool(value_categories)
     issue = None
     if not durable and status_markers:
-        issue = "status_language_without_durable_evidence"
+        issue = "status_language_without_value_category_evidence"
     elif not durable:
-        issue = "claimed_work_without_durable_evidence"
+        issue = "claimed_work_without_value_category_evidence"
 
     return {
         "source": item.get("source"),
@@ -1013,16 +1593,27 @@ def _assess_make_work_item(item: dict[str, Any]) -> dict[str, Any]:
         "timestamp": item.get("timestamp"),
         "durable": durable,
         "signals": sorted(durable_signals),
+        "value_categories": value_categories,
+        "value_category_labels": category_labels,
         "status_language": bool(status_markers),
         "issue": issue,
+        "remediation": _make_work_remediation(value_categories),
     }
 
 
 def _assess_operator_value_item(item: dict[str, Any]) -> dict[str, Any]:
     make_work = _assess_make_work_item(item)
+    record = item.get("record") or {}
+    text = str(item.get("text") or "")
     durable_signals = set(make_work.get("signals") or [])
     decision_support_signals = durable_signals.intersection(_OPERATOR_DECISION_SUPPORT_SIGNALS)
     verified_change_signals = durable_signals.intersection(_VERIFIED_SYSTEM_CHANGE_SIGNALS)
+    operator_decision_support_evidence = _collect_operator_decision_support_evidence(record)
+    if decision_support_signals and not operator_decision_support_evidence:
+        operator_decision_support_evidence = _operator_decision_support_text_evidence(text)
+    operator_decision_support_evidence = _dedupe_operator_evidence(
+        operator_decision_support_evidence
+    )[:8]
 
     item_score = 0.0
     issue = make_work.get("issue")
@@ -1048,6 +1639,7 @@ def _assess_operator_value_item(item: dict[str, Any]) -> dict[str, Any]:
         "signals": sorted(durable_signals),
         "operator_decision_support": bool(decision_support_signals),
         "operator_decision_support_signals": sorted(decision_support_signals),
+        "operator_decision_support_evidence": operator_decision_support_evidence,
         "verified_system_change": bool(verified_change_signals),
         "verified_system_change_signals": sorted(verified_change_signals),
         "aligned": bool(decision_support_signals and verified_change_signals),
@@ -1080,13 +1672,26 @@ def _evaluate_anti_make_work_check(
     durable_count = sum(1 for item in assessments if item["durable"])
     shallow_items = [item for item in assessments if not item["durable"]]
     status_only_count = sum(1 for item in shallow_items if item["status_language"])
+    value_category_counts = {
+        category: sum(
+            1
+            for item in assessments
+            if category in set(item.get("value_categories") or [])
+        )
+        for category, _label in _ALLOWED_VALUE_CATEGORIES
+    }
 
     if assessed_count == 0:
         score = 1.0
         detail = "No claimed work items required anti-make-work evidence."
     elif not shallow_items:
         score = 1.0
-        detail = "Claimed work includes durable evidence."
+        passing_labels = [
+            label
+            for category, label in _ALLOWED_VALUE_CATEGORIES
+            if value_category_counts.get(category)
+        ]
+        detail = "Claimed work includes allowed value-category evidence: " + ", ".join(passing_labels)
     else:
         score = durable_count / assessed_count
         if status_only_count:
@@ -1097,9 +1702,12 @@ def _evaluate_anti_make_work_check(
             f"{item.get('source')}:{item.get('id') or 'unknown'}"
             for item in shallow_items[:3]
         ]
+        allowed_labels = ", ".join(label for _category, label in _ALLOWED_VALUE_CATEGORIES)
         detail = (
-            "Claimed work lacks durable state-change evidence: "
+            "Claimed work lacks allowed value-category evidence "
+            f"({allowed_labels}): "
             + ", ".join(examples)
+            + ". Remediation: add category evidence to each shallow claimed-work record."
         )
 
     return _build_benchmark_item(
@@ -1114,10 +1722,27 @@ def _evaluate_anti_make_work_check(
             "durable_evidence_count": durable_count,
             "shallow_work_item_count": len(shallow_items),
             "status_language_only_count": status_only_count,
+            "allowed_value_categories": _allowed_value_category_guidance(),
+            "value_category_counts": value_category_counts,
             "durable_examples": [item for item in assessments if item["durable"]][:5],
             "shallow_examples": shallow_items[:5],
         },
     )
+
+
+def _operator_value_example(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source": item.get("source"),
+        "id": item.get("id"),
+        "timestamp": item.get("timestamp"),
+        "score": item.get("score"),
+        "issue": item.get("issue"),
+        "aligned": item.get("aligned"),
+        "verified_system_change": item.get("verified_system_change"),
+        "verified_system_change_signals": item.get("verified_system_change_signals") or [],
+        "operator_decision_support_signals": item.get("operator_decision_support_signals") or [],
+        "evidence": item.get("operator_decision_support_evidence") or [],
+    }
 
 
 def _evaluate_operator_value_alignment_check(
@@ -1148,6 +1773,28 @@ def _evaluate_operator_value_alignment_check(
     verified_change_count = sum(1 for item in assessments if item["verified_system_change"])
     aligned_count = sum(1 for item in assessments if item["aligned"])
     issue_items = [item for item in assessments if item.get("issue")]
+    decision_support_examples = [
+        _operator_value_example(item)
+        for item in assessments
+        if item["operator_decision_support"]
+    ][:5]
+    missing_decision_support_examples = [
+        _operator_value_example(item)
+        for item in assessments
+        if item["verified_system_change"] and not item["operator_decision_support"]
+    ][:5]
+    decision_support_fields = sorted(
+        {
+            evidence.get("field")
+            for item in decision_support_examples
+            for evidence in item.get("evidence", [])
+            if evidence.get("field")
+        }
+    )
+    decision_support_evidence_count = sum(
+        len(item.get("evidence") or [])
+        for item in decision_support_examples
+    )
 
     if assessed_count == 0:
         score = 1.0
@@ -1167,6 +1814,12 @@ def _evaluate_operator_value_alignment_check(
             detail = "Claimed work supports operator decisions, but lacks verified system change."
         else:
             detail = "Operator-value evidence is incomplete across claimed work."
+        if decision_support_fields:
+            detail += (
+                " Decision-support evidence fields: "
+                + ", ".join(decision_support_fields)
+                + "."
+            )
 
     return _build_benchmark_item(
         "operator_value_alignment",
@@ -1179,6 +1832,8 @@ def _evaluate_operator_value_alignment_check(
             "assessed_work_item_count": assessed_count,
             "durable_evidence_count": durable_count,
             "operator_decision_support_count": decision_support_count,
+            "operator_decision_support_evidence_count": decision_support_evidence_count,
+            "operator_decision_support_fields": decision_support_fields,
             "verified_system_change_count": verified_change_count,
             "aligned_work_item_count": aligned_count,
             "operator_decision_support_rate": (
@@ -1199,6 +1854,8 @@ def _evaluate_operator_value_alignment_check(
             "quantity_guardrail_basis": "average_evidence_quality_not_item_count",
             "issue_examples": issue_items[:5],
             "aligned_examples": [item for item in assessments if item["aligned"]][:5],
+            "operator_decision_support_examples": decision_support_examples,
+            "missing_operator_decision_support_examples": missing_decision_support_examples,
         },
     )
 
@@ -1278,6 +1935,79 @@ def _population_stddev(values: list[float]) -> float:
         return 0.0
     mean = sum(values) / len(values)
     return (sum((value - mean) ** 2 for value in values) / len(values)) ** 0.5
+
+
+def _detect_stabilization_hold(scores: list[float]) -> dict[str, Any]:
+    hold_window = 3
+    delta_tolerance = 0.001
+    range_tolerance = 0.005
+    min_recovery_gap = 0.05
+
+    recent_scores = scores[-hold_window:] if len(scores) >= hold_window else list(scores)
+    recent_deltas = [
+        recent_scores[idx] - recent_scores[idx - 1]
+        for idx in range(1, len(recent_scores))
+    ]
+    prior_scores = scores[:-hold_window]
+    prior_peak = max(prior_scores) if prior_scores else None
+    current_score = scores[-1] if scores else None
+    recovery_gap = (
+        prior_peak - current_score
+        if prior_peak is not None and current_score is not None
+        else 0.0
+    )
+    recent_range = max(recent_scores) - min(recent_scores) if recent_scores else 0.0
+    low_variance_hold = (
+        len(recent_scores) == hold_window
+        and recent_range <= range_tolerance
+        and len(recent_deltas) == hold_window - 1
+        and all(abs(delta) <= delta_tolerance for delta in recent_deltas)
+    )
+    active = (
+        len(scores) >= 6
+        and current_score is not None
+        and _check_status(current_score) != "pass"
+        and recovery_gap >= min_recovery_gap
+        and low_variance_hold
+    )
+    recovered = (
+        len(scores) >= 6
+        and current_score is not None
+        and _check_status(current_score) == "pass"
+        and low_variance_hold
+    )
+    state = "none"
+    if active:
+        state = "stabilization_hold"
+    elif recovered:
+        state = "recovered_low_variance"
+
+    return {
+        "active": active,
+        "recovered": recovered,
+        "settled": active or recovered,
+        "state": state,
+        "sample_count": len(scores),
+        "hold_window": hold_window,
+        "recent_scores": [round(score, 4) for score in recent_scores],
+        "recent_deltas": [round(delta, 4) for delta in recent_deltas],
+        "prior_peak": _rounded_float(prior_peak),
+        "current_score": _rounded_float(current_score),
+        "recovery_gap": round(recovery_gap, 4),
+        "recent_range": round(recent_range, 4),
+        "delta_tolerance": delta_tolerance,
+        "range_tolerance": range_tolerance,
+        "mitigation": (
+            "Hold the operator-value guardrail steady instead of escalating inactive drift."
+            if active
+            else ""
+        ),
+        "next_action": (
+            "Require recovery in operator-value evidence before treating the plateau as resolved."
+            if active
+            else ""
+        ),
+    }
 
 
 def _coerce_check_status(value: Any) -> str:
@@ -1370,7 +2100,11 @@ def _harbinger_payload(
     }
 
 
-def _detect_critical_slowing_down(scores: list[float]) -> dict[str, Any]:
+def _detect_critical_slowing_down(
+    scores: list[float],
+    stabilization_hold: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    stabilization_hold = stabilization_hold or _detect_stabilization_hold(scores)
     recent_scores = [round(score, 4) for score in scores[-5:]]
     prior_peak = max(scores[:-1]) if len(scores) > 1 else (scores[-1] if scores else None)
     current_score = scores[-1] if scores else None
@@ -1379,12 +2113,13 @@ def _detect_critical_slowing_down(scores: list[float]) -> dict[str, Any]:
     recent_deltas = deltas[-3:]
     flat_or_negative_count = sum(1 for delta in recent_deltas if delta <= 0.01)
     average_recent_delta = sum(recent_deltas) / len(recent_deltas) if recent_deltas else None
-    triggered = (
+    active_signal = (
         len(scores) >= 5
         and recovery_gap >= 0.05
         and len(recent_deltas) >= 3
         and flat_or_negative_count == len(recent_deltas)
     )
+    triggered = active_signal and not stabilization_hold["settled"]
 
     return _harbinger_payload(
         triggered=triggered,
@@ -1397,24 +2132,33 @@ def _detect_critical_slowing_down(scores: list[float]) -> dict[str, Any]:
             "recent_deltas": [round(delta, 4) for delta in recent_deltas],
             "average_recent_delta": _rounded_float(average_recent_delta),
             "flat_or_negative_delta_count": flat_or_negative_count,
+            "active_signal": active_signal,
+            "stabilization_hold_active": stabilization_hold["active"],
+            "settled_operator_value_state": stabilization_hold["state"],
+            "stabilization_hold": stabilization_hold,
         },
         mitigation="Stop expanding self-improvement scope until the lagging operator-value signal recovers.",
         next_action="Select the next maintenance item only if it restores operator decision support plus verified change evidence.",
     )
 
 
-def _detect_variance_explosion(scores: list[float]) -> dict[str, Any]:
+def _detect_variance_explosion(
+    scores: list[float],
+    stabilization_hold: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    stabilization_hold = stabilization_hold or _detect_stabilization_hold(scores)
     recent_scores = scores[-4:]
     baseline_scores = scores[:-4]
     baseline_stddev = _population_stddev(baseline_scores)
     recent_stddev = _population_stddev(recent_scores)
     recent_range = max(recent_scores) - min(recent_scores) if recent_scores else 0.0
-    triggered = (
+    active_signal = (
         len(scores) >= 6
         and len(recent_scores) >= 4
         and recent_range >= 0.2
         and recent_stddev >= max(0.08, baseline_stddev * 3)
     )
+    triggered = active_signal and not stabilization_hold["settled"]
 
     return _harbinger_payload(
         triggered=triggered,
@@ -1425,6 +2169,10 @@ def _detect_variance_explosion(scores: list[float]) -> dict[str, Any]:
             "baseline_stddev": round(baseline_stddev, 4),
             "recent_stddev": round(recent_stddev, 4),
             "recent_range": round(recent_range, 4),
+            "active_signal": active_signal,
+            "stabilization_hold_active": stabilization_hold["active"],
+            "settled_operator_value_state": stabilization_hold["state"],
+            "stabilization_hold": stabilization_hold,
         },
         mitigation="Treat the benchmark as unstable and stop optimizing for throughput until score variance narrows.",
         next_action="Run one focused stabilization pass and require the next run to include low-variance evidence before broadening lane selection.",
@@ -1500,9 +2248,16 @@ def _build_leading_indicator_scorecard(
 ) -> dict[str, Any]:
     series = _benchmark_indicator_series(history, current_checks)
     operator_scores = _check_score_series(series, "operator_value_alignment")
+    stabilization_hold = _detect_stabilization_hold(operator_scores)
     scorecard = {
-        "critical_slowing_down": _detect_critical_slowing_down(operator_scores),
-        "variance_explosion": _detect_variance_explosion(operator_scores),
+        "critical_slowing_down": _detect_critical_slowing_down(
+            operator_scores,
+            stabilization_hold,
+        ),
+        "variance_explosion": _detect_variance_explosion(
+            operator_scores,
+            stabilization_hold,
+        ),
         "flickering": _detect_flickering(series),
         "correlation_explosion": _detect_correlation_explosion(series),
     }
@@ -1514,6 +2269,7 @@ def _build_leading_indicator_scorecard(
     return {
         "series_sample_count": len(series),
         "operator_value_score_series": [round(score, 4) for score in operator_scores[-8:]],
+        "stabilization_hold": stabilization_hold,
         "scorecard": scorecard,
         "triggered_harbingers": triggered_harbingers,
         "recommended_mitigations": [
@@ -1553,6 +2309,12 @@ def _evaluate_leading_indicator_drift_check(
             + ", ".join(triggered_harbingers)
             + "; run mitigation before expanding self-improvement scope."
         )
+    elif indicator_payload["stabilization_hold"]["active"]:
+        score = 0.85
+        detail = (
+            "Operator-value leading indicator is in stabilization hold after a degraded plateau; "
+            "keep operator-value guardrails active until recovery."
+        )
     elif previous_score is None:
         score = 1.0
         detail = "No prior operator-value score; drift not assessed."
@@ -1572,9 +2334,10 @@ def _evaluate_leading_indicator_drift_check(
             "current_operator_value_score": round(current_score, 4),
             "operator_value_delta": delta,
             "prior_operator_value_sample_count": len(prior_scores),
-            "leading_indicator_contract_version": "harbinger_scorecard.v1",
+            "leading_indicator_contract_version": "harbinger_scorecard.v2",
             "series_sample_count": indicator_payload["series_sample_count"],
             "operator_value_score_series": indicator_payload["operator_value_score_series"],
+            "stabilization_hold": indicator_payload["stabilization_hold"],
             "triggered_harbingers": triggered_harbingers,
             "harbinger_scorecard": indicator_payload["scorecard"],
             "recommended_mitigations": indicator_payload["recommended_mitigations"],
@@ -1593,11 +2356,13 @@ def _evaluate_leading_indicator_drift_check(
 
 def _build_issue_selection_summary(
     checks: dict[str, dict[str, Any]],
+    gate: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     guardrail_checks = {
         name: check
         for name, check in checks.items()
         if name in {
+            "reliability_gate",
             "anti_make_work_check",
             "operator_value_alignment",
             "leading_indicator_drift",
@@ -1605,21 +2370,72 @@ def _build_issue_selection_summary(
         and check.get("status") != "pass"
     }
     quantity_guardrail_active = bool(guardrail_checks)
+    reliability_blocked = "reliability_gate" in guardrail_checks
+    gate = gate or {}
+    ctx_remediation = gate.get("ctx_remediation") or {}
+    ontology_repair = (gate.get("ontology") or {}).get("external_repair") or {}
+    remediation_actions = [
+        str(item.get("action") or "").strip()
+        for item in (ctx_remediation, ontology_repair)
+        if item.get("required") and str(item.get("action") or "").strip()
+    ]
+    if reliability_blocked:
+        recommended_focus = "self-improvement evidence freshness repair"
+        detail = (
+            "Repair self-improvement evidence freshness before selecting throughput or operator-value work: "
+            + "; ".join(remediation_actions or ["inspect reliability gate provenance"])
+        )
+    elif quantity_guardrail_active:
+        recommended_focus = "operator decision support plus verified system change"
+        detail = (
+            "Do not select issues because they increase task count; "
+            "prefer work with operator decision support and verified change evidence."
+        )
+    else:
+        recommended_focus = "normal lane selection"
+        detail = "Benchmark guardrails permit normal lane selection."
+
     return {
         "quantity_guardrail_active": quantity_guardrail_active,
         "suppress_raw_throughput_selection": quantity_guardrail_active,
         "blocked_checks": sorted(guardrail_checks),
-        "recommended_focus": (
-            "operator decision support plus verified system change"
-            if quantity_guardrail_active
-            else "normal lane selection"
-        ),
-        "detail": (
-            "Do not select issues because they increase task count; prefer work with operator decision support and verified change evidence."
-            if quantity_guardrail_active
-            else "Benchmark guardrails permit normal lane selection."
-        ),
+        "recommended_focus": recommended_focus,
+        "detail": detail,
+        "remediation_actions": remediation_actions,
     }
+
+
+def _operator_decision_support_summary(metrics: dict[str, Any]) -> str:
+    fields = [
+        str(item)
+        for item in metrics.get("operator_decision_support_fields", [])
+        if str(item).strip()
+    ]
+    if fields:
+        examples = metrics.get("operator_decision_support_examples") or []
+        first = examples[0] if examples else {}
+        source = first.get("source") or "unknown"
+        item_id = first.get("id") or "unknown"
+        return (
+            "Operator decision-support evidence captured "
+            f"({', '.join(fields)}) in {source}:{item_id}."
+        )
+
+    missing = metrics.get("missing_operator_decision_support_examples") or []
+    if missing:
+        examples = [
+            f"{item.get('source')}:{item.get('id') or 'unknown'}"
+            for item in missing[:3]
+        ]
+        return (
+            "Operator decision-support evidence missing for verified system changes: "
+            + ", ".join(examples)
+            + "."
+        )
+
+    if int(metrics.get("assessed_work_item_count") or 0) == 0:
+        return "No claimed work items required operator decision-support evidence."
+    return "No explicit operator decision-support evidence was captured."
 
 
 def _build_operator_summary(
@@ -1628,8 +2444,12 @@ def _build_operator_summary(
 ) -> dict[str, str]:
     operator_value = checks["operator_value_alignment"]
     drift = checks["leading_indicator_drift"]
+    operator_value_metrics = operator_value.get("metrics") or {}
     return {
         "operator_value_alignment": str(operator_value.get("detail") or ""),
+        "operator_decision_support_evidence": _operator_decision_support_summary(
+            operator_value_metrics
+        ),
         "leading_indicator_drift": str(drift.get("detail") or ""),
         "issue_selection": str(issue_selection.get("detail") or ""),
     }
@@ -1700,6 +2520,9 @@ def evaluate_self_improvement_benchmark(
             "warning_count": len(gate.get("warnings") or []),
             "contradiction_count": len(gate.get("contradictions") or []),
             "freshness_spread_hours": gate.get("freshness_spread_hours"),
+            "ctx_remediation_required": bool(
+                (gate.get("ctx_remediation") or {}).get("required")
+            ),
         },
     )
     anti_make_work_check = _evaluate_anti_make_work_check(
@@ -1738,7 +2561,7 @@ def evaluate_self_improvement_benchmark(
         for name, check in checks.items()
         if check.get("critical") and check.get("status") == "fail"
     ]
-    issue_selection = _build_issue_selection_summary(checks)
+    issue_selection = _build_issue_selection_summary(checks, gate)
     operator_summary = _build_operator_summary(checks, issue_selection)
     previous_project_score = _latest_history_project_score(history)
     direction = _score_direction(project_score, previous_project_score, threshold=0.1)
@@ -1746,6 +2569,25 @@ def evaluate_self_improvement_benchmark(
     if leading_indicator_drift.get("status") == "fail":
         direction = "negative"
         trend = "regressing"
+    operator_value_metrics = operator_value_alignment.get("metrics", {})
+    operator_value_checks = {
+        "operator_decision_support_rate": (
+            operator_value_metrics.get("operator_decision_support_rate")
+        ),
+        "verified_system_change_rate": (
+            operator_value_metrics.get("verified_system_change_rate")
+        ),
+        "aligned_work_rate": (
+            operator_value_metrics.get("aligned_work_rate")
+        ),
+        "operator_value_score": operator_value_alignment.get("score"),
+        "operator_decision_support_evidence": (
+            operator_value_metrics.get("operator_decision_support_examples") or []
+        ),
+        "missing_operator_decision_support": (
+            operator_value_metrics.get("missing_operator_decision_support_examples") or []
+        ),
+    }
 
     benchmark = {
         "contract_version": BENCHMARK_CONTRACT_VERSION,
@@ -1758,18 +2600,7 @@ def evaluate_self_improvement_benchmark(
         "checks": checks,
         "critical_failures": critical_failures,
         "operator_value_score": operator_value_alignment.get("score"),
-        "operator_value_checks": {
-            "operator_decision_support_rate": (
-                operator_value_alignment.get("metrics", {}).get("operator_decision_support_rate")
-            ),
-            "verified_system_change_rate": (
-                operator_value_alignment.get("metrics", {}).get("verified_system_change_rate")
-            ),
-            "aligned_work_rate": (
-                operator_value_alignment.get("metrics", {}).get("aligned_work_rate")
-            ),
-            "operator_value_score": operator_value_alignment.get("score"),
-        },
+        "operator_value_checks": operator_value_checks,
         "anti_make_work": {
             "status": anti_make_work_check.get("status"),
             "score": anti_make_work_check.get("score"),
@@ -1792,6 +2623,8 @@ def evaluate_self_improvement_benchmark(
                 "direction": benchmark["direction"],
                 "critical_failures": benchmark["critical_failures"],
                 "operator_value_score": benchmark["operator_value_score"],
+                "operator_value_checks": benchmark["operator_value_checks"],
+                "issue_selection": benchmark["issue_selection"],
                 "checks": {
                     name: {
                         "score": check.get("score"),

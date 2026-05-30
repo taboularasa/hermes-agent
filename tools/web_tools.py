@@ -2333,6 +2333,465 @@ def check_auxiliary_model() -> bool:
     return client is not None
 
 
+_WEB_PROVIDER_CONFIG_VARS = {
+    "brave-free": ("BRAVE_SEARCH_API_KEY",),
+    "ddgs": (),
+    "exa": ("EXA_API_KEY",),
+    "firecrawl": (
+        "FIRECRAWL_API_KEY",
+        "FIRECRAWL_API_URL",
+        "FIRECRAWL_GATEWAY_URL",
+        "TOOL_GATEWAY_DOMAIN",
+        "TOOL_GATEWAY_USER_TOKEN",
+    ),
+    "parallel": ("PARALLEL_API_KEY",),
+    "searxng": ("SEARXNG_URL",),
+    "tavily": ("TAVILY_API_KEY",),
+}
+_WEB_MATRIX_CAPABILITIES = ("search", "extract", "crawl")
+_WEB_MATRIX_SEARCH_PROVIDERS = (
+    "all",
+    "brave-free",
+    "ddgs",
+    "exa",
+    "firecrawl",
+    "parallel",
+    "searxng",
+    "tavily",
+)
+
+
+def _normalize_matrix_items(value: Any, *, allowed: Optional[set[str]] = None) -> list[str]:
+    """Normalize tool args that may arrive as a string or list."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_items = [part.strip() for part in value.split(",")]
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = [str(part).strip() for part in value]
+    else:
+        raw_items = [str(value).strip()]
+
+    normalized: list[str] = []
+    for item in raw_items:
+        lowered = item.lower()
+        if not lowered:
+            continue
+        if allowed is not None and lowered not in allowed:
+            continue
+        if lowered not in normalized:
+            normalized.append(lowered)
+    return normalized
+
+
+def _safe_provider_bool(provider: Any, method_name: str) -> bool:
+    try:
+        method = getattr(provider, method_name)
+        return bool(method())
+    except Exception:
+        return False
+
+
+def _provider_config_presence(provider_name: str) -> dict[str, list[str]]:
+    env_names = _WEB_PROVIDER_CONFIG_VARS.get(provider_name, ())
+    present = [name for name in env_names if _has_env(name)]
+    missing = [name for name in env_names if name not in present]
+    return {"present": present, "missing": missing}
+
+
+def _provider_matrix_row(provider: Any) -> dict[str, Any]:
+    name = str(getattr(provider, "name", "") or "").strip().lower()
+    capabilities = {
+        "search": _safe_provider_bool(provider, "supports_search"),
+        "extract": _safe_provider_bool(provider, "supports_extract"),
+        "crawl": _safe_provider_bool(provider, "supports_crawl"),
+    }
+    available = _safe_provider_bool(provider, "is_available")
+    config = _provider_config_presence(name)
+    return {
+        "name": name,
+        "display_name": str(getattr(provider, "display_name", name) or name),
+        "available": available,
+        "configured": bool(config["present"]) or available,
+        "capabilities": capabilities,
+        "config": config,
+    }
+
+
+def _configured_browser_cloud_provider() -> str:
+    try:
+        from hermes_cli.config import load_config
+
+        browser_cfg = (load_config() or {}).get("browser", {})
+        if isinstance(browser_cfg, dict):
+            return str(browser_cfg.get("cloud_provider") or "").strip().lower()
+    except Exception as exc:
+        logger.debug("Could not read browser cloud provider config: %s", exc)
+    return ""
+
+
+def _firecrawl_surface_status(providers_by_name: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    provider = providers_by_name.get("firecrawl") or {}
+    capabilities = provider.get("capabilities") if isinstance(provider, dict) else {}
+    available = bool(provider.get("available")) if isinstance(provider, dict) else False
+    browser_provider = _configured_browser_cloud_provider()
+    browser_key_present = _has_env("FIRECRAWL_API_KEY")
+    return {
+        "search": available and bool(capabilities.get("search")),
+        "scrape": available and bool(capabilities.get("extract")),
+        "extract": available and bool(capabilities.get("extract")),
+        "crawl": available and bool(capabilities.get("crawl")),
+        "interact": browser_provider == "firecrawl" and browser_key_present,
+        "browser_cloud_provider": browser_provider or None,
+        "config": {
+            "present": [name for name in ("FIRECRAWL_API_KEY", "FIRECRAWL_API_URL") if _has_env(name)],
+            "missing": [name for name in ("FIRECRAWL_API_KEY", "FIRECRAWL_API_URL") if not _has_env(name)],
+        },
+    }
+
+
+def _matrix_provider_status(providers: list[dict[str, Any]]) -> dict[str, Any]:
+    available = sorted(
+        row["name"]
+        for row in providers
+        if row.get("available")
+    )
+    providers_by_name = {
+        row["name"]: {
+            "available": row.get("available", False),
+            "capabilities": row.get("capabilities", {}),
+            "required_env_keys": list(_WEB_PROVIDER_CONFIG_VARS.get(row["name"], ())),
+            "present_env_keys": row.get("config", {}).get("present", []),
+            "missing_env_keys": row.get("config", {}).get("missing", []),
+        }
+        for row in providers
+    }
+    return {
+        "available_providers": available,
+        "missing_providers": sorted(
+            row["name"]
+            for row in providers
+            if not row.get("available")
+        ),
+        "providers": providers_by_name,
+    }
+
+
+def _canonicalize_matrix_result_url(url: str) -> str:
+    if not url:
+        return ""
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+
+        parts = urlsplit(url.strip())
+    except Exception:
+        return url.strip()
+    path = parts.path.rstrip("/") or "/"
+    return urlunsplit(
+        (parts.scheme.lower(), parts.netloc.lower(), path, parts.query, "")
+    )
+
+
+def _normalize_matrix_search_results(
+    provider: str,
+    response_data: dict[str, Any],
+) -> list[dict[str, Any]]:
+    results = (
+        response_data.get("data", {}).get("web", [])
+        if isinstance(response_data, dict)
+        else []
+    )
+    normalized: list[dict[str, Any]] = []
+    for index, result in enumerate(results):
+        if not isinstance(result, dict):
+            continue
+        normalized.append(
+            {
+                "provider": provider,
+                "url": str(result.get("url") or ""),
+                "title": str(result.get("title") or ""),
+                "description": str(result.get("description") or ""),
+                "position": int(result.get("position") or index + 1),
+            }
+        )
+    return normalized
+
+
+def _run_web_search_matrix_query(
+    query: str,
+    limit: int,
+    providers: list[dict[str, Any]],
+    requested_providers: list[str],
+) -> dict[str, Any]:
+    from agent.web_search_registry import get_provider
+
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 5
+    limit = min(max(limit, 1), 10)
+
+    providers_by_name = {row["name"]: row for row in providers}
+    if not requested_providers or "all" in requested_providers:
+        requested = [
+            row["name"]
+            for row in providers
+            if row.get("available") and row.get("capabilities", {}).get("search")
+        ]
+    else:
+        requested = [
+            provider
+            for provider in requested_providers
+            if provider in providers_by_name and provider != "all"
+        ]
+
+    available_requested = [
+        provider
+        for provider in requested
+        if providers_by_name.get(provider, {}).get("available")
+        and providers_by_name.get(provider, {}).get("capabilities", {}).get("search")
+    ]
+    missing_requested = [
+        provider for provider in requested if provider not in available_requested
+    ]
+
+    provider_results: dict[str, dict[str, Any]] = {}
+    fused_index: dict[str, dict[str, Any]] = {}
+
+    for provider_name in available_requested:
+        provider = get_provider(provider_name)
+        if provider is None:
+            provider_results[provider_name] = {
+                "success": False,
+                "result_count": 0,
+                "error": f"Web search provider {provider_name!r} is not registered.",
+                "results": [],
+            }
+            continue
+        try:
+            response_data = provider.search(query, limit=limit)
+            normalized = _normalize_matrix_search_results(provider_name, response_data)
+            provider_results[provider_name] = {
+                "success": bool(response_data.get("success", True)),
+                "result_count": len(normalized),
+                "results": normalized,
+            }
+            if response_data.get("error"):
+                provider_results[provider_name]["error"] = str(response_data["error"])
+            for item in normalized:
+                key = (
+                    _canonicalize_matrix_result_url(item["url"])
+                    or item["url"]
+                    or f"{provider_name}:{item['position']}"
+                )
+                entry = fused_index.setdefault(
+                    key,
+                    {
+                        "url": item["url"],
+                        "title": item["title"],
+                        "description": item["description"],
+                        "providers": [],
+                        "positions": {},
+                    },
+                )
+                if item["provider"] not in entry["providers"]:
+                    entry["providers"].append(item["provider"])
+                entry["positions"][item["provider"]] = item["position"]
+                if not entry.get("title") and item["title"]:
+                    entry["title"] = item["title"]
+                if not entry.get("description") and item["description"]:
+                    entry["description"] = item["description"]
+        except Exception as exc:
+            provider_results[provider_name] = {
+                "success": False,
+                "result_count": 0,
+                "error": str(exc),
+                "results": [],
+            }
+
+    fused_results = []
+    for entry in fused_index.values():
+        provider_hits = len(entry["providers"])
+        avg_position = sum(entry["positions"].values()) / max(1, provider_hits)
+        fused_results.append(
+            {
+                "url": entry["url"],
+                "title": entry["title"],
+                "description": entry["description"],
+                "providers": sorted(entry["providers"]),
+                "provider_hits": provider_hits,
+                "positions": entry["positions"],
+                "position": (
+                    min(entry["positions"].values()) if entry["positions"] else None
+                ),
+                "_avg_position": avg_position,
+            }
+        )
+
+    fused_results.sort(
+        key=lambda item: (
+            -int(item.get("provider_hits") or 0),
+            float(item.get("_avg_position") or 999.0),
+            str(item.get("title") or ""),
+        )
+    )
+    trimmed_results = []
+    for item in fused_results[:limit]:
+        payload = dict(item)
+        payload.pop("_avg_position", None)
+        trimmed_results.append(payload)
+
+    if not available_requested:
+        return {
+            "query": query,
+            "strategy": "all_available" if not requested_providers or "all" in requested_providers else "requested",
+            "data": {"web": []},
+            "providers_used": [],
+            "providers_missing": missing_requested,
+            "provider_results": provider_results,
+            "search_error": "No configured web search providers are available for web_search_matrix.",
+        }
+
+    return {
+        "query": query,
+        "strategy": "all_available" if not requested_providers or "all" in requested_providers else "requested",
+        "data": {"web": trimmed_results},
+        "providers_used": available_requested,
+        "providers_missing": missing_requested,
+        "provider_results": provider_results,
+    }
+
+
+def web_search_matrix(
+    query: Optional[str] = None,
+    limit: int = 5,
+    providers: Optional[List[str]] = None,
+    require_capabilities: Optional[List[str]] = None,
+    require_providers: Optional[List[str]] = None,
+) -> str:
+    """Return provider status, or run a fused multi-provider search.
+
+    The result reports provider names, capability flags, availability, active
+    providers, and env-var presence by variable name only. It never includes
+    env values. When ``query`` is supplied, the same payload also includes
+    fused search results across the available/requested search providers.
+    """
+    required_caps = _normalize_matrix_items(
+        require_capabilities,
+        allowed=set(_WEB_MATRIX_CAPABILITIES),
+    )
+    required_providers = _normalize_matrix_items(require_providers)
+    requested_search_providers = _normalize_matrix_items(
+        providers,
+        allowed=set(_WEB_MATRIX_SEARCH_PROVIDERS),
+    )
+
+    try:
+        from hermes_cli.plugins import discover_plugins
+
+        discover_plugins()
+    except Exception as exc:
+        logger.debug("Could not discover web provider plugins: %s", exc)
+
+    from agent.web_search_registry import (
+        get_active_crawl_provider,
+        get_active_extract_provider,
+        get_active_search_provider,
+        list_providers,
+    )
+
+    providers = [_provider_matrix_row(provider) for provider in list_providers()]
+    providers_by_name = {row["name"]: row for row in providers}
+
+    def _active_row(provider: Any, capability: str) -> Optional[dict[str, Any]]:
+        if provider is None:
+            return None
+        row = _provider_matrix_row(provider)
+        return {
+            "name": row["name"],
+            "display_name": row["display_name"],
+            "available": row["available"],
+            "capability": capability,
+        }
+
+    active = {
+        "search": _active_row(get_active_search_provider(), "search"),
+        "extract": _active_row(get_active_extract_provider(), "extract"),
+        "crawl": _active_row(get_active_crawl_provider(), "crawl"),
+    }
+
+    blocked_reasons: list[str] = []
+    if not providers:
+        blocked_reasons.append("no web providers are registered")
+
+    for name in required_providers:
+        provider = providers_by_name.get(name)
+        if provider is None:
+            blocked_reasons.append(f"required provider '{name}' is not registered")
+            continue
+        if not provider["available"]:
+            blocked_reasons.append(f"required provider '{name}' is not available")
+
+    for capability in required_caps:
+        if not any(
+            row["available"] and row["capabilities"].get(capability)
+            for row in providers
+        ):
+            blocked_reasons.append(
+                f"no available web provider supports {capability}"
+            )
+
+    status = "dependency_blocked" if blocked_reasons else "ok"
+    payload: dict[str, Any] = {
+        "success": not blocked_reasons,
+        "status": status,
+        "requirements": {
+            "capabilities": required_caps,
+            "providers": required_providers,
+        },
+        "active": active,
+        "providers": providers,
+        "provider_status": _matrix_provider_status(providers),
+        "firecrawl_surfaces": _firecrawl_surface_status(providers_by_name),
+        "blocked_reasons": blocked_reasons,
+    }
+
+    query_text = str(query or "").strip()
+    if query_text and not blocked_reasons:
+        search_payload = _run_web_search_matrix_query(
+            query_text,
+            limit,
+            providers,
+            requested_search_providers,
+        )
+        payload.update(search_payload)
+        if search_payload.get("search_error"):
+            payload["success"] = False
+            payload["status"] = "dependency_blocked"
+            payload["blocked_reasons"] = [
+                *payload["blocked_reasons"],
+                str(search_payload["search_error"]),
+            ]
+    elif query_text:
+        payload.update(
+            {
+                "query": query_text,
+                "strategy": "skipped_dependency_blocked",
+                "data": {"web": []},
+                "providers_used": [],
+                "providers_missing": requested_search_providers,
+                "provider_results": {},
+                "search_error": "web_search_matrix requirements are unavailable; search skipped.",
+            }
+        )
+
+    return json.dumps(
+        payload,
+        indent=2,
+        ensure_ascii=False,
+    )
+
+
 
 
 if __name__ == "__main__":
@@ -2472,83 +2931,6 @@ WEB_SEARCH_SCHEMA = {
     }
 }
 
-WEB_SEARCH_MATRIX_SCHEMA = {
-    "name": "web_search_matrix",
-    "description": (
-        "Run a bounded source-discovery matrix. Use {query, providers} to compare "
-        "one query across all configured web providers, or {queries} to run "
-        "multiple query phrasings through the active web_search backend."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": (
-                    "Single query to run across configured providers. When set, "
-                    "providers defaults to all available providers."
-                ),
-            },
-            "queries": {
-                "type": "array",
-                "items": {
-                    "oneOf": [
-                        {"type": "string"},
-                        {
-                            "type": "object",
-                            "properties": {
-                                "label": {"type": "string"},
-                                "query": {"type": "string"},
-                            },
-                            "required": ["query"],
-                        },
-                    ]
-                },
-                "description": "One to twelve search queries, as strings or {label, query} objects.",
-                "minItems": 1,
-                "maxItems": 12,
-            },
-            "providers": {
-                "type": "array",
-                "description": "Provider subset for query mode; defaults to all available providers.",
-                "items": {
-                    "type": "string",
-                    "enum": ["all", "firecrawl", "parallel", "tavily", "exa", "searxng", "brave-free", "ddgs"],
-                },
-            },
-            "required_providers": {
-                "type": "array",
-                "description": (
-                    "Providers that must succeed for success=true in query/provider mode. "
-                    "Use when a research protocol explicitly requires a named provider."
-                ),
-                "items": {
-                    "type": "string",
-                    "enum": ["firecrawl", "parallel", "tavily", "exa", "searxng", "brave-free", "ddgs"],
-                },
-            },
-            "limit": {
-                "type": "integer",
-                "description": "Maximum fused results in query/provider mode. Defaults to 5.",
-                "minimum": 1,
-                "maximum": 10,
-                "default": 5,
-            },
-            "limit_per_query": {
-                "type": "integer",
-                "description": "Maximum results per query. Defaults to 3.",
-                "minimum": 1,
-                "maximum": 10,
-                "default": 3,
-            },
-        },
-        "anyOf": [
-            {"required": ["query"]},
-            {"required": ["queries"]},
-        ],
-    },
-}
-
 WEB_EXTRACT_SCHEMA = {
     "name": "web_extract",
     "description": "Extract content from web page URLs. Returns page content in markdown format. Also works with PDF URLs (arxiv papers, documents, etc.) — pass the PDF link directly and it converts to markdown text. Pages under 5000 chars return full markdown; larger pages are LLM-summarized and capped at ~5000 chars per page. Pages over 2M chars are refused. If a URL fails or times out, use the browser tool to access it instead.",
@@ -2566,6 +2948,142 @@ WEB_EXTRACT_SCHEMA = {
     }
 }
 
+WEB_SEARCH_MATRIX_SCHEMA = {
+    "name": "web_search_matrix",
+    "description": (
+        "Search across configured web providers, run labeled query matrices, "
+        "and report provider capability status. Returns fused results when "
+        "query is supplied, plus provider availability, active "
+        "search/extract/crawl providers, Firecrawl surface status, and env-var "
+        "presence by variable name only."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": (
+                    "Optional search query. Omit this to report provider status "
+                    "without making external search calls."
+                ),
+            },
+            "queries": {
+                "type": "array",
+                "items": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {
+                            "type": "object",
+                            "properties": {
+                                "label": {"type": "string"},
+                                "query": {"type": "string"},
+                            },
+                            "required": ["query"],
+                        },
+                    ]
+                },
+                "description": "One to twelve source-discovery queries, as strings or {label, query} objects.",
+                "minItems": 1,
+                "maxItems": 12,
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of fused search results to return.",
+                "minimum": 1,
+                "maximum": 10,
+            },
+            "limit_per_query": {
+                "type": "integer",
+                "description": "Maximum results per labeled query. Defaults to 3.",
+                "minimum": 1,
+                "maximum": 10,
+                "default": 3,
+            },
+            "providers": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": list(_WEB_MATRIX_SEARCH_PROVIDERS),
+                },
+                "description": (
+                    "Optional search provider subset. Defaults to all available "
+                    "search providers when query is supplied."
+                ),
+            },
+            "required_providers": {
+                "type": "array",
+                "description": (
+                    "Providers that must succeed in source-discovery query mode. "
+                    "Use when a research protocol explicitly requires a named provider."
+                ),
+                "items": {
+                    "type": "string",
+                    "enum": [
+                        "brave-free",
+                        "ddgs",
+                        "exa",
+                        "firecrawl",
+                        "parallel",
+                        "searxng",
+                        "tavily",
+                    ],
+                },
+            },
+            "require_capabilities": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": ["search", "extract", "crawl"],
+                },
+                "description": (
+                    "Optional capabilities that must have at least one available "
+                    "provider. If unmet, the result status is dependency_blocked."
+                ),
+            },
+            "require_providers": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": [
+                        "brave-free",
+                        "ddgs",
+                        "exa",
+                        "firecrawl",
+                        "parallel",
+                        "searxng",
+                        "tavily",
+                    ],
+                },
+                "description": (
+                    "Optional provider names that must be registered and available. "
+                    "Use ['firecrawl'] for jobs that require Firecrawl-backed capture."
+                ),
+            },
+        },
+        "required": [],
+    },
+}
+
+
+def _handle_web_search_matrix_registry(args, **kw):
+    if args.get("queries") is not None or args.get("required_providers") is not None:
+        return web_search_matrix_tool(
+            args.get("queries"),
+            limit_per_query=args.get("limit_per_query", 3),
+            query=args.get("query"),
+            limit=args.get("limit"),
+            providers=args.get("providers"),
+            required_providers=args.get("required_providers"),
+        )
+    return web_search_matrix(
+        query=args.get("query"),
+        limit=args.get("limit") or 5,
+        providers=args.get("providers"),
+        require_capabilities=args.get("require_capabilities"),
+        require_providers=args.get("require_providers"),
+    )
+
+
 registry.register(
     name="web_search",
     toolset="web",
@@ -2574,23 +3092,6 @@ registry.register(
     check_fn=check_web_api_key,
     requires_env=_web_requires_env(),
     emoji="🔍",
-    max_result_size_chars=100_000,
-)
-registry.register(
-    name="web_search_matrix",
-    toolset="web",
-    schema=WEB_SEARCH_MATRIX_SCHEMA,
-    handler=lambda args, **kw: web_search_matrix_tool(
-        args.get("queries"),
-        limit_per_query=args.get("limit_per_query", 3),
-        query=args.get("query"),
-        limit=args.get("limit"),
-        providers=args.get("providers"),
-        required_providers=args.get("required_providers"),
-    ),
-    check_fn=check_web_api_key,
-    requires_env=_web_requires_env(),
-    emoji="🔎",
     max_result_size_chars=100_000,
 )
 registry.register(
@@ -2603,5 +3104,14 @@ registry.register(
     requires_env=_web_requires_env(),
     is_async=True,
     emoji="📄",
+    max_result_size_chars=100_000,
+)
+registry.register(
+    name="web_search_matrix",
+    toolset="web",
+    schema=WEB_SEARCH_MATRIX_SCHEMA,
+    handler=_handle_web_search_matrix_registry,
+    check_fn=lambda: True,
+    emoji="🔎",
     max_result_size_chars=100_000,
 )
