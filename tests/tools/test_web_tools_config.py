@@ -482,6 +482,161 @@ class TestWebSearchSchema:
         assert result == '{"success": true}'
         mock_search.assert_called_once_with("docs", limit=5)
 
+    def test_web_search_matrix_reports_provider_presence_without_values(self, monkeypatch):
+        import tools.web_tools
+
+        class FakeProvider:
+            name = "firecrawl"
+            display_name = "Firecrawl"
+
+            def is_available(self):
+                return True
+
+            def supports_search(self):
+                return True
+
+            def supports_extract(self):
+                return True
+
+            def supports_crawl(self):
+                return True
+
+        monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-secret-value")
+        with patch("hermes_cli.plugins.discover_plugins"), \
+             patch("agent.web_search_registry.list_providers", return_value=[FakeProvider()]), \
+             patch("agent.web_search_registry.get_active_search_provider", return_value=FakeProvider()), \
+             patch("agent.web_search_registry.get_active_extract_provider", return_value=FakeProvider()), \
+             patch("agent.web_search_registry.get_active_crawl_provider", return_value=FakeProvider()), \
+             patch("hermes_cli.config.load_config", return_value={"browser": {"cloud_provider": "firecrawl"}}):
+            result = json.loads(
+                tools.web_tools.web_search_matrix(
+                    require_capabilities=["search", "extract"],
+                    require_providers=["firecrawl"],
+                )
+            )
+
+        assert result["success"] is True
+        assert result["status"] == "ok"
+        assert result["active"]["search"]["name"] == "firecrawl"
+        firecrawl = result["providers"][0]
+        assert firecrawl["name"] == "firecrawl"
+        assert firecrawl["available"] is True
+        assert firecrawl["capabilities"] == {
+            "search": True,
+            "extract": True,
+            "crawl": True,
+        }
+        assert result["firecrawl_surfaces"]["search"] is True
+        assert result["firecrawl_surfaces"]["scrape"] is True
+        assert result["firecrawl_surfaces"]["extract"] is True
+        assert result["firecrawl_surfaces"]["interact"] is True
+        assert "FIRECRAWL_API_KEY" in firecrawl["config"]["present"]
+        assert "fc-secret-value" not in json.dumps(result)
+
+    def test_web_search_matrix_dependency_blocked_when_firecrawl_unavailable(self, monkeypatch):
+        import tools.web_tools
+
+        class FakeProvider:
+            name = "firecrawl"
+            display_name = "Firecrawl"
+
+            def is_available(self):
+                return False
+
+            def supports_search(self):
+                return True
+
+            def supports_extract(self):
+                return True
+
+            def supports_crawl(self):
+                return True
+
+        monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+        with patch("hermes_cli.plugins.discover_plugins"), \
+             patch("agent.web_search_registry.list_providers", return_value=[FakeProvider()]), \
+             patch("agent.web_search_registry.get_active_search_provider", return_value=None), \
+             patch("agent.web_search_registry.get_active_extract_provider", return_value=None), \
+             patch("agent.web_search_registry.get_active_crawl_provider", return_value=None), \
+             patch("hermes_cli.config.load_config", return_value={"browser": {"cloud_provider": "firecrawl"}}):
+            result = json.loads(
+                tools.web_tools.web_search_matrix(
+                    require_capabilities=["search", "extract"],
+                    require_providers=["firecrawl"],
+                )
+            )
+
+        assert result["success"] is False
+        assert result["status"] == "dependency_blocked"
+        assert result["firecrawl_surfaces"]["interact"] is False
+        assert any("firecrawl" in reason.lower() for reason in result["blocked_reasons"])
+
+    def test_web_search_matrix_query_fuses_provider_results(self, monkeypatch):
+        import tools.web_tools
+
+        class FakeProvider:
+            def __init__(self, name, url):
+                self.name = name
+                self.display_name = name.title()
+                self.url = url
+
+            def is_available(self):
+                return True
+
+            def supports_search(self):
+                return True
+
+            def supports_extract(self):
+                return self.name == "firecrawl"
+
+            def supports_crawl(self):
+                return self.name == "firecrawl"
+
+            def search(self, query, limit=5):
+                return {
+                    "success": True,
+                    "data": {
+                        "web": [
+                            {
+                                "title": f"{self.name} result",
+                                "url": self.url,
+                                "description": query,
+                                "position": 1,
+                            }
+                        ]
+                    },
+                }
+
+        firecrawl = FakeProvider("firecrawl", "https://example.com/page/")
+        exa = FakeProvider("exa", "https://example.com/page")
+        providers = {"firecrawl": firecrawl, "exa": exa}
+
+        monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-secret-value")
+        monkeypatch.setenv("EXA_API_KEY", "exa-secret-value")
+        with patch("hermes_cli.plugins.discover_plugins"), \
+             patch("agent.web_search_registry.list_providers", return_value=[firecrawl, exa]), \
+             patch("agent.web_search_registry.get_provider", side_effect=providers.get), \
+             patch("agent.web_search_registry.get_active_search_provider", return_value=firecrawl), \
+             patch("agent.web_search_registry.get_active_extract_provider", return_value=firecrawl), \
+             patch("agent.web_search_registry.get_active_crawl_provider", return_value=firecrawl), \
+             patch("hermes_cli.config.load_config", return_value={"browser": {"cloud_provider": "firecrawl"}}):
+            result = json.loads(
+                tools.web_tools.web_search_matrix(
+                    query="ontology evidence",
+                    providers=["firecrawl", "exa"],
+                    require_providers=["firecrawl"],
+                )
+            )
+
+        assert result["success"] is True
+        assert result["query"] == "ontology evidence"
+        assert result["providers_used"] == ["firecrawl", "exa"]
+        assert result["data"]["web"][0]["provider_hits"] == 2
+        assert result["data"]["web"][0]["providers"] == ["exa", "firecrawl"]
+        assert result["provider_status"]["available_providers"] == ["exa", "firecrawl"]
+        assert "fc-secret-value" not in json.dumps(result)
+        assert "exa-secret-value" not in json.dumps(result)
+
     def test_web_search_clamps_limit_before_backend_call(self):
         import tools.web_tools
 

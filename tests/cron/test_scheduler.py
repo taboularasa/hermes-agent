@@ -1016,6 +1016,130 @@ class TestRunJobSessionPersistence:
         kwargs = mock_agent_cls.call_args.kwargs
         assert kwargs["enabled_toolsets"] == ["terminal"]
 
+    def test_ontology_research_job_augments_explicit_toolsets(self, tmp_path):
+        job = {
+            "id": "ontology-tools",
+            "name": "Scheduled ontology research",
+            "prompt": (
+                "Run ontology research. Start with "
+                "ontology_context(action=\"ontology_engineering\"), then call "
+                "web_search_matrix before Firecrawl source capture."
+            ),
+            "enabled_toolsets": ["terminal"],
+        }
+        fake_db, patches = self._make_run_job_patches(tmp_path)
+
+        from tools.registry import registry
+
+        previous_entry = registry.get_entry("ontology_context")
+        if previous_entry is not None:
+            registry.deregister("ontology_context")
+        registry.register(
+            name="ontology_context",
+            toolset="hadto-ontology",
+            schema={
+                "name": "ontology_context",
+                "description": "test",
+                "parameters": {"type": "object", "properties": {}},
+            },
+            handler=lambda args, **kw: "{}",
+            check_fn=lambda: True,
+        )
+        try:
+            with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                 patch(
+                     "model_tools.get_tool_definitions",
+                     return_value=[
+                         {"function": {"name": "ontology_context"}},
+                         {"function": {"name": "web_search_matrix"}},
+                     ],
+                 ), \
+                 patch("cron.scheduler._firecrawl_available", return_value=True), \
+                 patch("run_agent.AIAgent") as mock_agent_cls:
+                mock_agent = MagicMock()
+                mock_agent.run_conversation.return_value = {"final_response": "ok"}
+                mock_agent_cls.return_value = mock_agent
+                success, _output, final_response, error = run_job(job)
+        finally:
+            registry.deregister("ontology_context")
+            if previous_entry is not None:
+                registry.register(
+                    name=previous_entry.name,
+                    toolset=previous_entry.toolset,
+                    schema=previous_entry.schema,
+                    handler=previous_entry.handler,
+                    check_fn=previous_entry.check_fn,
+                    requires_env=previous_entry.requires_env,
+                    is_async=previous_entry.is_async,
+                    description=previous_entry.description,
+                    emoji=previous_entry.emoji,
+                    max_result_size_chars=previous_entry.max_result_size_chars,
+                    dynamic_schema_overrides=previous_entry.dynamic_schema_overrides,
+                )
+
+        assert success is True
+        assert final_response == "ok"
+        assert error is None
+        kwargs = mock_agent_cls.call_args.kwargs
+        assert kwargs["enabled_toolsets"] == ["terminal", "web", "hadto-ontology"]
+        fake_db.end_session.assert_called_once()
+
+    def test_non_ontology_job_does_not_gain_ontology_toolsets(self, tmp_path):
+        job = {
+            "id": "plain-tools",
+            "name": "Plain maintenance",
+            "prompt": "Check disk usage and report only anomalies.",
+            "enabled_toolsets": ["terminal"],
+        }
+        fake_db, patches = self._make_run_job_patches(tmp_path)
+
+        from tools.registry import registry
+
+        previous_entry = registry.get_entry("ontology_context")
+        if previous_entry is not None:
+            registry.deregister("ontology_context")
+        registry.register(
+            name="ontology_context",
+            toolset="hadto-ontology",
+            schema={
+                "name": "ontology_context",
+                "description": "test",
+                "parameters": {"type": "object", "properties": {}},
+            },
+            handler=lambda args, **kw: "{}",
+            check_fn=lambda: True,
+        )
+        try:
+            with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                 patch("run_agent.AIAgent") as mock_agent_cls:
+                mock_agent = MagicMock()
+                mock_agent.run_conversation.return_value = {"final_response": "ok"}
+                mock_agent_cls.return_value = mock_agent
+                success, _output, final_response, error = run_job(job)
+        finally:
+            registry.deregister("ontology_context")
+            if previous_entry is not None:
+                registry.register(
+                    name=previous_entry.name,
+                    toolset=previous_entry.toolset,
+                    schema=previous_entry.schema,
+                    handler=previous_entry.handler,
+                    check_fn=previous_entry.check_fn,
+                    requires_env=previous_entry.requires_env,
+                    is_async=previous_entry.is_async,
+                    description=previous_entry.description,
+                    emoji=previous_entry.emoji,
+                    max_result_size_chars=previous_entry.max_result_size_chars,
+                    dynamic_schema_overrides=previous_entry.dynamic_schema_overrides,
+                )
+
+        assert success is True
+        assert final_response == "ok"
+        assert error is None
+        kwargs = mock_agent_cls.call_args.kwargs
+        assert kwargs["enabled_toolsets"] == ["terminal"]
+        fake_db.end_session.assert_called_once()
+
     def test_ontology_research_preflight_requires_matrix_search(self):
         import cron.scheduler as scheduler
 
