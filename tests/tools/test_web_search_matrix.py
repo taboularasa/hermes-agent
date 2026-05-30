@@ -52,6 +52,29 @@ def test_web_search_matrix_runs_labeled_queries_and_dedupes(monkeypatch):
     assert "https://example.com/irs-dental" in urls
 
 
+def test_registered_web_search_matrix_preserves_labeled_query_mode(monkeypatch):
+    entry = web_tools.registry.get_entry("web_search_matrix")
+    calls = {}
+
+    def fake_matrix_tool(queries, **kwargs):
+        calls["queries"] = queries
+        calls["kwargs"] = kwargs
+        return json.dumps({"success": True})
+
+    monkeypatch.setattr(web_tools, "web_search_matrix_tool", fake_matrix_tool)
+
+    payload = json.loads(
+        entry.handler({
+            "queries": [{"label": "cms", "query": "cms dental"}],
+            "limit_per_query": 2,
+        })
+    )
+
+    assert payload["success"] is True
+    assert calls["queries"] == [{"label": "cms", "query": "cms dental"}]
+    assert calls["kwargs"]["limit_per_query"] == 2
+
+
 class _FakeSearchProvider(WebSearchProvider):
     def __init__(self, name, results=None, error=None):
         self._name = name

@@ -1,3 +1,4 @@
+import json
 from unittest.mock import MagicMock, patch
 
 from cron import scheduler
@@ -72,13 +73,13 @@ def test_cron_preflight_distinguishes_missing_web_credentials(monkeypatch):
     matrix = _check(report, "tool", "web_search_matrix")
     firecrawl = _check(report, "web_backend", "firecrawl")
 
-    assert matrix["status"] == "unavailable"
-    assert matrix["category"] == "provider_credentials_absent"
+    assert matrix["status"] == "available"
+    assert matrix["category"] == "available"
     assert firecrawl["status"] == "unavailable"
     assert firecrawl["category"] == "provider_credentials_absent"
 
     markdown = scheduler._format_cron_preflight_markdown(report)
-    assert "tool `web_search_matrix`: unavailable (provider_credentials_absent)" in markdown
+    assert "tool `web_search_matrix`: available (available)" in markdown
     assert "web backend `firecrawl`: unavailable (provider_credentials_absent)" in markdown
     assert "downgrade:" in markdown
 
@@ -152,9 +153,69 @@ def test_run_job_includes_preflight_in_prompt_and_report(monkeypatch):
     assert final_response == "ok"
     assert error is None
     assert "## Cron Preflight" in output
-    assert "tool `web_search_matrix`: unavailable (provider_credentials_absent)" in output
+    assert "tool `web_search_matrix`: available (available)" in output
     assert "web backend `firecrawl`: unavailable (provider_credentials_absent)" in output
 
     prompt_arg = agent.run_conversation.call_args.args[0]
     assert prompt_arg.startswith("## Cron Preflight")
     assert "Treat this preflight as authoritative" in prompt_arg
+
+
+def test_ontology_degradation_report_classifies_runtime_failures():
+    job = {
+        "id": "ontology-job",
+        "name": "ontology research",
+        "prompt": "Run ontology research with web_extract and Firecrawl.",
+    }
+    result = {
+        "messages": [
+            {
+                "role": "tool",
+                "content": json.dumps(
+                    {
+                        "results": [
+                            {
+                                "url": "https://www.medicaid.gov/example.pdf",
+                                "error": "Payment Required: Insufficient credits",
+                            }
+                        ],
+                        "meta": {
+                            "degradations": [
+                                {
+                                    "category": "provider_credit_exhaustion",
+                                    "primary_provider": "firecrawl",
+                                }
+                            ]
+                        },
+                    }
+                ),
+            },
+            {
+                "role": "assistant",
+                "content": (
+                    "Blob-store publication failed because docker: command not found; "
+                    "manifest recorded blob_store: null. "
+                    "/home/david/.hermes/notes/ontology-research-cycle/2026.md "
+                    "was read-only, so wrote research/notes/ontology-research-cycle/2026.md."
+                ),
+            },
+        ]
+    }
+
+    report = scheduler._build_cron_degradation_report(
+        job,
+        job["prompt"],
+        result,
+        "completed with degraded publication",
+    )
+    categories = {check["category"] for check in report["checks"]}
+
+    assert report["has_degradations"] is True
+    assert "provider_credit_exhaustion" in categories
+    assert "docker_unavailable" in categories
+    assert "blob_publication_deferred" in categories
+    assert "notes_read_only" in categories
+
+    markdown = scheduler._format_cron_degradation_markdown(report)
+    assert "## Cron Degradation Classification" in markdown
+    assert '"category": "provider_credit_exhaustion"' in markdown
