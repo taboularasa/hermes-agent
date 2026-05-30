@@ -278,6 +278,24 @@ def _collect_cron_preflight_requirements(job: dict, prompt: str) -> tuple[List[s
     return tools, backends
 
 
+def _is_ontology_research_run(job: dict, prompt: str) -> bool:
+    """Return True for ontology/source-registry cron research runs."""
+    haystack = "\n".join(
+        str(part or "")
+        for part in (
+            job.get("name"),
+            job.get("prompt"),
+            job.get("skill"),
+            " ".join(str(s) for s in job.get("skills") or []),
+            job.get("workdir"),
+            job.get("research_profile"),
+            job.get("research_protocol"),
+            prompt,
+        )
+    )
+    return _prompt_contains_any(haystack, _ONTOLOGY_RESEARCH_MARKERS)
+
+
 def _requested_tool_names_for_cron(
     enabled_toolsets: list[str] | None,
     disabled_toolsets: list[str] | None,
@@ -429,6 +447,7 @@ def _build_cron_preflight_report(
     return {
         "checks": checks,
         "has_issues": any(check.get("status") != "available" for check in checks),
+        "ontology_degradation_taxonomy": _is_ontology_research_run(job, prompt),
     }
 
 
@@ -455,6 +474,15 @@ def _format_cron_preflight_markdown(report: Dict[str, Any]) -> str:
         downgrade = check.get("downgrade")
         if downgrade:
             lines.append(f"- downgrade: {downgrade}")
+    if report.get("ontology_degradation_taxonomy"):
+        lines.extend([
+            "",
+            "### Runtime Degradation Taxonomy",
+            "- Classify Firecrawl 402/payment/credit failures as `provider_credit_exhaustion`, not `provider_credentials_absent` or `tool_surface_absent`.",
+            "- If `web_extract` hits `provider_credit_exhaustion` but direct HTTP fetch succeeds, report direct HTTP as the fallback source and do not claim Firecrawl extraction succeeded.",
+            "- If source blob publication cannot reach Docker or MinIO, classify it as `docker_unavailable` or `blob_publication_deferred` and leave a queued publication artifact instead of dropping the manifest/blob candidate.",
+            "- If the intended Hermes notes path is read-only, classify it as `notes_read_only`, write the repo fallback note, and record the blocked intended path.",
+        ])
     return "\n".join(lines)
 
 
@@ -467,6 +495,154 @@ def _inject_cron_preflight_prompt(prompt: str, markdown: str) -> str:
         "Distinguish missing tool surface from missing provider credentials in your report, "
         "and do not claim to have used unavailable tools or providers.\n\n"
         f"{prompt}"
+    )
+
+
+def _cron_message_content_to_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text") or item.get("content") or item.get("output")
+                if text:
+                    parts.append(str(text))
+            elif item is not None:
+                parts.append(str(item))
+        return "\n".join(parts)
+    if isinstance(content, dict):
+        try:
+            return json.dumps(content, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            return str(content)
+    return str(content)
+
+
+def _collect_cron_result_text(result: Dict[str, Any], final_response: str) -> str:
+    """Collect final/tool text for runtime degradation classification."""
+    parts = [final_response or ""]
+    for message in result.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        if role not in {"assistant", "tool"}:
+            continue
+        text = _cron_message_content_to_text(message.get("content"))
+        if text:
+            parts.append(text)
+    combined = "\n".join(parts)
+    return combined[-200_000:]
+
+
+def _first_matching_path(text: str, marker: str) -> Optional[str]:
+    match = re.search(r"(/[^\s`'\",)]*" + re.escape(marker) + r"[^\s`'\",)]*)", text)
+    return match.group(1) if match else None
+
+
+def _build_cron_degradation_report(
+    job: dict,
+    prompt: str,
+    result: Dict[str, Any],
+    final_response: str,
+) -> Dict[str, Any]:
+    """Classify runtime degradations observed during ontology cron runs."""
+    if not _is_ontology_research_run(job, prompt):
+        return {"kind": "ontology_runtime_degradation", "checks": [], "has_degradations": False}
+
+    text = _collect_cron_result_text(result, final_response)
+    lowered = text.lower()
+    checks: List[Dict[str, Any]] = []
+
+    def add_once(category: str, detail: str, **extra: Any) -> None:
+        if any(check.get("category") == category for check in checks):
+            return
+        entry: Dict[str, Any] = {
+            "category": category,
+            "status": "degraded",
+            "detail": detail,
+        }
+        entry.update({k: v for k, v in extra.items() if v})
+        checks.append(entry)
+
+    if (
+        "provider_credit_exhaustion" in lowered
+        or (
+            ("firecrawl" in lowered or "web_extract" in lowered)
+            and (
+                "payment required" in lowered
+                or "insufficient credits" in lowered
+                or "credits have been exhausted" in lowered
+                or " 402" in lowered
+                or "http 402" in lowered
+            )
+        )
+    ):
+        add_once(
+            "provider_credit_exhaustion",
+            "Firecrawl extraction failed because scrape credits were exhausted.",
+            provider="firecrawl",
+        )
+
+    if (
+        "docker: command not found" in lowered
+        or "docker not found" in lowered
+        or "no docker executable" in lowered
+        or "no such file or directory: 'docker'" in lowered
+        or 'no such file or directory: "docker"' in lowered
+        or "docker binary" in lowered and ("missing" in lowered or "not available" in lowered)
+    ):
+        add_once(
+            "docker_unavailable",
+            "Source blob publication could not use Docker from this cron environment.",
+        )
+
+    if (
+        ("blob_store" in lowered and "null" in lowered and ("docker" in lowered or "minio" in lowered or "publication" in lowered))
+        or "blob-store publication failed" in lowered
+        or "queued publication artifact" in lowered
+    ):
+        add_once(
+            "blob_publication_deferred",
+            "Blob-store publication did not complete in-run and needs queued retry evidence.",
+        )
+
+    if (
+        ("ontology-research-cycle" in lowered or ".hermes/notes" in lowered)
+        and (
+            "read-only" in lowered
+            or "read only" in lowered
+            or "permission denied" in lowered
+            or "readonly filesystem" in lowered
+        )
+    ):
+        add_once(
+            "notes_read_only",
+            "The intended Hermes ontology note path was not writable; repo fallback note should be used.",
+            blocked_path=_first_matching_path(text, "ontology-research-cycle"),
+        )
+
+    return {
+        "kind": "ontology_runtime_degradation",
+        "checks": checks,
+        "has_degradations": bool(checks),
+    }
+
+
+def _format_cron_degradation_markdown(report: Dict[str, Any]) -> str:
+    if not report.get("has_degradations"):
+        return ""
+    payload = {
+        "kind": report.get("kind", "ontology_runtime_degradation"),
+        "checks": report.get("checks") or [],
+    }
+    return (
+        "## Cron Degradation Classification\n\n"
+        "```json\n"
+        f"{json.dumps(payload, indent=2, sort_keys=True)}\n"
+        "```"
     )
 
 # Valid delivery platforms — used to validate user-supplied platform names
@@ -1582,6 +1758,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
 
     agent = None
     preflight_markdown = ""
+    degradation_markdown = ""
 
     # Mark this as a cron session so the approval system can apply cron_mode.
     # This env var is process-wide and persists for the lifetime of the
@@ -1986,6 +2163,14 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         # for delivery logic (empty response = no delivery).
         logged_response = final_response if final_response else "(No response generated)"
         preflight_section = f"{preflight_markdown}\n\n" if preflight_markdown else ""
+        degradation_report = _build_cron_degradation_report(
+            job,
+            prompt,
+            result,
+            final_response,
+        )
+        degradation_markdown = _format_cron_degradation_markdown(degradation_report)
+        degradation_section = f"{degradation_markdown}\n\n" if degradation_markdown else ""
 
         output = f"""# Cron Job: {job_name}
 
@@ -1993,7 +2178,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
 **Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}
 **Schedule:** {job.get('schedule_display', 'N/A')}
 
-{preflight_section}## Prompt
+{preflight_section}{degradation_section}## Prompt
 
 {prompt}
 
@@ -2009,6 +2194,14 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         error_msg = f"{type(e).__name__}: {str(e)}"
         logger.exception("Job '%s' failed: %s", job_name, error_msg)
         preflight_section = f"{preflight_markdown}\n\n" if preflight_markdown else ""
+        degradation_report = _build_cron_degradation_report(
+            job,
+            prompt if "prompt" in locals() else str(job.get("prompt") or ""),
+            {"messages": [{"role": "assistant", "content": error_msg}]},
+            error_msg,
+        )
+        degradation_markdown = _format_cron_degradation_markdown(degradation_report)
+        degradation_section = f"{degradation_markdown}\n\n" if degradation_markdown else ""
 
         output = f"""# Cron Job: {job_name} (FAILED)
 
@@ -2016,7 +2209,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
 **Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}
 **Schedule:** {job.get('schedule_display', 'N/A')}
 
-{preflight_section}## Prompt
+{preflight_section}{degradation_section}## Prompt
 
 {prompt}
 

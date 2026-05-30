@@ -707,6 +707,62 @@ class TestWebSearchSchema:
         primary.search.assert_called_once_with("docs", 3)
         fallback.search.assert_called_once_with("docs", 3)
 
+    @pytest.mark.asyncio
+    async def test_web_extract_falls_back_to_direct_http_on_firecrawl_credit_exhaustion(self):
+        import tools.web_tools
+
+        class FakeFirecrawlProvider:
+            name = "firecrawl"
+            display_name = "Firecrawl"
+
+            def supports_extract(self):
+                return True
+
+            async def extract(self, urls, **kwargs):
+                return [
+                    {
+                        "url": urls[0],
+                        "title": "",
+                        "content": "",
+                        "raw_content": "",
+                        "error": "Payment Required: Insufficient credits",
+                    }
+                ]
+
+        direct_result = {
+            "url": "https://www.medicaid.gov/example",
+            "title": "Official source",
+            "content": "official Medicaid source text",
+            "raw_content": "official Medicaid source text",
+            "metadata": {
+                "source": "direct_http",
+                "sha256": "abc123",
+            },
+        }
+
+        with patch("tools.web_tools._get_extract_backend", return_value="firecrawl"), \
+             patch("agent.web_search_registry.get_provider", return_value=FakeFirecrawlProvider()), \
+             patch("tools.web_tools.is_safe_url", return_value=True), \
+             patch("tools.web_tools.check_auxiliary_model", return_value=False), \
+             patch("tools.web_tools._direct_http_extract_one", new=AsyncMock(return_value=direct_result)), \
+             patch.object(tools.web_tools._debug, "log_call"), \
+             patch.object(tools.web_tools._debug, "save"):
+            result = json.loads(
+                await tools.web_tools.web_extract_tool(
+                    ["https://www.medicaid.gov/example"],
+                    use_llm_processing=False,
+                )
+            )
+
+        entry = result["results"][0]
+        assert entry["content"] == "official Medicaid source text"
+        assert entry["error"] is None
+        assert entry["degradation"]["category"] == "provider_credit_exhaustion"
+        assert entry["degradation"]["primary_provider"] == "firecrawl"
+        assert entry["degradation"]["fallback_provider"] == "direct_http"
+        assert entry["degradation"]["fallback_status"] == "succeeded"
+        assert result["meta"]["degradations"][0]["category"] == "provider_credit_exhaustion"
+
     def test_web_search_falls_back_when_configured_provider_raises_retryable_error(self):
         import tools.web_tools
 
