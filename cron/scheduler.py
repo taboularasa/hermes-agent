@@ -14,6 +14,7 @@ import contextvars
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -28,7 +29,7 @@ except ImportError:
     except ImportError:
         msvcrt = None
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 # Add parent directory to path for imports BEFORE repo-level imports.
 # Without this, standalone invocations (e.g. after `hermes update` reloads
@@ -93,12 +94,13 @@ def _cron_job_contract_text(job: dict, prompt: str) -> str:
         prompt,
         job.get("skill"),
         " ".join(str(item) for item in (job.get("skills") or [])),
+        str(job.get("research_profile") or job.get("research_protocol") or ""),
     ]
     return " ".join(str(part or "") for part in parts).lower()
 
 
 def _cron_job_requires_ontology_research_contract(job: dict, prompt: str) -> bool:
-    """Return True for scheduled ontology research jobs that need strict tools."""
+    """Return True for scheduled ontology research jobs that need web/ontology tools."""
     text = _cron_job_contract_text(job, prompt)
     if "ontology_context" in text or "web_search_matrix" in text:
         return True
@@ -150,204 +152,321 @@ def _resolve_ontology_cron_enabled_toolsets(
     augmented = [str(toolset) for toolset in enabled_toolsets]
     _append_toolset_once(augmented, "web")
     _append_toolset_once(augmented, _registered_toolset_for_tool("ontology_context"))
-    _append_toolset_once(augmented, _registered_toolset_for_tool("web_search_matrix"))
     return augmented
 
 
-def _cron_tool_contract_status(
-    tool_name: str,
-    enabled_toolsets: list[str] | None,
-) -> dict:
-    toolsets_to_check = enabled_toolsets or ["hermes-cron"]
-    exposed = False
-    try:
-        from toolsets import resolve_multiple_toolsets
+_CRON_PREFLIGHT_DISABLED_TOOLSETS = ["cronjob", "messaging", "clarify"]
+_WEB_TOOL_NAMES = {"web_search", "web_search_matrix", "web_extract"}
+_FIRECRAWL_ENV_HINTS = [
+    "FIRECRAWL_API_KEY",
+    "FIRECRAWL_API_URL",
+    "FIRECRAWL_GATEWAY_URL",
+    "TOOL_GATEWAY_DOMAIN + TOOL_GATEWAY_USER_TOKEN",
+]
+_ONTOLOGY_RESEARCH_MARKERS = (
+    "ontology research",
+    "ontology_engineering",
+    "ontology_context",
+    "source-registry",
+    "source registry",
+    "ontology literature",
+)
+_WEB_SEARCH_MATRIX_MARKERS = (
+    "web_search_matrix",
+    "search matrix",
+)
+_WEB_EXTRACT_MARKERS = (
+    "web_extract",
+)
+_FIRECRAWL_MARKERS = (
+    "firecrawl",
+)
 
-        exposed = tool_name in resolve_multiple_toolsets(toolsets_to_check)
-    except Exception as exc:
-        return {
-            "tool": tool_name,
-            "available": False,
-            "exposed": False,
-            "registered": False,
-            "reason": f"{tool_name} toolset resolution failed: {exc}",
-        }
 
-    try:
-        from tools.registry import registry
+def _prompt_contains_any(prompt: str, markers: tuple[str, ...]) -> bool:
+    lowered = (prompt or "").lower()
+    return any(marker in lowered for marker in markers)
 
-        entry = registry.get_entry(tool_name)
-    except Exception as exc:
-        entry = None
-        registry_error = str(exc)
+
+def _listify_preflight_value(value: Any) -> List[str]:
+    """Normalize a cron preflight config value into unique strings."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_items = re.split(r"[,\n]", value)
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = value
     else:
-        registry_error = ""
+        return []
 
-    if not exposed:
-        return {
-            "tool": tool_name,
-            "available": False,
-            "exposed": False,
-            "registered": entry is not None,
-            "enabled_toolsets": enabled_toolsets,
-            "reason": f"{tool_name} is not exposed by this job's enabled toolsets",
-        }
-    if entry is None:
-        reason = f"{tool_name} is not registered"
-        if registry_error:
-            reason = f"{reason}: {registry_error}"
-        return {
-            "tool": tool_name,
-            "available": False,
-            "exposed": True,
-            "registered": False,
-            "enabled_toolsets": enabled_toolsets,
-            "reason": reason,
-        }
-    if entry.check_fn:
-        try:
-            if not bool(entry.check_fn()):
-                return {
-                    "tool": tool_name,
-                    "available": False,
-                    "exposed": True,
-                    "registered": True,
-                    "enabled_toolsets": enabled_toolsets,
-                    "reason": f"{tool_name} is registered but unavailable in this runtime",
-                }
-        except Exception as exc:
-            return {
-                "tool": tool_name,
-                "available": False,
-                "exposed": True,
-                "registered": True,
-                "enabled_toolsets": enabled_toolsets,
-                "reason": f"{tool_name} availability check failed: {exc}",
-            }
-    return {
-        "tool": tool_name,
-        "available": True,
-        "exposed": True,
-        "registered": True,
-        "toolset": entry.toolset,
-    }
+    result: List[str] = []
+    for item in raw_items:
+        text = str(item or "").strip()
+        if text and text not in result:
+            result.append(text)
+    return result
 
 
-def _dependency_blocked_doc(
-    job_id: str,
-    job_name: str,
-    prompt: str,
-    reason: str,
-    status_payload: dict | None = None,
-) -> tuple[bool, str, str, str]:
-    now_iso = _hermes_now().strftime("%Y-%m-%d %H:%M:%S")
-    payload_text = json.dumps(status_payload or {}, indent=2, ensure_ascii=False)
-    output = f"""# Cron Job: {job_name} (DEPENDENCY BLOCKED)
+def _cron_preflight_declared(job: dict, key: str) -> List[str]:
+    """Read preflight declarations from top-level or nested job metadata."""
+    values: List[str] = []
+    values.extend(_listify_preflight_value(job.get(key)))
 
-**Job ID:** {job_id}
-**Run Time:** {now_iso}
-**Status:** dependency_blocked
+    preflight = job.get("preflight")
+    if isinstance(preflight, dict):
+        values.extend(_listify_preflight_value(preflight.get(key)))
 
-## Prompt
+    metadata = job.get("metadata")
+    if isinstance(metadata, dict):
+        cron_meta = metadata.get("cron_preflight") or metadata.get("preflight")
+        if isinstance(cron_meta, dict):
+            values.extend(_listify_preflight_value(cron_meta.get(key)))
 
-{prompt}
-
-## Dependency Blocker
-
-{reason}
-
-## Dependency Status
-
-```json
-{payload_text}
-```
-"""
-    return False, output, "", f"dependency_blocked: {reason}"
+    deduped: List[str] = []
+    for value in values:
+        if value not in deduped:
+            deduped.append(value)
+    return deduped
 
 
-def _run_ontology_research_dependency_preflight(
+def _infer_cron_preflight_requirements(job: dict, prompt: str) -> tuple[List[str], List[str]]:
+    """Infer narrow research preflight requirements from job text."""
+    profile = str(job.get("research_profile") or job.get("research_protocol") or "")
+    haystack = "\n".join(
+        str(part or "")
+        for part in (
+            job.get("name"),
+            job.get("prompt"),
+            job.get("skill"),
+            " ".join(str(s) for s in job.get("skills") or []),
+            job.get("workdir"),
+            profile,
+            prompt,
+        )
+    )
+
+    required_tools: List[str] = []
+    required_web_backends: List[str] = []
+    if (
+        _prompt_contains_any(haystack, _WEB_SEARCH_MATRIX_MARKERS)
+        or _prompt_contains_any(haystack, _ONTOLOGY_RESEARCH_MARKERS)
+    ):
+        required_tools.append("web_search_matrix")
+    if _prompt_contains_any(haystack, _WEB_EXTRACT_MARKERS):
+        required_tools.append("web_extract")
+    if _prompt_contains_any(haystack, _FIRECRAWL_MARKERS):
+        required_web_backends.append("firecrawl")
+    return required_tools, required_web_backends
+
+
+def _collect_cron_preflight_requirements(job: dict, prompt: str) -> tuple[List[str], List[str]]:
+    """Return required tool names and web backend names for this cron run."""
+    declared_tools = _cron_preflight_declared(job, "required_tools")
+    declared_backends = _cron_preflight_declared(job, "required_web_backends")
+    inferred_tools, inferred_backends = _infer_cron_preflight_requirements(job, prompt)
+
+    tools = []
+    for name in [*declared_tools, *inferred_tools]:
+        if name not in tools:
+            tools.append(name)
+
+    backends = []
+    for name in [*declared_backends, *inferred_backends]:
+        normalized = name.lower().strip()
+        if normalized and normalized not in backends:
+            backends.append(normalized)
+    return tools, backends
+
+
+def _requested_tool_names_for_cron(
+    enabled_toolsets: list[str] | None,
+    disabled_toolsets: list[str] | None,
+) -> Set[str]:
+    """Resolve the tool names cron asked model_tools to expose before check_fn filtering."""
+    from toolsets import get_all_toolsets, resolve_toolset, validate_toolset
+
+    tools_to_include: Set[str] = set()
+    if enabled_toolsets is not None:
+        for toolset_name in enabled_toolsets:
+            if validate_toolset(toolset_name):
+                tools_to_include.update(resolve_toolset(toolset_name))
+            elif toolset_name == "web_tools":
+                tools_to_include.update({"web_search", "web_search_matrix", "web_extract"})
+    else:
+        for toolset_name in get_all_toolsets():
+            tools_to_include.update(resolve_toolset(toolset_name))
+
+    for toolset_name in disabled_toolsets or []:
+        if validate_toolset(toolset_name):
+            tools_to_include.difference_update(resolve_toolset(toolset_name))
+        elif toolset_name == "web_tools":
+            tools_to_include.difference_update({"web_search", "web_search_matrix", "web_extract"})
+    return tools_to_include
+
+
+def _firecrawl_available() -> bool:
+    try:
+        from plugins.web.firecrawl.provider import check_firecrawl_api_key
+        return bool(check_firecrawl_api_key())
+    except Exception:
+        return False
+
+
+def _web_backend_available() -> bool:
+    try:
+        from tools.web_tools import check_web_api_key
+        return bool(check_web_api_key())
+    except Exception:
+        return False
+
+
+def _cron_tool_unavailable_category(tool_name: str, entry) -> tuple[str, List[str]]:
+    """Classify why a selected tool did not pass availability filtering."""
+    if tool_name in _WEB_TOOL_NAMES and not _web_backend_available():
+        return "provider_credentials_absent", list(getattr(entry, "requires_env", []) or [])
+
+    requires_env = list(getattr(entry, "requires_env", []) or [])
+    if requires_env and not any(os.getenv(env, "").strip() for env in requires_env):
+        return "provider_credentials_absent", requires_env
+    return "tool_unavailable", requires_env
+
+
+def _build_cron_preflight_report(
     job: dict,
     prompt: str,
     enabled_toolsets: list[str] | None,
-) -> tuple[bool, str, str, str] | None:
-    """Block ontology research cron runs before degraded fallback work starts."""
-    if not _cron_job_requires_ontology_research_contract(job, prompt):
-        return None
+    disabled_toolsets: list[str] | None,
+) -> Dict[str, Any]:
+    """Build deterministic tool/provider status for the cron report and prompt."""
+    required_tools, required_backends = _collect_cron_preflight_requirements(job, prompt)
+    if not required_tools and not required_backends:
+        return {"checks": [], "has_issues": False}
 
-    job_id = job.get("id", "?")
-    job_name = str(job.get("name") or job.get("prompt") or job_id or "cron job")
-    tool_status = {
-        name: _cron_tool_contract_status(name, enabled_toolsets)
-        for name in ("ontology_context", "web_search_matrix")
+    from model_tools import get_tool_definitions
+    from tools.registry import registry
+
+    exposed_defs = get_tool_definitions(
+        enabled_toolsets=enabled_toolsets,
+        disabled_toolsets=disabled_toolsets,
+        quiet_mode=True,
+    )
+    exposed_tools = {
+        td.get("function", {}).get("name")
+        for td in exposed_defs
+        if isinstance(td, dict)
     }
-    missing = [
-        status["reason"]
-        for status in tool_status.values()
-        if not status.get("available")
-    ]
-    if missing:
-        return _dependency_blocked_doc(
-            job_id,
-            job_name,
-            prompt,
-            "; ".join(missing),
-            {
-                "success": False,
-                "status": "dependency_blocked",
-                "dependency": "ontology_cron_tool_surface",
-                "blocked_reasons": missing,
-                "tools": tool_status,
-                "enabled_toolsets": enabled_toolsets,
-            },
-        )
+    requested_tools = _requested_tool_names_for_cron(enabled_toolsets, disabled_toolsets)
 
-    try:
-        from tools.web_tools import web_search_matrix
+    checks: List[Dict[str, Any]] = []
+    for tool_name in required_tools:
+        entry = registry.get_entry(tool_name)
+        if tool_name in exposed_tools:
+            checks.append({
+                "kind": "tool",
+                "name": tool_name,
+                "status": "available",
+                "category": "available",
+                "detail": "callable in this cron agent tool surface",
+            })
+            continue
+        if entry is None:
+            checks.append({
+                "kind": "tool",
+                "name": tool_name,
+                "status": "unavailable",
+                "category": "tool_surface_absent",
+                "detail": "not registered by built-in tools, plugins, or MCP",
+            })
+            continue
+        if tool_name not in requested_tools:
+            checks.append({
+                "kind": "tool",
+                "name": tool_name,
+                "status": "unavailable",
+                "category": "tool_surface_absent",
+                "detail": "registered but not selected by this cron job's enabled_toolsets",
+            })
+            continue
 
-        raw_status = web_search_matrix(
-            require_capabilities=["search", "extract"],
-            require_providers=["firecrawl"],
-        )
-        web_status = json.loads(raw_status)
-    except Exception as exc:
-        return _dependency_blocked_doc(
-            job_id,
-            job_name,
-            prompt,
-            f"web_search_matrix preflight failed: {exc}",
-            {
-                "success": False,
-                "status": "dependency_blocked",
-                "dependency": "web_search_matrix",
-                "blocked_reasons": [str(exc)],
-                "tools": tool_status,
-                "enabled_toolsets": enabled_toolsets,
-            },
-        )
+        category, env_vars = _cron_tool_unavailable_category(tool_name, entry)
+        checks.append({
+            "kind": "tool",
+            "name": tool_name,
+            "status": "unavailable",
+            "category": category,
+            "detail": "selected but filtered out by availability checks",
+            "env_vars": env_vars,
+        })
 
-    blocked = web_status.get("status") == "dependency_blocked" or web_status.get("success") is False
-    if not blocked:
-        return None
+    for backend in required_backends:
+        if backend == "firecrawl":
+            available = _firecrawl_available()
+            checks.append({
+                "kind": "web_backend",
+                "name": "firecrawl",
+                "status": "available" if available else "unavailable",
+                "category": "available" if available else "provider_credentials_absent",
+                "detail": (
+                    "Firecrawl direct or managed-gateway config is available"
+                    if available
+                    else "Firecrawl direct/gateway config is absent from this cron environment"
+                ),
+                "env_vars": [] if available else list(_FIRECRAWL_ENV_HINTS),
+                "downgrade": None if available else (
+                    "Do not claim Firecrawl crawl/extract coverage. Use available web tools "
+                    "or direct official-source fetches, and report the degradation."
+                ),
+            })
+        else:
+            checks.append({
+                "kind": "web_backend",
+                "name": backend,
+                "status": "unknown",
+                "category": "unsupported_preflight_backend",
+                "detail": "no built-in cron preflight checker for this backend",
+            })
 
-    reasons = web_status.get("blocked_reasons")
-    if isinstance(reasons, list) and reasons:
-        reason = "; ".join(str(item) for item in reasons)
-    else:
-        reason = "web provider dependencies are unavailable"
-    return _dependency_blocked_doc(
-        job_id,
-        job_name,
-        prompt,
-        reason,
-        {
-            "success": False,
-            "status": "dependency_blocked",
-            "dependency": "firecrawl_web_provider",
-            "blocked_reasons": reasons if isinstance(reasons, list) else [reason],
-            "tools": tool_status,
-            "web_search_matrix": web_status,
-            "enabled_toolsets": enabled_toolsets,
-        },
+    return {
+        "checks": checks,
+        "has_issues": any(check.get("status") != "available" for check in checks),
+    }
+
+
+def _format_cron_preflight_markdown(report: Dict[str, Any]) -> str:
+    checks = report.get("checks") or []
+    if not checks:
+        return ""
+
+    lines = ["## Cron Preflight", ""]
+    for check in checks:
+        name = check.get("name", "unknown")
+        kind = check.get("kind", "tool")
+        status = check.get("status", "unknown")
+        category = check.get("category", "unknown")
+        detail = check.get("detail", "")
+        prefix = "tool" if kind == "tool" else "web backend"
+        line = f"- {prefix} `{name}`: {status} ({category})"
+        if detail:
+            line += f" - {detail}"
+        env_vars = check.get("env_vars") or []
+        if env_vars:
+            line += f"; credential/config hints: {', '.join(env_vars)}"
+        lines.append(line)
+        downgrade = check.get("downgrade")
+        if downgrade:
+            lines.append(f"- downgrade: {downgrade}")
+    return "\n".join(lines)
+
+
+def _inject_cron_preflight_prompt(prompt: str, markdown: str) -> str:
+    if not markdown:
+        return prompt
+    return (
+        f"{markdown}\n\n"
+        "Treat this preflight as authoritative for this scheduled run. "
+        "Distinguish missing tool surface from missing provider credentials in your report, "
+        "and do not claim to have used unavailable tools or providers.\n\n"
+        f"{prompt}"
     )
 
 # Valid delivery platforms — used to validate user-supplied platform names
@@ -1462,6 +1581,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     logger.info("Prompt: %s", prompt[:100])
 
     agent = None
+    preflight_markdown = ""
 
     # Mark this as a cron session so the approval system can apply cron_mode.
     # This env var is process-wide and persists for the lifetime of the
@@ -1538,6 +1658,11 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             load_dotenv(str(_get_hermes_home() / ".env"), override=True, encoding="utf-8")
         except UnicodeDecodeError:
             load_dotenv(str(_get_hermes_home() / ".env"), override=True, encoding="latin-1")
+        try:
+            from tools.registry import invalidate_check_fn_cache
+            invalidate_check_fn_cache()
+        except Exception:
+            pass
 
         delivery_target = _resolve_delivery_target(job)
         if delivery_target:
@@ -1602,15 +1727,6 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
 
         # Max iterations
         max_iterations = _cfg.get("agent", {}).get("max_turns") or _cfg.get("max_turns") or 90
-        enabled_toolsets = _resolve_ontology_cron_enabled_toolsets(job, _cfg, prompt)
-
-        preflight_result = _run_ontology_research_dependency_preflight(
-            job,
-            prompt,
-            enabled_toolsets,
-        )
-        if preflight_result is not None:
-            return preflight_result
 
         # Provider routing
         pr = _cfg.get("provider_routing", {})
@@ -1697,6 +1813,29 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 job_id, _mcp_exc,
             )
 
+        enabled_toolsets = _resolve_ontology_cron_enabled_toolsets(job, _cfg, prompt)
+        disabled_toolsets = list(_CRON_PREFLIGHT_DISABLED_TOOLSETS)
+        preflight_report = _build_cron_preflight_report(
+            job,
+            prompt,
+            enabled_toolsets,
+            disabled_toolsets,
+        )
+        preflight_markdown = _format_cron_preflight_markdown(preflight_report)
+        if preflight_markdown:
+            prompt = _inject_cron_preflight_prompt(prompt, preflight_markdown)
+            if preflight_report.get("has_issues"):
+                unavailable = [
+                    f"{c.get('kind')}:{c.get('name')}={c.get('category')}"
+                    for c in preflight_report.get("checks", [])
+                    if c.get("status") != "available"
+                ]
+                logger.warning(
+                    "Job '%s': cron preflight found unavailable research capability: %s",
+                    job_id,
+                    "; ".join(unavailable),
+                )
+
         agent = AIAgent(
             model=model,
             api_key=runtime.get("api_key"),
@@ -1716,7 +1855,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             provider_sort=pr.get("sort"),
             openrouter_min_coding_score=(_cfg.get("openrouter") or {}).get("min_coding_score"),
             enabled_toolsets=enabled_toolsets,
-            disabled_toolsets=["cronjob", "messaging", "clarify"],
+            disabled_toolsets=disabled_toolsets,
             quiet_mode=True,
             # Cron jobs should always inherit the user's SOUL.md identity from
             # HERMES_HOME. When a workdir is configured, also inject project
@@ -1846,6 +1985,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         # Use a separate variable for log display; keep final_response clean
         # for delivery logic (empty response = no delivery).
         logged_response = final_response if final_response else "(No response generated)"
+        preflight_section = f"{preflight_markdown}\n\n" if preflight_markdown else ""
 
         output = f"""# Cron Job: {job_name}
 
@@ -1853,7 +1993,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
 **Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}
 **Schedule:** {job.get('schedule_display', 'N/A')}
 
-## Prompt
+{preflight_section}## Prompt
 
 {prompt}
 
@@ -1868,6 +2008,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     except Exception as e:
         error_msg = f"{type(e).__name__}: {str(e)}"
         logger.exception("Job '%s' failed: %s", job_name, error_msg)
+        preflight_section = f"{preflight_markdown}\n\n" if preflight_markdown else ""
 
         output = f"""# Cron Job: {job_name} (FAILED)
 
@@ -1875,7 +2016,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
 **Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}
 **Schedule:** {job.get('schedule_display', 'N/A')}
 
-## Prompt
+{preflight_section}## Prompt
 
 {prompt}
 

@@ -11,7 +11,8 @@ Each route defines:
   - secret: HMAC secret for signature validation (REQUIRED)
   - prompt: template string formatted with the webhook payload
   - skills: optional list of skills to load for the agent
-  - deliver: where to send the response (github_comment, telegram, etc.)
+  - deliver: where to send the response (linear_comment, github_comment,
+    telegram, etc.)
   - deliver_extra: additional delivery config (repo, pr_number, chat_id)
   - deliver_only: if true, skip the agent — the rendered prompt IS the
     message that gets delivered.  Use for external push notifications
@@ -31,10 +32,13 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import re
 import subprocess
 import time
 from typing import Any, Dict, List, Optional
+import urllib.error
+import urllib.request
 
 try:
     from aiohttp import web
@@ -90,6 +94,8 @@ def check_webhook_requirements() -> bool:
 
 class WebhookAdapter(BasePlatformAdapter):
     """Generic webhook receiver that triggers agent runs from HTTP POSTs."""
+
+    SUPPORTS_MESSAGE_EDITING = False
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.WEBHOOK)
@@ -232,6 +238,9 @@ class WebhookAdapter(BasePlatformAdapter):
         if deliver_type == "log":
             logger.info("[webhook] Response for %s: %s", chat_id, content[:200])
             return SendResult(success=True)
+
+        if deliver_type == "linear_comment":
+            return await self._deliver_linear_comment(content, delivery)
 
         if deliver_type == "github_comment":
             return await self._deliver_github_comment(content, delivery)
@@ -570,7 +579,11 @@ class WebhookAdapter(BasePlatformAdapter):
         # Non-blocking — return 202 Accepted immediately
         task = asyncio.create_task(self.handle_message(event))
         self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
+        task.add_done_callback(
+            lambda done_task, route=route_name, delivery=delivery_id: (
+                self._handle_background_task_done(done_task, route, delivery)
+            )
+        )
 
         return web.json_response(
             {
@@ -696,6 +709,9 @@ class WebhookAdapter(BasePlatformAdapter):
             logger.info("[webhook] direct-deliver log-only: %s", content[:200])
             return SendResult(success=True)
 
+        if deliver_type == "linear_comment":
+            return await self._deliver_linear_comment(content, delivery)
+
         if deliver_type == "github_comment":
             return await self._deliver_github_comment(content, delivery)
 
@@ -704,6 +720,126 @@ class WebhookAdapter(BasePlatformAdapter):
         return await self._deliver_cross_platform(
             deliver_type, content, delivery
         )
+
+    def _handle_background_task_done(
+        self,
+        task: "asyncio.Task[Any]",
+        route_name: str,
+        delivery_id: str,
+    ) -> None:
+        self._background_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is None:
+            return
+        logger.exception(
+            "[webhook] Background handler failed route=%s delivery=%s",
+            route_name,
+            delivery_id,
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+
+    async def _deliver_linear_comment(
+        self, content: str, delivery: dict
+    ) -> SendResult:
+        """Post agent response as a Linear issue comment."""
+        extra = delivery.get("deliver_extra", {})
+        payload = delivery.get("payload", {})
+        session = payload.get("agentSession") if isinstance(payload, dict) else {}
+        session = session if isinstance(session, dict) else {}
+        issue = session.get("issue") if isinstance(session, dict) else {}
+        if not isinstance(issue, dict) and isinstance(payload, dict):
+            issue = payload.get("issue", {})
+        issue = issue if isinstance(issue, dict) else {}
+
+        issue_id = str(extra.get("issue_id") or issue.get("id") or "").strip()
+        issue_identifier = str(
+            extra.get("issue_identifier") or issue.get("identifier") or ""
+        ).strip()
+        if not issue_id and issue_identifier:
+            issue_id = issue_identifier
+        if not issue_id:
+            logger.error(
+                "[webhook] linear_comment delivery missing issue_id/issue_identifier"
+            )
+            return SendResult(
+                success=False, error="Missing issue_id or issue_identifier"
+            )
+
+        token = os.getenv("LINEAR_API_KEY") or os.getenv("LINEAR_API_TOKEN")
+        if not token:
+            logger.error(
+                "[webhook] LINEAR_API_KEY is required for linear_comment delivery"
+            )
+            return SendResult(success=False, error="Missing LINEAR_API_KEY")
+
+        body = str(content or "").strip()
+        if not body:
+            return SendResult(success=True)
+        marker = str(extra.get("marker") or "").strip()
+        if marker and marker not in body:
+            body = f"{marker}\n\n{body}"
+
+        mutation = """
+        mutation WebhookLinearComment($input: CommentCreateInput!) {
+          commentCreate(input: $input) {
+            success
+            comment { id url }
+          }
+        }
+        """
+        request_body = json.dumps(
+            {
+                "query": mutation,
+                "variables": {"input": {"issueId": issue_id, "body": body}},
+            }
+        ).encode("utf-8")
+
+        def _post() -> dict:
+            req = urllib.request.Request(
+                "https://api.linear.app/graphql",
+                data=request_body,
+                headers={
+                    "Authorization": token,
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+            return json.loads(raw)
+
+        try:
+            result = await asyncio.to_thread(_post)
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", errors="replace")[:500]
+            logger.error("[webhook] Linear comment HTTP error: %s", detail)
+            return SendResult(success=False, error=detail or str(e))
+        except Exception as e:
+            logger.error("[webhook] Linear comment delivery error: %s", e)
+            return SendResult(success=False, error=str(e))
+
+        errors = result.get("errors")
+        if errors:
+            logger.error("[webhook] Linear comment GraphQL errors: %s", errors)
+            return SendResult(success=False, error=json.dumps(errors)[:500])
+
+        comment_create = (result.get("data") or {}).get("commentCreate") or {}
+        if not comment_create.get("success"):
+            logger.error("[webhook] Linear commentCreate did not succeed")
+            return SendResult(success=False, error="commentCreate failed")
+
+        comment = comment_create.get("comment") or {}
+        logger.info(
+            "[webhook] Posted Linear comment issue=%s comment=%s",
+            issue_identifier or issue_id,
+            comment.get("id") or "?",
+        )
+        return SendResult(success=True, message_id=comment.get("id"))
 
     async def _deliver_github_comment(
         self, content: str, delivery: dict

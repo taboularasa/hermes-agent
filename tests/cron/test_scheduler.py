@@ -1023,22 +1023,17 @@ class TestRunJobSessionPersistence:
             "prompt": (
                 "Run ontology research. Start with "
                 "ontology_context(action=\"ontology_engineering\"), then call "
-                "web_search_matrix before external evidence capture."
+                "web_search_matrix before Firecrawl source capture."
             ),
             "enabled_toolsets": ["terminal"],
         }
         fake_db, patches = self._make_run_job_patches(tmp_path)
-        matrix_status = json.dumps(
-            {
-                "success": True,
-                "status": "ok",
-                "blocked_reasons": [],
-                "providers": [],
-            }
-        )
 
         from tools.registry import registry
 
+        previous_entry = registry.get_entry("ontology_context")
+        if previous_entry is not None:
+            registry.deregister("ontology_context")
         registry.register(
             name="ontology_context",
             toolset="hadto-ontology",
@@ -1052,7 +1047,14 @@ class TestRunJobSessionPersistence:
         )
         try:
             with patches[0], patches[1], patches[2], patches[3], patches[4], \
-                 patch("tools.web_tools.web_search_matrix", return_value=matrix_status), \
+                 patch(
+                     "model_tools.get_tool_definitions",
+                     return_value=[
+                         {"function": {"name": "ontology_context"}},
+                         {"function": {"name": "web_search_matrix"}},
+                     ],
+                 ), \
+                 patch("cron.scheduler._firecrawl_available", return_value=True), \
                  patch("run_agent.AIAgent") as mock_agent_cls:
                 mock_agent = MagicMock()
                 mock_agent.run_conversation.return_value = {"final_response": "ok"}
@@ -1060,12 +1062,27 @@ class TestRunJobSessionPersistence:
                 success, _output, final_response, error = run_job(job)
         finally:
             registry.deregister("ontology_context")
+            if previous_entry is not None:
+                registry.register(
+                    name=previous_entry.name,
+                    toolset=previous_entry.toolset,
+                    schema=previous_entry.schema,
+                    handler=previous_entry.handler,
+                    check_fn=previous_entry.check_fn,
+                    requires_env=previous_entry.requires_env,
+                    is_async=previous_entry.is_async,
+                    description=previous_entry.description,
+                    emoji=previous_entry.emoji,
+                    max_result_size_chars=previous_entry.max_result_size_chars,
+                    dynamic_schema_overrides=previous_entry.dynamic_schema_overrides,
+                )
 
         assert success is True
         assert final_response == "ok"
         assert error is None
         kwargs = mock_agent_cls.call_args.kwargs
         assert kwargs["enabled_toolsets"] == ["terminal", "web", "hadto-ontology"]
+        fake_db.end_session.assert_called_once()
 
     def test_non_ontology_job_does_not_gain_ontology_toolsets(self, tmp_path):
         job = {
@@ -1078,6 +1095,9 @@ class TestRunJobSessionPersistence:
 
         from tools.registry import registry
 
+        previous_entry = registry.get_entry("ontology_context")
+        if previous_entry is not None:
+            registry.deregister("ontology_context")
         registry.register(
             name="ontology_context",
             toolset="hadto-ontology",
@@ -1098,84 +1118,95 @@ class TestRunJobSessionPersistence:
                 success, _output, final_response, error = run_job(job)
         finally:
             registry.deregister("ontology_context")
+            if previous_entry is not None:
+                registry.register(
+                    name=previous_entry.name,
+                    toolset=previous_entry.toolset,
+                    schema=previous_entry.schema,
+                    handler=previous_entry.handler,
+                    check_fn=previous_entry.check_fn,
+                    requires_env=previous_entry.requires_env,
+                    is_async=previous_entry.is_async,
+                    description=previous_entry.description,
+                    emoji=previous_entry.emoji,
+                    max_result_size_chars=previous_entry.max_result_size_chars,
+                    dynamic_schema_overrides=previous_entry.dynamic_schema_overrides,
+                )
 
         assert success is True
         assert final_response == "ok"
         assert error is None
         kwargs = mock_agent_cls.call_args.kwargs
         assert kwargs["enabled_toolsets"] == ["terminal"]
+        fake_db.end_session.assert_called_once()
 
-    def test_ontology_research_missing_ontology_context_blocks_before_agent(self, tmp_path):
+    def test_ontology_research_preflight_requires_matrix_search(self):
+        import cron.scheduler as scheduler
+
+        job = {"id": "ontology-job", "research_profile": "ontology"}
+        prompt = "Run ontology research for the source registry."
+
+        with patch("cron.scheduler._web_backend_available", return_value=True), \
+             patch("cron.scheduler._firecrawl_available", return_value=True):
+            result = scheduler._build_cron_preflight_report(
+                job,
+                prompt,
+                ["terminal"],
+                [],
+            )
+
+        assert result is not None
+        matrix = next(
+            check for check in result["checks"]
+            if check["kind"] == "tool" and check["name"] == "web_search_matrix"
+        )
+        assert matrix["status"] == "unavailable"
+        assert matrix["category"] == "tool_surface_absent"
+
+    def test_ontology_research_preflight_passes_when_required_surface_is_available(self):
+        import cron.scheduler as scheduler
+
+        job = {"id": "ontology-job", "research_profile": "ontology"}
+        prompt = "Run ontology research with web_search_matrix and Firecrawl."
+
+        with patch(
+            "model_tools.get_tool_definitions",
+            return_value=[
+                {"function": {"name": "web_search"}},
+                {"function": {"name": "web_search_matrix"}},
+                {"function": {"name": "web_extract"}},
+            ],
+        ), patch("cron.scheduler._firecrawl_available", return_value=True):
+            result = scheduler._build_cron_preflight_report(job, prompt, ["web"], [])
+
+        assert result["has_issues"] is False
+
+    def test_run_job_reports_required_web_research_when_surface_missing(self, tmp_path):
         job = {
-            "id": "ontology-missing-context",
-            "name": "Scheduled ontology research",
-            "prompt": (
-                "Run ontology research. Start with "
-                "ontology_context(action=\"ontology_engineering\"), then call "
-                "web_search_matrix."
-            ),
+            "id": "ontology-web-research",
+            "name": "ontology research",
+            "prompt": "Run ontology research with web_search_matrix and Firecrawl.",
             "enabled_toolsets": ["web"],
         }
         fake_db, patches = self._make_run_job_patches(tmp_path)
 
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
              patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok"}
+            mock_agent_cls.return_value = mock_agent
             success, output, final_response, error = run_job(job)
 
-        assert success is False
-        assert final_response == ""
-        assert "dependency_blocked" in output
-        assert "ontology_context" in output
-        assert "ontology_context" in error
-        mock_agent_cls.assert_not_called()
-
-    def test_ontology_research_firecrawl_dependency_blocks_before_agent(self, tmp_path):
-        job = {
-            "id": "ontology-web-deps",
-            "name": "Scheduled ontology research",
-            "prompt": (
-                "Run scheduled ontology research. Before source capture, "
-                "call web_search_matrix and require Firecrawl."
-            ),
-            "enabled_toolsets": ["web", "hadto-ontology"],
-        }
-        fake_db, patches = self._make_run_job_patches(tmp_path)
-        matrix_status = json.dumps(
-            {
-                "success": False,
-                "status": "dependency_blocked",
-                "blocked_reasons": ["required provider 'firecrawl' is not available"],
-                "firecrawl_surfaces": {"search": False, "extract": False},
-            }
-        )
-
-        from tools.registry import registry
-
-        registry.register(
-            name="ontology_context",
-            toolset="hadto-ontology",
-            schema={
-                "name": "ontology_context",
-                "description": "test",
-                "parameters": {"type": "object", "properties": {}},
-            },
-            handler=lambda args, **kw: "{}",
-            check_fn=lambda: True,
-        )
-        try:
-            with patches[0], patches[1], patches[2], patches[3], patches[4], \
-                 patch("tools.web_tools.web_search_matrix", return_value=matrix_status), \
-                 patch("run_agent.AIAgent") as mock_agent_cls:
-                success, output, final_response, error = run_job(job)
-        finally:
-            registry.deregister("ontology_context")
-
-        assert success is False
-        assert final_response == ""
-        assert "dependency_blocked" in output
-        assert "required provider 'firecrawl' is not available" in output
-        assert "required provider 'firecrawl' is not available" in error
-        mock_agent_cls.assert_not_called()
+        assert success is True
+        assert final_response == "ok"
+        assert error is None
+        assert "## Cron Preflight" in output
+        assert "web_search_matrix" in output
+        assert "firecrawl" in output
+        prompt_arg = mock_agent.run_conversation.call_args.args[0]
+        assert prompt_arg.startswith("## Cron Preflight")
+        assert "Treat this preflight as authoritative" in prompt_arg
+        fake_db.end_session.assert_called_once()
 
     def test_run_job_empty_response_returns_empty_not_placeholder(self, tmp_path):
         """Empty final_response should stay empty for delivery logic (issue #2234).
