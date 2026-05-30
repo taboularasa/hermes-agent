@@ -508,6 +508,162 @@ class TestWebSearchSchema:
         assert result == {"success": True, "data": {"web": []}}
         fake_search.assert_called_once_with("docs", 100)
 
+    def test_web_search_falls_back_when_configured_provider_hits_quota(self):
+        import tools.web_tools
+
+        primary = MagicMock(
+            name="FirecrawlWebSearchProvider",
+            supports_search=MagicMock(return_value=True),
+        )
+        primary.name = "firecrawl"
+        primary.search.return_value = {
+            "success": False,
+            "error": "Payment Required: Insufficient credits",
+        }
+        fallback = MagicMock(
+            name="ParallelWebSearchProvider",
+            supports_search=MagicMock(return_value=True),
+        )
+        fallback.name = "parallel"
+        fallback.is_available.return_value = True
+        fallback.search.return_value = {
+            "success": True,
+            "data": {"web": [{"url": "https://example.com", "title": "ok"}]},
+        }
+
+        def provider_for(name):
+            return {"firecrawl": primary, "parallel": fallback}.get(name)
+
+        with patch("tools.web_tools._get_search_backend", return_value="firecrawl"), \
+             patch("agent.web_search_registry.get_provider", side_effect=provider_for), \
+             patch("agent.web_search_registry.list_providers", return_value=[primary, fallback]), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch.object(tools.web_tools._debug, "log_call"), \
+             patch.object(tools.web_tools._debug, "save"):
+            result = json.loads(tools.web_tools.web_search_tool("docs", limit=3))
+
+        assert result["success"] is True
+        assert result["data"]["web"][0]["url"] == "https://example.com"
+        assert result["meta"]["primary_provider"] == "firecrawl"
+        assert result["meta"]["provider"] == "parallel"
+        assert result["meta"]["fallback_from"] == "firecrawl"
+        assert "Insufficient credits" in result["meta"]["fallback_reason"]
+        assert result["meta"]["providers_attempted"] == ["firecrawl", "parallel"]
+        primary.search.assert_called_once_with("docs", 3)
+        fallback.search.assert_called_once_with("docs", 3)
+
+    def test_web_search_falls_back_when_configured_provider_raises_retryable_error(self):
+        import tools.web_tools
+
+        primary = MagicMock(
+            name="FirecrawlWebSearchProvider",
+            supports_search=MagicMock(return_value=True),
+        )
+        primary.name = "firecrawl"
+        primary.search.side_effect = RuntimeError("rate limited by provider")
+        fallback = MagicMock(
+            name="ParallelWebSearchProvider",
+            supports_search=MagicMock(return_value=True),
+        )
+        fallback.name = "parallel"
+        fallback.is_available.return_value = True
+        fallback.search.return_value = {
+            "success": True,
+            "data": {"web": [{"url": "https://example.com", "title": "ok"}]},
+        }
+
+        def provider_for(name):
+            return {"firecrawl": primary, "parallel": fallback}.get(name)
+
+        with patch("tools.web_tools._get_search_backend", return_value="firecrawl"), \
+             patch("agent.web_search_registry.get_provider", side_effect=provider_for), \
+             patch("agent.web_search_registry.list_providers", return_value=[primary, fallback]), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch.object(tools.web_tools._debug, "log_call"), \
+             patch.object(tools.web_tools._debug, "save"):
+            result = json.loads(tools.web_tools.web_search_tool("docs", limit=3))
+
+        assert result["success"] is True
+        assert result["meta"]["primary_provider"] == "firecrawl"
+        assert result["meta"]["provider"] == "parallel"
+        assert result["meta"]["fallback_reason"] == "rate limited by provider"
+        primary.search.assert_called_once_with("docs", 3)
+        fallback.search.assert_called_once_with("docs", 3)
+
+
+class TestWebSearchMatrix:
+    """Test suite for web_search_matrix provider coverage reporting."""
+
+    class FakeProvider:
+        def __init__(self, name, *, available=True, response=None):
+            self.name = name
+            self.display_name = name.title()
+            self._available = available
+            self._response = response or {
+                "success": True,
+                "data": {
+                    "web": [
+                        {
+                            "title": f"{name} result",
+                            "url": f"https://{name}.example/result",
+                            "description": "result",
+                            "position": 1,
+                        }
+                    ]
+                },
+            }
+
+        def supports_search(self):
+            return True
+
+        def is_available(self):
+            return self._available
+
+        def search(self, query, limit):
+            return self._response
+
+    def test_matrix_reports_degraded_coverage_for_unavailable_provider(self):
+        import tools.web_tools
+
+        exa = self.FakeProvider("exa")
+        firecrawl = self.FakeProvider("firecrawl", available=False)
+        providers = {"exa": exa, "firecrawl": firecrawl}
+
+        with patch("agent.web_search_registry.list_providers", return_value=[exa, firecrawl]), \
+             patch("agent.web_search_registry.get_provider", side_effect=lambda name: providers.get(name)), \
+             patch("tools.interrupt.is_interrupted", return_value=False):
+            result = json.loads(tools.web_tools.web_search_matrix_tool("ontology source registry", limit=2))
+
+        assert result["success"] is True
+        assert result["coverage_status"] == "degraded"
+        assert result["degraded_coverage"] is True
+        assert result["providers_succeeded"] == 1
+        by_provider = {item["provider"]: item for item in result["providers"]}
+        assert by_provider["exa"]["status"] == "ok"
+        assert by_provider["firecrawl"]["status"] == "unavailable"
+
+    def test_required_provider_failure_makes_matrix_unsuccessful(self):
+        import tools.web_tools
+
+        exa = self.FakeProvider("exa")
+        firecrawl = self.FakeProvider("firecrawl", available=False)
+        providers = {"exa": exa, "firecrawl": firecrawl}
+
+        with patch("agent.web_search_registry.list_providers", return_value=[exa, firecrawl]), \
+             patch("agent.web_search_registry.get_provider", side_effect=lambda name: providers.get(name)), \
+             patch("tools.interrupt.is_interrupted", return_value=False):
+            result = json.loads(
+                tools.web_tools.web_search_matrix_tool(
+                    "ontology source registry",
+                    providers=["exa", "firecrawl"],
+                    required_providers=["firecrawl"],
+                )
+            )
+
+        assert result["success"] is False
+        assert result["coverage_status"] == "degraded"
+        assert "firecrawl" in result["error"]
+
 
 class TestWebSearchErrorHandling:
     """Test suite for web_search_tool() error responses."""

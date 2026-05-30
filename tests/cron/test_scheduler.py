@@ -1016,6 +1016,74 @@ class TestRunJobSessionPersistence:
         kwargs = mock_agent_cls.call_args.kwargs
         assert kwargs["enabled_toolsets"] == ["terminal"]
 
+    def test_ontology_research_preflight_requires_matrix_search(self):
+        import cron.scheduler as scheduler
+
+        job = {"id": "ontology-job", "research_profile": "ontology"}
+        prompt = "Run ontology research for the source registry."
+
+        with patch("cron.scheduler._web_backend_available", return_value=True), \
+             patch("cron.scheduler._firecrawl_available", return_value=True):
+            result = scheduler._build_cron_preflight_report(
+                job,
+                prompt,
+                ["terminal"],
+                [],
+            )
+
+        assert result is not None
+        matrix = next(
+            check for check in result["checks"]
+            if check["kind"] == "tool" and check["name"] == "web_search_matrix"
+        )
+        assert matrix["status"] == "unavailable"
+        assert matrix["category"] == "tool_surface_absent"
+
+    def test_ontology_research_preflight_passes_when_required_surface_is_available(self):
+        import cron.scheduler as scheduler
+
+        job = {"id": "ontology-job", "research_profile": "ontology"}
+        prompt = "Run ontology research with web_search_matrix and Firecrawl."
+
+        with patch(
+            "model_tools.get_tool_definitions",
+            return_value=[
+                {"function": {"name": "web_search"}},
+                {"function": {"name": "web_search_matrix"}},
+                {"function": {"name": "web_extract"}},
+            ],
+        ), patch("cron.scheduler._firecrawl_available", return_value=True):
+            result = scheduler._build_cron_preflight_report(job, prompt, ["web"], [])
+
+        assert result["has_issues"] is False
+
+    def test_run_job_reports_required_web_research_when_surface_missing(self, tmp_path):
+        job = {
+            "id": "ontology-web-research",
+            "name": "ontology research",
+            "prompt": "Run ontology research with web_search_matrix and Firecrawl.",
+            "enabled_toolsets": ["web"],
+        }
+        fake_db, patches = self._make_run_job_patches(tmp_path)
+
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok"}
+            mock_agent_cls.return_value = mock_agent
+            success, output, final_response, error = run_job(job)
+
+        assert success is True
+        assert final_response == "ok"
+        assert error is None
+        assert "## Cron Preflight" in output
+        assert "web_search_matrix" in output
+        assert "firecrawl" in output
+        prompt_arg = mock_agent.run_conversation.call_args.args[0]
+        assert prompt_arg.startswith("## Cron Preflight")
+        assert "Treat this preflight as authoritative" in prompt_arg
+        fake_db.end_session.assert_called_once()
+
     def test_run_job_empty_response_returns_empty_not_placeholder(self, tmp_path):
         """Empty final_response should stay empty for delivery logic (issue #2234).
 

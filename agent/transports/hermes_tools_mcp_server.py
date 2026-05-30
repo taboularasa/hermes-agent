@@ -59,6 +59,7 @@ logger = logging.getLogger(__name__)
 #     keeps these working; the codex_app_server runtime cannot.
 EXPOSED_TOOLS: tuple[str, ...] = (
     "web_search",
+    "web_search_matrix",
     "web_extract",
     "browser_navigate",
     "browser_click",
