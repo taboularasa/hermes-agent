@@ -5585,6 +5585,41 @@ class AIAgent:
         self._last_activity_ts = time.time()
         self._last_activity_desc = desc
 
+    def _start_tool_activity_heartbeat(
+        self,
+        tool_name: str,
+        *,
+        interval: float = 30.0,
+    ) -> threading.Event:
+        """Keep gateway inactivity monitors informed during synchronous tools.
+
+        Terminal and code-execution tools already report their own process
+        activity, and concurrent tool batches heartbeat from the parent loop.
+        A single synchronous Python/plugin tool has no such polling loop, so a
+        long but healthy tool could look idle until it returns.
+        """
+        stop_event = threading.Event()
+        start = time.monotonic()
+
+        def _heartbeat() -> None:
+            while not stop_event.wait(interval):
+                try:
+                    if self._current_tool != tool_name:
+                        return
+                    elapsed = int(time.monotonic() - start)
+                    self._touch_activity(
+                        f"executing tool: {tool_name} ({elapsed}s elapsed)"
+                    )
+                except Exception:
+                    return
+
+        threading.Thread(
+            target=_heartbeat,
+            daemon=True,
+            name=f"tool-heartbeat-{tool_name[:32]}",
+        ).start()
+        return stop_event
+
     def _capture_rate_limits(self, http_response: Any) -> None:
         """Parse x-ratelimit-* headers from an HTTP response and cache the state.
 
@@ -6956,7 +6991,7 @@ class AIAgent:
                 if "NoneType" not in err_text or "not iterable" not in err_text:
                     raise exc
                 if collected_output_items:
-                    logger.warning(
+                    logger.debug(
                         "Codex Responses stream parser failed after output_item.done; "
                         "recovering %d collected output item(s). %s error=%s",
                         len(collected_output_items),
@@ -6973,7 +7008,7 @@ class AIAgent:
                     )
                 if self._codex_streamed_text_parts and not has_tool_calls:
                     assembled = "".join(self._codex_streamed_text_parts)
-                    logger.warning(
+                    logger.debug(
                         "Codex Responses stream parser failed after text deltas; "
                         "recovering %d streamed char(s). %s error=%s",
                         len(assembled),
@@ -6994,6 +7029,45 @@ class AIAgent:
                         usage=None,
                     )
                 raise exc
+
+            def _codex_stream_response_from_collected_items():
+                if collected_output_items:
+                    logger.debug(
+                        "Codex Responses stream: returning %d collected output item(s) "
+                        "without SDK final parser. %s",
+                        len(collected_output_items),
+                        self._client_log_context(),
+                    )
+                    return SimpleNamespace(
+                        model=api_kwargs.get("model"),
+                        status="completed",
+                        incomplete_details=None,
+                        output=list(collected_output_items),
+                        output_text="".join(self._codex_streamed_text_parts),
+                        usage=None,
+                    )
+                if self._codex_streamed_text_parts and not has_tool_calls:
+                    assembled = "".join(self._codex_streamed_text_parts)
+                    logger.debug(
+                        "Codex Responses stream: returning %d streamed char(s) "
+                        "without SDK final parser. %s",
+                        len(assembled),
+                        self._client_log_context(),
+                    )
+                    return SimpleNamespace(
+                        model=api_kwargs.get("model"),
+                        status="completed",
+                        incomplete_details=None,
+                        output=[SimpleNamespace(
+                            type="message",
+                            role="assistant",
+                            status="completed",
+                            content=[SimpleNamespace(type="output_text", text=assembled)],
+                        )],
+                        output_text=assembled,
+                        usage=None,
+                    )
+                return None
 
             try:
                 with active_client.responses.stream(**api_kwargs) as stream:
@@ -7047,6 +7121,9 @@ class AIAgent:
                                 )
                     except TypeError as exc:
                         return _recovered_codex_stream_response(exc)
+                    collected_response = _codex_stream_response_from_collected_items()
+                    if collected_response is not None:
+                        return collected_response
                     try:
                         final_response = stream.get_final_response()
                     except TypeError as exc:
@@ -11338,6 +11415,11 @@ class AIAgent:
                     pass  # never block tool execution
 
             tool_start_time = time.time()
+            tool_heartbeat_stop = None
+            if not _execution_blocked:
+                tool_heartbeat_stop = self._start_tool_activity_heartbeat(
+                    function_name
+                )
 
             if _block_msg is not None:
                 # Tool blocked by plugin policy — return error without executing.
@@ -11525,6 +11607,10 @@ class AIAgent:
                     function_result = f"Error executing tool '{function_name}': {tool_error}"
                     logger.error("handle_function_call raised for %s: %s", function_name, tool_error, exc_info=True)
                 tool_duration = time.time() - tool_start_time
+
+            if tool_heartbeat_stop is not None:
+                tool_heartbeat_stop.set()
+                tool_heartbeat_stop = None
 
             if isinstance(function_result, str):
                 result_preview = function_result if self.verbose_logging else (

@@ -766,7 +766,7 @@ class _CodexCompletionsAdapter:
                 if "NoneType" not in err_text or "not iterable" not in err_text:
                     raise exc
                 if collected_output_items:
-                    logger.warning(
+                    logger.debug(
                         "Codex auxiliary Responses stream parser failed after output_item.done; "
                         "recovering %d collected output item(s). error=%s",
                         len(collected_output_items),
@@ -781,7 +781,7 @@ class _CodexCompletionsAdapter:
                     )
                 if collected_text_deltas and not has_function_calls:
                     assembled = "".join(collected_text_deltas)
-                    logger.warning(
+                    logger.debug(
                         "Codex auxiliary Responses stream parser failed after text deltas; "
                         "recovering %d streamed char(s). error=%s",
                         len(assembled),
@@ -800,6 +800,41 @@ class _CodexCompletionsAdapter:
                         usage=None,
                     )
                 raise exc
+
+            def _response_from_collected_items() -> Any:
+                if collected_output_items:
+                    logger.debug(
+                        "Codex auxiliary: returning %d collected output item(s) "
+                        "without SDK final parser",
+                        len(collected_output_items),
+                    )
+                    return SimpleNamespace(
+                        model=model,
+                        status="completed",
+                        incomplete_details=None,
+                        output=list(collected_output_items),
+                        usage=None,
+                    )
+                if collected_text_deltas and not has_function_calls:
+                    assembled = "".join(collected_text_deltas)
+                    logger.debug(
+                        "Codex auxiliary: returning %d streamed char(s) "
+                        "without SDK final parser",
+                        len(assembled),
+                    )
+                    return SimpleNamespace(
+                        model=model,
+                        status="completed",
+                        incomplete_details=None,
+                        output=[SimpleNamespace(
+                            type="message",
+                            role="assistant",
+                            status="completed",
+                            content=[SimpleNamespace(type="output_text", text=assembled)],
+                        )],
+                        usage=None,
+                    )
+                return None
 
             if total_timeout:
                 timeout_timer = threading.Timer(float(total_timeout), _close_client_on_timeout)
@@ -825,10 +860,12 @@ class _CodexCompletionsAdapter:
                     final = _recover_stream_parser_failure(exc)
                 else:
                     _check_cancelled()
-                    try:
-                        final = stream.get_final_response()
-                    except TypeError as exc:
-                        final = _recover_stream_parser_failure(exc)
+                    final = _response_from_collected_items()
+                    if final is None:
+                        try:
+                            final = stream.get_final_response()
+                        except TypeError as exc:
+                            final = _recover_stream_parser_failure(exc)
 
             # Backfill empty output from collected stream events
             _output = getattr(final, "output", None)
