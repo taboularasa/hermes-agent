@@ -343,6 +343,124 @@ def test_stale_retired_ctx_status_records_are_inactive_not_degraded(tmp_path):
     assert benchmark["critical_failures"] == []
 
 
+def test_active_ctx_staleness_uses_active_timestamp_when_retired_record_is_fresher(tmp_path):
+    now = datetime(2026, 5, 22, 15, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+    stale_active = (now - timedelta(hours=144)).isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+    live_worktree = tmp_path / "live-worktree"
+    live_worktree.mkdir()
+
+    _write_json(journal_path, {"entries": [{"occurredAt": recent}]})
+    _write_json(
+        codex_path,
+        {"runs": {"codex_1": {"run_id": "codex_1", "status": "completed", "completed_at": recent}}},
+    )
+    _write_json(
+        ctx_path,
+        {
+            "sessions": {
+                "ctx_active_stale": {
+                    "session_id": "ctx_active_stale",
+                    "active": True,
+                    "updated_at": stale_active,
+                    "worktree_path": str(live_worktree),
+                },
+                "ctx_retired_recent": {
+                    "session_id": "ctx_retired_recent",
+                    "active": False,
+                    "updated_at": recent,
+                },
+            }
+        },
+    )
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    ctx_source = benchmark["gate"]["sources"]["ctx_bindings"]
+    reliability_gate = benchmark["checks"]["reliability_gate"]
+    assert benchmark["gate"]["status"] == "degraded"
+    assert ctx_source["status"] == "stale"
+    assert ctx_source["latest_timestamp"] == stale_active
+    assert ctx_source["active_latest_timestamp"] == stale_active
+    assert ctx_source["latest_record_timestamp"] == recent
+    assert ctx_source["freshness_required"] is True
+    assert reliability_gate["status"] == "fail"
+    assert reliability_gate["metrics"]["stale_source_count"] == 1
+    assert benchmark["gate"]["ctx_remediation"]["stale_active_count"] == 1
+    assert "reliability_gate" in benchmark["critical_failures"]
+
+
+def test_active_ctx_without_timestamp_is_degraded_not_masked_by_retired_timestamp(tmp_path):
+    now = datetime(2026, 5, 22, 15, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+    live_worktree = tmp_path / "live-worktree"
+    live_worktree.mkdir()
+
+    _write_json(journal_path, {"entries": [{"occurredAt": recent}]})
+    _write_json(
+        codex_path,
+        {"runs": {"codex_1": {"run_id": "codex_1", "status": "completed", "completed_at": recent}}},
+    )
+    _write_json(
+        ctx_path,
+        {
+            "sessions": {
+                "ctx_active_missing_timestamp": {
+                    "session_id": "ctx_active_missing_timestamp",
+                    "active": True,
+                    "worktree_path": str(live_worktree),
+                },
+                "ctx_retired_recent": {
+                    "session_id": "ctx_retired_recent",
+                    "active": False,
+                    "updated_at": recent,
+                },
+            }
+        },
+    )
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    ctx_source = benchmark["gate"]["sources"]["ctx_bindings"]
+    reliability_gate = benchmark["checks"]["reliability_gate"]
+    assert benchmark["gate"]["status"] == "degraded"
+    assert ctx_source["status"] == "degraded"
+    assert ctx_source["latest_timestamp"] is None
+    assert ctx_source["active_latest_timestamp"] is None
+    assert ctx_source["latest_record_timestamp"] == recent
+    assert ctx_source["detail"] == "Active ctx bindings do not include freshness timestamps."
+    assert benchmark["gate"]["ctx_remediation"]["required"] is True
+    assert reliability_gate["status"] == "fail"
+    assert reliability_gate["metrics"]["ctx_remediation_required"] is True
+    assert "reliability_gate" in benchmark["critical_failures"]
+
+
 def test_missing_ctx_bindings_block_issue_selection_with_repair_guidance(tmp_path):
     now = datetime(2026, 5, 22, 15, 0, 0, tzinfo=timezone.utc)
     recent = now.isoformat()
@@ -678,6 +796,118 @@ def test_raw_throughput_does_not_pass_operator_value_alignment(tmp_path):
     assert "operator_value_alignment" in benchmark["critical_failures"]
     assert benchmark["issue_selection"]["quantity_guardrail_active"] is True
     assert "decision support" in benchmark["summary"]["operator_value_alignment"]
+
+
+def test_execution_throughput_gap_prioritizes_journal_followthrough_without_ctx_blocker(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "journal-followthrough-1",
+                    "occurredAt": recent,
+                    "summary": "Implemented one self-improvement follow-through update.",
+                    "operatorDecisionSupport": (
+                        "Operator can inspect one completed delivery and choose whether "
+                        "to backfill the rest."
+                    ),
+                    "changedFiles": ["tools/self_improvement_tool.py"],
+                    "tests": ["pytest tests/tools/test_self_improvement_tool.py passed"],
+                }
+            ]
+        },
+    )
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                f"codex_{idx}": {
+                    "run_id": f"codex_{idx}",
+                    "status": "completed",
+                    "completed_at": recent,
+                    "exit_code": 0,
+                    "final_message": (
+                        "CHANGED_FILES\n"
+                        "- tools/self_improvement_tool.py\n"
+                        "VERIFICATION\n"
+                        "- pytest tests/tools/test_self_improvement_tool.py passed\n"
+                        f"COMMIT\n- abc123{idx}\n"
+                        f"PULL_REQUEST\n- https://github.com/taboularasa/hermes-agent/pull/{11680 + idx}"
+                    ),
+                }
+                for idx in range(6)
+            }
+        },
+    )
+    _write_json(
+        ctx_path,
+        {
+            "sessions": {
+                "ctx_retired": {
+                    "session_id": "ctx_retired",
+                    "active": False,
+                    "updated_at": recent,
+                }
+            }
+        },
+    )
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    reliability_gate = benchmark["checks"]["reliability_gate"]
+    assert reliability_gate["status"] == "pass"
+    assert reliability_gate["metrics"]["ctx_remediation_required"] is False
+    assert benchmark["gate"]["sources"]["ctx_bindings"]["status"] == "inactive"
+    assert benchmark["gate"]["ctx_remediation"]["required"] is False
+
+    drift = benchmark["checks"]["leading_indicator_drift"]
+    remediation = drift["metrics"]["execution_throughput_remediation"]
+    assert drift["status"] == "warn"
+    assert remediation["required"] is True
+    assert remediation["blocking_surface"] == "journal_follow_through"
+    assert remediation["recent_completed_codex_count"] == 6
+    assert remediation["recent_journal_work_item_count"] == 1
+    assert remediation["ctx_inactivity_blocking"] is False
+    assert "inactive ctx is informational" in drift["detail"]
+    assert "journal entries" in remediation["actions"][0]
+
+    issue_selection = benchmark["issue_selection"]
+    assert issue_selection["recommended_focus"] == "Codex delivery journal follow-through"
+    assert "Inactive ctx evidence is informational" in issue_selection["detail"]
+    assert "operator_value_alignment" in issue_selection["blocked_checks"]
+    assert "leading_indicator_drift" in issue_selection["blocked_checks"]
+    assert "journal_follow_through" in issue_selection["execution_throughput"]["blocking_surface"]
+
+    summary_markdown = self_improvement_tool._format_pipeline_summary(
+        benchmark=benchmark,
+        top_candidate=None,
+    )
+    compact = self_improvement_tool._pipeline_benchmark_summary(benchmark)
+    assert (
+        "- execution_throughput_remediation=6 completed Codex run(s), "
+        "1 journal work item(s)"
+    ) in summary_markdown
+    assert "- execution_throughput_action=backfill journal entries" in summary_markdown
+    assert (
+        compact["leading_indicator_drift"]["execution_throughput_remediation"]["required"]
+        is True
+    )
 
 
 def test_operator_value_report_preserves_decision_support_evidence(tmp_path):
@@ -1185,6 +1415,283 @@ def test_leading_indicator_drift_flags_correlation_explosion(tmp_path):
         "operator_value_alignment",
         "reliability_gate",
     }
+
+
+def test_leading_indicator_scorecard_reports_evidence_and_mitigation_for_all_harbingers():
+    history_scores = [
+        (0.95, "pass"),
+        (0.95, "pass"),
+        (0.95, "fail"),
+        (0.95, "pass"),
+        (0.92, "fail"),
+        (0.6, "pass"),
+        (0.58, "fail"),
+    ]
+    history = {
+        "version": 1,
+        "evaluations": [
+            {
+                "checks": {
+                    "reliability_gate": {"score": 0.95, "status": "pass"},
+                    "anti_make_work_check": {"score": 0.95, "status": "pass"},
+                    "operator_value_alignment": {
+                        "score": score,
+                        "status": status,
+                    },
+                }
+            }
+            for score, status in history_scores
+        ],
+    }
+    current_checks = {
+        "reliability_gate": {"score": 0.7, "status": "warn"},
+        "anti_make_work_check": {"score": 0.7, "status": "warn"},
+        "operator_value_alignment": {"score": 0.35, "status": "fail", "metrics": {}},
+    }
+
+    drift = self_improvement_tool._evaluate_leading_indicator_drift_check(
+        current_checks["operator_value_alignment"],
+        history,
+        current_checks,
+    )
+
+    expected_harbingers = {
+        "critical_slowing_down",
+        "variance_explosion",
+        "flickering",
+        "correlation_explosion",
+    }
+    scorecard = drift["metrics"]["harbinger_scorecard"]
+    assert set(drift["metrics"]["triggered_harbingers"]) == expected_harbingers
+    assert {item["harbinger"] for item in drift["metrics"]["recommended_mitigations"]} == (
+        expected_harbingers
+    )
+    for harbinger in expected_harbingers:
+        card = scorecard[harbinger]
+        assert card["triggered"] is True
+        assert card["evidence"]
+        assert card["evidence_summary"]
+        assert card["mitigation"]
+        assert card["next_action"]
+        assert harbinger in drift["detail"]
+
+
+def test_benchmark_history_persists_leading_indicator_scorecard_snapshot(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    history_path = tmp_path / "history.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(journal_path, {"entries": _operator_value_entries(recent)})
+    _write_json(codex_path, {"runs": {"codex_1": {"run_id": "codex_1", "completed_at": recent}}})
+    _write_json(ctx_path, {"sessions": {"ctx_1": {"session_id": "ctx_1", "updated_at": recent}}})
+    _write_json(
+        history_path,
+        {
+            "version": 1,
+            "evaluations": [
+                {
+                    "evaluated_at": (now - timedelta(hours=24 - idx * 6)).isoformat(),
+                    "checks": {"operator_value_alignment": {"score": score, "status": "pass"}},
+                }
+                for idx, score in enumerate([0.98, 0.9, 0.887, 0.884])
+            ],
+        },
+    )
+
+    self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=history_path,
+        now=now,
+        persist=True,
+    )
+
+    history = json.loads(history_path.read_text(encoding="utf-8"))
+    drift_snapshot = history["runs"][-1]["checks"]["leading_indicator_drift"]
+    critical = drift_snapshot["harbinger_scorecard"]["critical_slowing_down"]
+    assert drift_snapshot["triggered_harbingers"] == ["critical_slowing_down"]
+    assert drift_snapshot["recommended_mitigations"][0]["evidence_summary"]
+    assert critical["evidence_summary"]
+    assert critical["mitigation"]
+
+
+def test_pipeline_summary_surfaces_leading_indicator_harbinger_mitigation():
+    drift = self_improvement_tool._evaluate_leading_indicator_drift_check(
+        {"score": 0.82, "status": "warn", "metrics": {}},
+        {
+            "evaluations": [
+                {
+                    "checks": {
+                        "operator_value_alignment": {
+                            "score": score,
+                            "status": "pass" if score >= 0.85 else "warn",
+                        }
+                    }
+                }
+                for score in [0.97, 0.9, 0.86, 0.83]
+            ]
+        },
+        {"operator_value_alignment": {"score": 0.82, "status": "warn", "metrics": {}}},
+    )
+    benchmark = {
+        "score": 88.0,
+        "project_score": 88.0,
+        "direction": "negative",
+        "trend": "regressing",
+        "critical_failures": ["leading_indicator_drift"],
+        "checks": {
+            "reliability_gate": {"score": 1.0, "status": "pass"},
+            "leading_indicator_drift": drift,
+        },
+    }
+
+    summary = self_improvement_tool._format_pipeline_summary(
+        benchmark=benchmark,
+        top_candidate=None,
+    )
+    compact = self_improvement_tool._pipeline_benchmark_summary(benchmark)
+
+    assert "- leading_indicator_harbingers=critical_slowing_down" in summary
+    assert "- leading_indicator_critical_slowing_down: evidence=" in summary
+    assert "mitigation=Stop expanding self-improvement scope" in summary
+    assert compact["leading_indicator_drift"]["triggered_harbingers"] == [
+        "critical_slowing_down"
+    ]
+    assert compact["leading_indicator_drift"]["recommended_mitigations"][0][
+        "evidence_summary"
+    ]
+
+
+def test_execution_loop_warns_on_sparse_journal_follow_through_after_codex_volume(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(journal_path, {"entries": [{"occurredAt": recent}]})
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                f"codex_{idx}": {
+                    "run_id": f"codex_{idx}",
+                    "status": "completed",
+                    "completed_at": (now - timedelta(hours=idx)).isoformat(),
+                    "exit_code": 0,
+                }
+                for idx in range(6)
+            }
+        },
+    )
+    _write_json(
+        ctx_path,
+        {
+            "sessions": {
+                "ctx_retired": {
+                    "session_id": "ctx_retired",
+                    "active": False,
+                    "updated_at": recent,
+                }
+            }
+        },
+    )
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    execution = benchmark["checks"]["execution_loop"]
+    metrics = execution["metrics"]
+    assert execution["status"] == "warn"
+    assert execution["score"] == 0.7
+    assert metrics["completed_codex_runs_14d"] == 6
+    assert metrics["active_ctx_binding_count"] == 0
+    assert metrics["ctx_binding_state"] == "inactive_informational"
+    assert metrics["ctx_inactivity_blocking"] is False
+    assert metrics["journal_entries_14d"] == 1
+    assert metrics["journal_follow_through_rate"] == 0.1667
+    assert metrics["sparse_journal_follow_through"] is True
+    assert "Backfill journal evidence" in metrics["next_throughput_action"]
+    assert benchmark["execution_loop"]["next_throughput_action"] == metrics["next_throughput_action"]
+    assert "execution_loop" in benchmark["issue_selection"]["blocked_checks"]
+    assert benchmark["issue_selection"]["recommended_focus"] == "Codex delivery journal follow-through"
+
+
+def test_execution_loop_passes_when_ctx_codex_and_journal_are_in_cadence(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    _write_json(journal_path, {"entries": [{"occurredAt": recent}]})
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_1": {
+                    "run_id": "codex_1",
+                    "status": "completed",
+                    "completed_at": recent,
+                    "exit_code": 0,
+                }
+            }
+        },
+    )
+    _write_json(
+        ctx_path,
+        {
+            "sessions": {
+                "ctx_1": {
+                    "session_id": "ctx_1",
+                    "active": True,
+                    "updated_at": recent,
+                    "worktree_path": str(worktree),
+                }
+            }
+        },
+    )
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    execution = benchmark["checks"]["execution_loop"]
+    metrics = execution["metrics"]
+    assert execution["status"] == "pass"
+    assert metrics["completed_codex_runs_14d"] == 1
+    assert metrics["active_ctx_binding_count"] == 1
+    assert metrics["journal_entries_14d"] == 1
+    assert metrics["journal_follow_through_rate"] == 1.0
+    assert metrics["ctx_inactivity_blocking"] is False
+    assert metrics["next_throughput_action"].startswith("Keep converting self-improvement work")
+    assert "execution_loop" not in benchmark["issue_selection"]["blocked_checks"]
 
 
 def test_stale_active_ctx_still_degrades_reliability_floor(tmp_path):
