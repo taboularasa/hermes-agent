@@ -163,11 +163,11 @@ existing issues. They are not created by this delegated run.
 
 | Proposed issue title | Scope | Why it remains uncovered |
 |---|---|---|
-| `HAD-TBD: Docker named-volume backup and restore plan for ontology and Hadto services` | Inventory and backup/restore Docker named volumes including `hadto-pipeline_pipeline-data`, `ontology-platform_archivebox-data`, `ontology-platform_oxigraph-data`, and `ontology-platform_source-materials-minio-data`. | Docker named volumes are outside `/data/hermes` and are not covered by home-path bind mounts. |
-| `HAD-TBD: Restore rehearsal for /data/hermes on a scratch host` | Prove a bare-OS restore can reconstruct logical paths, read Hermes state, inspect repos, and start services in the documented order. | This closeout defines assumptions but does not execute a restore. |
-| `HAD-TBD: Backup verifier manifest for /data/hermes backup classes` | Implement or document the recurring backup readback that proves critical-durable, important-durable, operational-history, retention, exclusion, and holdback-gate coverage. | Holdback cleanup depends on a repeatable verification artifact. |
-| `HAD-TBD: Reconcile backup boundary after HAD-1147 path-contract inventory merges` | Add any newly discovered `/data/hermes` subvolumes or host paths to the backup boundary and restore plan. | PR #132 is still open while this closeout is written. |
-| `HAD-TBD: Classify service-specific source-material stores outside /data/hermes` | Identify ontology/source-material stores not under `/data/hermes`, including Docker-backed object/blob stores and repo-adjacent data directories. | Source materials are high-value and may not all live under the four dry-run subvolumes. |
+| `HAD-1158: Docker named-volume backup and restore plan for ontology and Hadto services` | Inventory and backup/restore Docker named volumes including `hadto-pipeline_pipeline-data`, `ontology-platform_archivebox-data`, `ontology-platform_oxigraph-data`, and `ontology-platform_source-materials-minio-data`. | Docker named volumes are outside `/data/hermes` and are not covered by home-path bind mounts. |
+| `HAD-1159: Restore rehearsal for /data/hermes on a scratch host` | Prove a bare-OS restore can reconstruct logical paths, read Hermes state, inspect repos, and start services in the documented order. | This closeout defines assumptions but does not execute a restore. |
+| `HAD-1160: Backup verifier manifest for /data/hermes backup classes` | Implement or document the recurring backup readback that proves critical-durable, important-durable, operational-history, retention, exclusion, and holdback-gate coverage. | Holdback cleanup depends on a repeatable verification artifact. |
+| `HAD-1161: Reconcile backup boundary after HAD-1147 path-contract inventory merges` | Add any newly discovered `/data/hermes` subvolumes or host paths to the backup boundary and restore plan. | PR #132 is still open while this closeout is written. |
+| `HAD-1162: Classify service-specific source-material stores outside /data/hermes` | Identify ontology/source-material stores not under `/data/hermes`, including Docker-backed object/blob stores and repo-adjacent data directories. | Source materials are high-value and may not all live under the four dry-run subvolumes. |
 
 ## Closeout checklist
 
