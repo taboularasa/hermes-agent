@@ -1305,6 +1305,158 @@ def test_leading_indicator_drift_flags_correlation_explosion(tmp_path):
     }
 
 
+def test_leading_indicator_scorecard_reports_evidence_and_mitigation_for_all_harbingers():
+    history_scores = [
+        (0.95, "pass"),
+        (0.95, "pass"),
+        (0.95, "fail"),
+        (0.95, "pass"),
+        (0.92, "fail"),
+        (0.6, "pass"),
+        (0.58, "fail"),
+    ]
+    history = {
+        "version": 1,
+        "evaluations": [
+            {
+                "checks": {
+                    "reliability_gate": {"score": 0.95, "status": "pass"},
+                    "anti_make_work_check": {"score": 0.95, "status": "pass"},
+                    "operator_value_alignment": {
+                        "score": score,
+                        "status": status,
+                    },
+                }
+            }
+            for score, status in history_scores
+        ],
+    }
+    current_checks = {
+        "reliability_gate": {"score": 0.7, "status": "warn"},
+        "anti_make_work_check": {"score": 0.7, "status": "warn"},
+        "operator_value_alignment": {"score": 0.35, "status": "fail", "metrics": {}},
+    }
+
+    drift = self_improvement_tool._evaluate_leading_indicator_drift_check(
+        current_checks["operator_value_alignment"],
+        history,
+        current_checks,
+    )
+
+    expected_harbingers = {
+        "critical_slowing_down",
+        "variance_explosion",
+        "flickering",
+        "correlation_explosion",
+    }
+    scorecard = drift["metrics"]["harbinger_scorecard"]
+    assert set(drift["metrics"]["triggered_harbingers"]) == expected_harbingers
+    assert {item["harbinger"] for item in drift["metrics"]["recommended_mitigations"]} == (
+        expected_harbingers
+    )
+    for harbinger in expected_harbingers:
+        card = scorecard[harbinger]
+        assert card["triggered"] is True
+        assert card["evidence"]
+        assert card["evidence_summary"]
+        assert card["mitigation"]
+        assert card["next_action"]
+        assert harbinger in drift["detail"]
+
+
+def test_benchmark_history_persists_leading_indicator_scorecard_snapshot(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    history_path = tmp_path / "history.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(journal_path, {"entries": _operator_value_entries(recent)})
+    _write_json(codex_path, {"runs": {"codex_1": {"run_id": "codex_1", "completed_at": recent}}})
+    _write_json(ctx_path, {"sessions": {"ctx_1": {"session_id": "ctx_1", "updated_at": recent}}})
+    _write_json(
+        history_path,
+        {
+            "version": 1,
+            "evaluations": [
+                {
+                    "evaluated_at": (now - timedelta(hours=24 - idx * 6)).isoformat(),
+                    "checks": {"operator_value_alignment": {"score": score, "status": "pass"}},
+                }
+                for idx, score in enumerate([0.98, 0.9, 0.887, 0.884])
+            ],
+        },
+    )
+
+    self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=history_path,
+        now=now,
+        persist=True,
+    )
+
+    history = json.loads(history_path.read_text(encoding="utf-8"))
+    drift_snapshot = history["runs"][-1]["checks"]["leading_indicator_drift"]
+    critical = drift_snapshot["harbinger_scorecard"]["critical_slowing_down"]
+    assert drift_snapshot["triggered_harbingers"] == ["critical_slowing_down"]
+    assert drift_snapshot["recommended_mitigations"][0]["evidence_summary"]
+    assert critical["evidence_summary"]
+    assert critical["mitigation"]
+
+
+def test_pipeline_summary_surfaces_leading_indicator_harbinger_mitigation():
+    drift = self_improvement_tool._evaluate_leading_indicator_drift_check(
+        {"score": 0.82, "status": "warn", "metrics": {}},
+        {
+            "evaluations": [
+                {
+                    "checks": {
+                        "operator_value_alignment": {
+                            "score": score,
+                            "status": "pass" if score >= 0.85 else "warn",
+                        }
+                    }
+                }
+                for score in [0.97, 0.9, 0.86, 0.83]
+            ]
+        },
+        {"operator_value_alignment": {"score": 0.82, "status": "warn", "metrics": {}}},
+    )
+    benchmark = {
+        "score": 88.0,
+        "project_score": 88.0,
+        "direction": "negative",
+        "trend": "regressing",
+        "critical_failures": ["leading_indicator_drift"],
+        "checks": {
+            "reliability_gate": {"score": 1.0, "status": "pass"},
+            "leading_indicator_drift": drift,
+        },
+    }
+
+    summary = self_improvement_tool._format_pipeline_summary(
+        benchmark=benchmark,
+        top_candidate=None,
+    )
+    compact = self_improvement_tool._pipeline_benchmark_summary(benchmark)
+
+    assert "- leading_indicator_harbingers=critical_slowing_down" in summary
+    assert "- leading_indicator_critical_slowing_down: evidence=" in summary
+    assert "mitigation=Stop expanding self-improvement scope" in summary
+    assert compact["leading_indicator_drift"]["triggered_harbingers"] == [
+        "critical_slowing_down"
+    ]
+    assert compact["leading_indicator_drift"]["recommended_mitigations"][0][
+        "evidence_summary"
+    ]
+
+
 def test_stale_active_ctx_still_degrades_reliability_floor(tmp_path):
     now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
     recent = now.isoformat()
