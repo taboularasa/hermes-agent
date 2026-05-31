@@ -23,6 +23,7 @@ Public API (signatures preserved from the original 2,400-line version):
 import json
 import asyncio
 import logging
+import os
 import threading
 import time
 from typing import Dict, Any, List, Optional, Tuple
@@ -31,6 +32,77 @@ from tools.registry import discover_builtin_tools, registry
 from toolsets import resolve_toolset, validate_toolset
 
 logger = logging.getLogger(__name__)
+
+
+_TOOL_HEARTBEAT_INTERVAL_SECONDS = 30.0
+_TOOL_HEARTBEAT_MAX_SECONDS = 20 * 60.0
+
+
+def _float_env(name: str, default: float) -> float:
+    raw = str(os.environ.get(name, "")).strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        logger.warning("Invalid %s=%r; using %.1fs", name, raw, default)
+        return default
+
+
+def _start_tool_activity_heartbeat(function_name: str) -> threading.Event | None:
+    """Touch agent activity while a synchronous tool dispatch is still running.
+
+    Some plugin tools perform real work inside one long synchronous registry
+    dispatch. Without a heartbeat, gateway and cron watchdogs see no stream or
+    tool-completion activity and can kill the agent mid-tool. The heartbeat is
+    deliberately bounded so a genuinely wedged tool eventually goes silent and
+    the existing inactivity watchdogs can still fire.
+    """
+    try:
+        from tools.environments.base import get_activity_callback
+
+        callback = get_activity_callback()
+    except Exception:
+        callback = None
+    if callback is None:
+        return None
+
+    interval = _float_env("HERMES_TOOL_HEARTBEAT_INTERVAL", _TOOL_HEARTBEAT_INTERVAL_SECONDS)
+    max_seconds = _float_env("HERMES_TOOL_HEARTBEAT_MAX_SECONDS", _TOOL_HEARTBEAT_MAX_SECONDS)
+    if interval <= 0 or max_seconds <= 0:
+        return None
+
+    stop = threading.Event()
+    start = time.monotonic()
+
+    def _loop() -> None:
+        while not stop.wait(interval):
+            elapsed = time.monotonic() - start
+            if elapsed > max_seconds:
+                logger.warning(
+                    "Stopping heartbeat for tool %s after %.0fs with no completion",
+                    function_name,
+                    elapsed,
+                )
+                break
+            try:
+                callback(f"executing tool: {function_name} ({int(elapsed)}s elapsed)")
+            except Exception:
+                logger.debug("tool activity heartbeat failed for %s", function_name, exc_info=True)
+                break
+
+    thread = threading.Thread(
+        target=_loop,
+        name=f"tool-heartbeat-{function_name[:32]}",
+        daemon=True,
+    )
+    thread.start()
+    return stop
+
+
+def _stop_tool_activity_heartbeat(stop: threading.Event | None) -> None:
+    if stop is not None:
+        stop.set()
 
 
 # =============================================================================
@@ -768,21 +840,25 @@ def handle_function_call(
         # to wrap every tool manually.  We use monotonic() so the value is
         # unaffected by wall-clock adjustments during the call.
         _dispatch_start = time.monotonic()
-        if function_name == "execute_code":
-            # Prefer the caller-provided list so subagents can't overwrite
-            # the parent's tool set via the process-global.
-            sandbox_enabled = enabled_tools if enabled_tools is not None else _last_resolved_tool_names
-            result = registry.dispatch(
-                function_name, function_args,
-                task_id=task_id,
-                enabled_tools=sandbox_enabled,
-            )
-        else:
-            result = registry.dispatch(
-                function_name, function_args,
-                task_id=task_id,
-                user_task=user_task,
-            )
+        _heartbeat_stop = _start_tool_activity_heartbeat(function_name)
+        try:
+            if function_name == "execute_code":
+                # Prefer the caller-provided list so subagents can't overwrite
+                # the parent's tool set via the process-global.
+                sandbox_enabled = enabled_tools if enabled_tools is not None else _last_resolved_tool_names
+                result = registry.dispatch(
+                    function_name, function_args,
+                    task_id=task_id,
+                    enabled_tools=sandbox_enabled,
+                )
+            else:
+                result = registry.dispatch(
+                    function_name, function_args,
+                    task_id=task_id,
+                    user_task=user_task,
+                )
+        finally:
+            _stop_tool_activity_heartbeat(_heartbeat_stop)
         duration_ms = int((time.monotonic() - _dispatch_start) * 1000)
 
         try:

@@ -25,6 +25,7 @@ from agent.prompt_builder import (
     TOOL_USE_ENFORCEMENT_MODELS,
     OPENAI_MODEL_EXECUTION_GUIDANCE,
     MEMORY_GUIDANCE,
+    OPERATOR_RULES_GUIDANCE,
     SESSION_SEARCH_GUIDANCE,
     PLATFORM_HINTS,
     WSL_ENVIRONMENT_HINT,
@@ -48,6 +49,18 @@ class TestGuidanceConstants:
     def test_session_search_guidance_is_simple_cross_session_recall(self):
         assert "relevant cross-session context exists" in SESSION_SEARCH_GUIDANCE
         assert "recent turns of the current session" not in SESSION_SEARCH_GUIDANCE
+
+    def test_operator_rules_guidance_contains_required_anchors(self):
+        assert "ontology_context" in OPERATOR_RULES_GUIDANCE
+        assert "web_search_matrix" in OPERATOR_RULES_GUIDANCE
+        assert "workspace_backlog_orchestrator" in OPERATOR_RULES_GUIDANCE
+        assert (
+            "workspace-orchestrator:git-hygiene:<IDENTIFIER>"
+            in OPERATOR_RULES_GUIDANCE
+        )
+        assert "codex_delegate" in OPERATOR_RULES_GUIDANCE
+        assert "direct operator voice" in OPERATOR_RULES_GUIDANCE
+        assert "concurrency, not security" in OPERATOR_RULES_GUIDANCE
 
 
 # =========================================================================
@@ -1186,6 +1199,4 @@ class TestOpenAIModelExecutionGuidance:
 # =========================================================================
 # Budget warning history stripping
 # =========================================================================
-
-
 
