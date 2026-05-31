@@ -565,8 +565,16 @@ def _iter_ctx_timestamps(payload: Any) -> Iterable[datetime]:
             yield parsed
 
 
+def _ctx_record_status(record: dict[str, Any]) -> str:
+    return str(record.get("status") or "").strip().lower()
+
+
 def _ctx_record_is_active(record: dict[str, Any]) -> bool:
-    return record.get("active") is True
+    if record.get("active") is True:
+        return True
+    if record.get("active") is False:
+        return False
+    return _ctx_record_status(record) in {"active", "running", "in_progress", "queued"}
 
 
 def _latest_timestamp(values: Iterable[datetime]) -> Optional[datetime]:
