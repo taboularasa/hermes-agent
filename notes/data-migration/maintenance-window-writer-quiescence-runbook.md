@@ -313,6 +313,17 @@ import subprocess
 from pathlib import Path
 
 roots = [Path('/home/david/.hermes'), Path('/home/david/stacks'), Path('/home/david/.ctx-data'), Path('/home/david/.codex'), Path('/data/hermes')]
+roots = [r.resolve() for r in roots if r.exists()]
+
+def touches_copied_root(source_resolved, root):
+    # Catch bind sources under a copied root and ancestor bind sources
+    # such as /home/david or / exposing /home/david/.hermes.
+    return (
+        source_resolved == root
+        or source_resolved in root.parents
+        or root in source_resolved.parents
+    )
+
 ids = subprocess.run(['docker', 'ps', '-q'], check=True, text=True, capture_output=True).stdout.split()
 if not ids:
     raise SystemExit(0)
@@ -327,7 +338,7 @@ for container in data:
             source_resolved = source.resolve()
         except OSError:
             source_resolved = source
-        if any(source_resolved == r or r in source_resolved.parents for r in roots if r.exists()):
+        if any(touches_copied_root(source_resolved, root) for root in roots):
             print(f'{name}: {source}->{mount.get("Destination")}')
 PY
 ```
@@ -539,6 +550,16 @@ from pathlib import Path
 
 roots = [Path('/home/david/.hermes'), Path('/home/david/stacks'), Path('/home/david/.ctx-data'), Path('/home/david/.codex'), Path('/data/hermes')]
 roots = [r.resolve() for r in roots if r.exists()]
+
+def touches_copied_root(source_resolved, root):
+    # Catch bind sources under a copied root and ancestor bind sources
+    # such as /home/david or / exposing /home/david/.hermes.
+    return (
+        source_resolved == root
+        or source_resolved in root.parents
+        or root in source_resolved.parents
+    )
+
 ids = subprocess.run(['docker', 'ps', '-q'], check=True, text=True, capture_output=True).stdout.split()
 if ids:
     data = json.loads(subprocess.run(['docker', 'inspect', *ids], check=True, text=True, capture_output=True).stdout)
@@ -552,7 +573,7 @@ if ids:
                 source_resolved = source.resolve()
             except OSError:
                 source_resolved = source
-            if any(source_resolved == root or root in source_resolved.parents for root in roots):
+            if any(touches_copied_root(source_resolved, root) for root in roots):
                 print(f'{name}: {source}->{mount.get("Destination")}')
 PY
 
