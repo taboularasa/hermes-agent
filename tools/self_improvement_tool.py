@@ -439,6 +439,33 @@ SELF_IMPROVEMENT_BENCHMARK_SCHEMA = {
 }
 
 
+SELF_IMPROVEMENT_PIPELINE_SCHEMA = {
+    "name": "self_improvement_pipeline",
+    "description": (
+        "Run the Hermes self-improvement reliability pipeline using the "
+        "repo-local benchmark contract without Linear writeback."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "journal_path": {"type": "string"},
+            "codex_runs_path": {"type": "string"},
+            "ctx_bindings_path": {"type": "string"},
+            "ontology_root": {"type": "string"},
+            "history_path": {"type": "string"},
+            "now": {"type": "string"},
+            "freshness_hours": {"type": "integer", "minimum": 1},
+            "active_stale_hours": {"type": "integer", "minimum": 1},
+            "persist": {"type": "boolean"},
+            "candidate_limit": {"type": "integer", "minimum": 1},
+            "auto_repair_linear": {"type": "boolean"},
+            "auto_close_resolved": {"type": "boolean"},
+        },
+        "required": [],
+    },
+}
+
+
 def _parse_time(value: Any) -> Optional[datetime]:
     if value is None or value == "":
         return None
@@ -565,8 +592,16 @@ def _iter_ctx_timestamps(payload: Any) -> Iterable[datetime]:
             yield parsed
 
 
+def _ctx_record_status(record: dict[str, Any]) -> str:
+    return str(record.get("status") or "").strip().lower()
+
+
 def _ctx_record_is_active(record: dict[str, Any]) -> bool:
-    return record.get("active") is True
+    if record.get("active") is True:
+        return True
+    if record.get("active") is False:
+        return False
+    return _ctx_record_status(record) in {"active", "running", "in_progress", "queued"}
 
 
 def _latest_timestamp(values: Iterable[datetime]) -> Optional[datetime]:
@@ -2640,6 +2675,134 @@ def evaluate_self_improvement_benchmark(
     return benchmark
 
 
+def _coerce_path(value: Optional[Path | str], default: Path) -> Path:
+    return Path(value).expanduser() if value else default
+
+
+def _pipeline_benchmark_summary(benchmark: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "score": benchmark.get("score"),
+        "project_score": benchmark.get("project_score"),
+        "direction": benchmark.get("direction"),
+        "trend": benchmark.get("trend"),
+        "critical_failures": benchmark.get("critical_failures"),
+    }
+
+
+def _pipeline_top_candidate(
+    benchmark: dict[str, Any],
+    candidate_limit: int,
+) -> Optional[dict[str, Any]]:
+    checks = benchmark.get("checks") or {}
+    blocked = [
+        check_id
+        for check_id in (benchmark.get("issue_selection") or {}).get("blocked_checks", [])
+        if check_id in checks
+    ][: max(1, int(candidate_limit or 1))]
+    if not blocked:
+        return None
+
+    check_id = blocked[0]
+    check = checks.get(check_id) or {}
+    label = str(check.get("label") or check_id.replace("_", " ")).strip()
+    detail = str(check.get("detail") or "").strip()
+    return {
+        "candidate_source": "benchmark",
+        "candidate_id": check_id,
+        "benchmark_id": check_id,
+        "lane": "Maintenance",
+        "status": "ready",
+        "priority": 1 if check.get("critical") else 2,
+        "title": f"Repair {label.lower()}",
+        "score": check.get("score"),
+        "detail": detail,
+        "target_surface": "hermes-agent self-improvement reliability floor",
+        "verification": (
+            "Rerun self_improvement_pipeline and confirm the selected benchmark "
+            "check passes without weakening reliability gates."
+        ),
+    }
+
+
+def _format_pipeline_summary(
+    *,
+    benchmark: dict[str, Any],
+    top_candidate: Optional[dict[str, Any]],
+) -> str:
+    checks = benchmark.get("checks") or {}
+    reliability = checks.get("reliability_gate") or {}
+    drift = checks.get("leading_indicator_drift") or {}
+    lines = [
+        "Self-improvement pipeline:",
+        f"- score={benchmark.get('score')}",
+        f"- reliability_gate={reliability.get('score')} {reliability.get('status')}",
+        f"- leading_indicator_drift={drift.get('score')} {drift.get('status')}",
+    ]
+    critical = benchmark.get("critical_failures") or []
+    if critical:
+        lines.append(f"- critical_failures={', '.join(str(item) for item in critical)}")
+    if top_candidate:
+        lines.append(f"- top_candidate={top_candidate.get('candidate_id')}")
+    else:
+        lines.append("- top_candidate=None")
+    return "\n".join(lines)
+
+
+def evaluate_self_improvement_pipeline(
+    *,
+    journal_path: Optional[Path | str] = None,
+    codex_runs_path: Optional[Path | str] = None,
+    ctx_bindings_path: Optional[Path | str] = None,
+    ontology_root: Optional[Path | str] = None,
+    history_path: Optional[Path | str] = None,
+    now: Optional[datetime] = None,
+    freshness_hours: int = DEFAULT_FRESHNESS_HOURS,
+    active_stale_hours: int = DEFAULT_ACTIVE_STALE_HOURS,
+    persist: bool = True,
+    candidate_limit: int = 3,
+    auto_repair_linear: Optional[bool] = None,
+    auto_close_resolved: Optional[bool] = None,
+) -> dict[str, Any]:
+    current = now or datetime.now(tz=timezone.utc)
+    benchmark = evaluate_self_improvement_benchmark(
+        journal_path=_coerce_path(journal_path, DEFAULT_JOURNAL_PATH),
+        codex_runs_path=_coerce_path(codex_runs_path, DEFAULT_CODEX_RUNS_PATH),
+        ctx_bindings_path=_coerce_path(ctx_bindings_path, DEFAULT_CTX_BINDINGS_PATH),
+        ontology_root=_coerce_path(ontology_root, DEFAULT_ONTOLOGY_ROOT),
+        history_path=_coerce_path(history_path, DEFAULT_BENCHMARK_HISTORY_PATH),
+        now=current,
+        freshness_hours=freshness_hours,
+        active_stale_hours=active_stale_hours,
+        persist=persist,
+    )
+    top_candidate = _pipeline_top_candidate(benchmark, candidate_limit)
+    linear_requested = bool(auto_repair_linear) or bool(auto_close_resolved)
+    pipeline = {
+        "contract_version": BENCHMARK_CONTRACT_VERSION,
+        "evaluated_at": current.isoformat(),
+        "runtime_surface": "hermes-agent-core",
+        "benchmark_before": _pipeline_benchmark_summary(benchmark),
+        "benchmark": benchmark,
+        "linear": {
+            "available": False,
+            "error": (
+                "Linear writeback is not part of the Hermes core self-improvement pipeline."
+                if linear_requested
+                else None
+            ),
+            "managed_issues": [],
+            "closed_issues": [],
+            "repairs": [],
+        },
+        "top_candidate": top_candidate,
+    }
+    pipeline["summary_markdown"] = _format_pipeline_summary(
+        benchmark=benchmark,
+        top_candidate=top_candidate,
+    )
+    return pipeline
+
+
 def self_improvement_evidence_gate(
     journal_path: Optional[str] = None,
     codex_runs_path: Optional[str] = None,
@@ -2688,6 +2851,38 @@ def self_improvement_benchmark(
     return json.dumps({"success": True, "benchmark": benchmark, "task_id": task_id})
 
 
+def self_improvement_pipeline(
+    journal_path: Optional[str] = None,
+    codex_runs_path: Optional[str] = None,
+    ctx_bindings_path: Optional[str] = None,
+    ontology_root: Optional[str] = None,
+    history_path: Optional[str] = None,
+    now: Optional[str] = None,
+    freshness_hours: Optional[int] = None,
+    active_stale_hours: Optional[int] = None,
+    persist: Optional[bool] = None,
+    candidate_limit: Optional[int] = None,
+    auto_repair_linear: Optional[bool] = None,
+    auto_close_resolved: Optional[bool] = None,
+    task_id: Optional[str] = None,
+) -> str:
+    pipeline = evaluate_self_improvement_pipeline(
+        journal_path=journal_path,
+        codex_runs_path=codex_runs_path,
+        ctx_bindings_path=ctx_bindings_path,
+        ontology_root=ontology_root,
+        history_path=history_path,
+        now=_parse_time(now) if now else None,
+        freshness_hours=int(freshness_hours) if freshness_hours else DEFAULT_FRESHNESS_HOURS,
+        active_stale_hours=int(active_stale_hours) if active_stale_hours else DEFAULT_ACTIVE_STALE_HOURS,
+        persist=True if persist is None else bool(persist),
+        candidate_limit=int(candidate_limit) if candidate_limit else 3,
+        auto_repair_linear=auto_repair_linear,
+        auto_close_resolved=auto_close_resolved,
+    )
+    return json.dumps({"success": True, "pipeline": pipeline, "task_id": task_id})
+
+
 registry.register(
     name="self_improvement_evidence_gate",
     toolset="self_improvement",
@@ -2700,6 +2895,27 @@ registry.register(
         now=args.get("now"),
         freshness_hours=args.get("freshness_hours"),
         active_stale_hours=args.get("active_stale_hours"),
+        task_id=kw.get("task_id"),
+    ),
+)
+
+registry.register(
+    name="self_improvement_pipeline",
+    toolset="self_improvement",
+    schema=SELF_IMPROVEMENT_PIPELINE_SCHEMA,
+    handler=lambda args, **kw: self_improvement_pipeline(
+        journal_path=args.get("journal_path"),
+        codex_runs_path=args.get("codex_runs_path"),
+        ctx_bindings_path=args.get("ctx_bindings_path"),
+        ontology_root=args.get("ontology_root"),
+        history_path=args.get("history_path"),
+        now=args.get("now"),
+        freshness_hours=args.get("freshness_hours"),
+        active_stale_hours=args.get("active_stale_hours"),
+        persist=args.get("persist"),
+        candidate_limit=args.get("candidate_limit"),
+        auto_repair_linear=args.get("auto_repair_linear"),
+        auto_close_resolved=args.get("auto_close_resolved"),
         task_id=kw.get("task_id"),
     ),
 )
