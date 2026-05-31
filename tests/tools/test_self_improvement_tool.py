@@ -1457,6 +1457,129 @@ def test_pipeline_summary_surfaces_leading_indicator_harbinger_mitigation():
     ]
 
 
+def test_execution_loop_warns_on_sparse_journal_follow_through_after_codex_volume(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(journal_path, {"entries": [{"occurredAt": recent}]})
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                f"codex_{idx}": {
+                    "run_id": f"codex_{idx}",
+                    "status": "completed",
+                    "completed_at": (now - timedelta(hours=idx)).isoformat(),
+                    "exit_code": 0,
+                }
+                for idx in range(6)
+            }
+        },
+    )
+    _write_json(
+        ctx_path,
+        {
+            "sessions": {
+                "ctx_retired": {
+                    "session_id": "ctx_retired",
+                    "active": False,
+                    "updated_at": recent,
+                }
+            }
+        },
+    )
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    execution = benchmark["checks"]["execution_loop"]
+    metrics = execution["metrics"]
+    assert execution["status"] == "warn"
+    assert execution["score"] == 0.7
+    assert metrics["completed_codex_runs_14d"] == 6
+    assert metrics["active_ctx_binding_count"] == 0
+    assert metrics["ctx_binding_state"] == "idle"
+    assert metrics["journal_entries_14d"] == 1
+    assert metrics["journal_follow_through_rate"] == 0.1667
+    assert metrics["sparse_journal_follow_through"] is True
+    assert "Backfill journal evidence" in metrics["next_throughput_action"]
+    assert benchmark["execution_loop"]["next_throughput_action"] == metrics["next_throughput_action"]
+    assert "execution_loop" in benchmark["issue_selection"]["blocked_checks"]
+    assert benchmark["issue_selection"]["recommended_focus"] == "self-improvement execution follow-through"
+
+
+def test_execution_loop_passes_when_ctx_codex_and_journal_are_in_cadence(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    _write_json(journal_path, {"entries": [{"occurredAt": recent}]})
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_1": {
+                    "run_id": "codex_1",
+                    "status": "completed",
+                    "completed_at": recent,
+                    "exit_code": 0,
+                }
+            }
+        },
+    )
+    _write_json(
+        ctx_path,
+        {
+            "sessions": {
+                "ctx_1": {
+                    "session_id": "ctx_1",
+                    "active": True,
+                    "updated_at": recent,
+                    "worktree_path": str(worktree),
+                }
+            }
+        },
+    )
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    execution = benchmark["checks"]["execution_loop"]
+    metrics = execution["metrics"]
+    assert execution["status"] == "pass"
+    assert metrics["completed_codex_runs_14d"] == 1
+    assert metrics["active_ctx_binding_count"] == 1
+    assert metrics["journal_entries_14d"] == 1
+    assert metrics["journal_follow_through_rate"] == 1.0
+    assert metrics["next_throughput_action"].startswith("Keep converting ctx-bound plans")
+    assert "execution_loop" not in benchmark["issue_selection"]["blocked_checks"]
+
+
 def test_stale_active_ctx_still_degrades_reliability_floor(tmp_path):
     now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
     recent = now.isoformat()
