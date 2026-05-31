@@ -33,6 +33,11 @@ DEFAULT_ACTIVE_STALE_HOURS = 12
 PROVENANCE_CONTRACT_VERSION = "v1"
 BENCHMARK_CONTRACT_VERSION = "v1"
 _BENCHMARK_HISTORY_LIMIT = 200
+_EXECUTION_LOOP_WINDOW_DAYS = 14
+_EXECUTION_LOOP_MANY_COMPLETED_THRESHOLD = 3
+_EXECUTION_LOOP_MIN_JOURNAL_FOLLOW_THROUGH_RATE = 0.5
+_THROUGHPUT_CODEX_COMPLETION_MIN = _EXECUTION_LOOP_MANY_COMPLETED_THRESHOLD
+_THROUGHPUT_JOURNAL_RATIO_MIN = _EXECUTION_LOOP_MIN_JOURNAL_FOLLOW_THROUGH_RATE
 _LEADING_INDICATOR_CHECK_IDS = (
     "reliability_gate",
     "anti_make_work_check",
@@ -968,6 +973,16 @@ def _codex_record_status(record: dict[str, Any]) -> str:
     return str(record.get("status") or "").strip().lower()
 
 
+def _codex_record_is_completed(record: dict[str, Any]) -> bool:
+    status = _codex_record_status(record)
+    if status in {"completed", "complete", "done", "finished", "success", "succeeded"}:
+        return True
+    exit_code = record.get("exit_code")
+    if exit_code == 0 or str(exit_code).strip() == "0":
+        return True
+    return record.get("completed_at") is not None
+
+
 def _codex_record_is_active(record: dict[str, Any]) -> bool:
     status = _codex_record_status(record)
     if status in {"running", "queued", "in_progress", "active", "unknown"}:
@@ -1390,6 +1405,9 @@ def _benchmark_history_check_snapshot(check_id: str, check: dict[str, Any]) -> d
     snapshot["triggered_harbingers"] = metrics.get("triggered_harbingers") or []
     snapshot["harbinger_scorecard"] = metrics.get("harbinger_scorecard") or {}
     snapshot["recommended_mitigations"] = metrics.get("recommended_mitigations") or []
+    snapshot["execution_throughput_remediation"] = (
+        metrics.get("execution_throughput_remediation") or {}
+    )
     return snapshot
 
 
@@ -1679,6 +1697,291 @@ def _iter_recent_claimed_work_items(
             }
 
 
+def _recent_record_timestamp(
+    record: dict[str, Any],
+    now: datetime,
+    freshness_hours: int,
+) -> Optional[datetime]:
+    timestamp = _record_claimed_timestamp(record)
+    if timestamp is None:
+        return None
+    age_hours = max(0.0, (now - timestamp).total_seconds() / 3600)
+    return timestamp if age_hours <= freshness_hours else None
+
+
+def _codex_record_is_completed_delivery(record: dict[str, Any]) -> bool:
+    status = _codex_record_status(record)
+    if status in {"completed", "complete", "done", "success", "succeeded"}:
+        return True
+    if record.get("completed_at") is not None:
+        return True
+    exit_code = record.get("exit_code")
+    if exit_code == 0:
+        return True
+    if isinstance(exit_code, str) and exit_code.strip() == "0":
+        return True
+    return False
+
+
+def _journal_entry_claims_work(record: dict[str, Any]) -> bool:
+    text = "\n".join(_collect_record_text(record))
+    return _record_claims_work(record, text)
+
+
+def _build_execution_throughput_signal(
+    *,
+    journal_payload: Any,
+    codex_payload: Any,
+    ctx_payload: Any,
+    now: datetime,
+    freshness_hours: int,
+) -> dict[str, Any]:
+    recent_codex_deliveries = [
+        {
+            "run_id": record.get("run_id") or record.get("id"),
+            "status": record.get("status"),
+            "timestamp": timestamp.isoformat(),
+        }
+        for record in _iter_codex_records(codex_payload)
+        if _codex_record_is_completed_delivery(record)
+        if (timestamp := _recent_record_timestamp(record, now, freshness_hours)) is not None
+    ]
+    recent_journal_work = [
+        {
+            "id": record.get("id") or record.get("external_key"),
+            "timestamp": timestamp.isoformat(),
+        }
+        for record in _iter_records(journal_payload, "entries")
+        if _journal_entry_claims_work(record)
+        if (timestamp := _recent_record_timestamp(record, now, freshness_hours)) is not None
+    ]
+    ctx_summary = _summarize_ctx_bindings(ctx_payload, freshness_hours, now)
+    codex_count = len(recent_codex_deliveries)
+    journal_count = len(recent_journal_work)
+    journal_ratio = round(journal_count / codex_count, 4) if codex_count else 1.0
+    journal_gap = (
+        codex_count >= _THROUGHPUT_CODEX_COMPLETION_MIN
+        and journal_ratio < _THROUGHPUT_JOURNAL_RATIO_MIN
+    )
+    ctx_status = str(ctx_summary.get("status") or "")
+    ctx_active_count = int(ctx_summary.get("active_count") or 0)
+    ctx_inactive_informational = ctx_status == "inactive" and ctx_active_count == 0
+    actions: list[str] = []
+    if journal_gap:
+        actions = [
+            "backfill journal entries for completed Codex deliveries that lack follow-through evidence",
+            "record changed files, tests, PR or commit, and operator decision support for the next completed delivery",
+            "select completed Codex deliveries without journal follow-through before starting more raw issue volume",
+        ]
+
+    return {
+        "state": "codex_delivery_journal_gap" if journal_gap else "balanced",
+        "remediation_required": journal_gap,
+        "blocking_surface": "journal_follow_through" if journal_gap else "none",
+        "recent_completed_codex_count": codex_count,
+        "recent_journal_work_item_count": journal_count,
+        "journal_to_codex_ratio": journal_ratio,
+        "journal_ratio_threshold": _THROUGHPUT_JOURNAL_RATIO_MIN,
+        "codex_completion_threshold": _THROUGHPUT_CODEX_COMPLETION_MIN,
+        "sample_codex_deliveries": recent_codex_deliveries[:5],
+        "sample_journal_work_items": recent_journal_work[:5],
+        "actions": actions,
+        "ctx_status": ctx_status,
+        "ctx_active_count": ctx_active_count,
+        "ctx_inactivity_informational": ctx_inactive_informational,
+        "ctx_inactivity_blocking": False,
+    }
+
+
+def _timestamp_in_window(timestamp: Optional[datetime], now: datetime, window_hours: int) -> bool:
+    if timestamp is None:
+        return False
+    age_hours = (now - timestamp).total_seconds() / 3600
+    return 0 <= age_hours <= window_hours
+
+
+def _iter_recent_journal_records(
+    payload: Any,
+    now: datetime,
+    window_hours: int,
+) -> Iterable[tuple[dict[str, Any], datetime]]:
+    for record in _iter_records(payload, "entries"):
+        timestamp = _record_claimed_timestamp(record)
+        if _timestamp_in_window(timestamp, now, window_hours):
+            yield record, timestamp
+
+
+def _iter_recent_completed_codex_records(
+    payload: Any,
+    now: datetime,
+    window_hours: int,
+) -> Iterable[tuple[dict[str, Any], datetime]]:
+    for record in _iter_codex_records(payload):
+        if not _codex_record_is_completed(record):
+            continue
+        timestamp = _record_timestamp(
+            record,
+            "completed_at",
+            "updated_at",
+            "started_at",
+            "process_started_at",
+            "created_at",
+            "timestamp",
+        )
+        if _timestamp_in_window(timestamp, now, window_hours):
+            yield record, timestamp
+
+
+def _recent_record_example(record: dict[str, Any], timestamp: datetime) -> dict[str, Any]:
+    return {
+        "id": (
+            record.get("id")
+            or record.get("run_id")
+            or record.get("session_id")
+            or record.get("external_key")
+        ),
+        "timestamp": timestamp.isoformat(),
+        "status": record.get("status"),
+    }
+
+
+def _execution_loop_next_action(
+    *,
+    completed_codex_count: int,
+    active_ctx_count: int,
+    journal_count: int,
+    journal_follow_through_rate: float,
+) -> str:
+    _ = active_ctx_count
+    if completed_codex_count == 0:
+        return (
+            "Complete one scoped self-improvement task with local Codex and add journal "
+            "evidence."
+        )
+    if journal_count == 0:
+        return "Add journal evidence for recent completed Codex deliveries before launching more work."
+    if (
+        completed_codex_count >= _EXECUTION_LOOP_MANY_COMPLETED_THRESHOLD
+        and journal_follow_through_rate < _EXECUTION_LOOP_MIN_JOURNAL_FOLLOW_THROUGH_RATE
+    ):
+        return "Backfill journal evidence for recent completed Codex deliveries before launching more work."
+    return "Keep converting self-improvement work into completed local Codex runs and journal each delivery."
+
+
+def _evaluate_execution_loop_check(
+    *,
+    journal_path: Path,
+    codex_runs_path: Path,
+    ctx_bindings_path: Path,
+    now: datetime,
+) -> dict[str, Any]:
+    journal_payload = _load_json(journal_path)
+    codex_payload = _load_json(codex_runs_path)
+    ctx_payload = _load_json(ctx_bindings_path)
+    window_hours = _EXECUTION_LOOP_WINDOW_DAYS * 24
+
+    recent_journal = list(_iter_recent_journal_records(journal_payload, now, window_hours))
+    recent_completed_codex = list(
+        _iter_recent_completed_codex_records(codex_payload, now, window_hours)
+    )
+    ctx_records = list(_iter_ctx_records(ctx_payload))
+    active_ctx_records = [record for record in ctx_records if _ctx_record_is_active(record)]
+
+    completed_codex_count = len(recent_completed_codex)
+    journal_count = len(recent_journal)
+    active_ctx_count = len(active_ctx_records)
+    journal_follow_through_rate = (
+        round(journal_count / completed_codex_count, 4)
+        if completed_codex_count
+        else 1.0
+    )
+    latest_completed_at = max(
+        (timestamp for _record, timestamp in recent_completed_codex),
+        default=None,
+    )
+    latest_journal_at = max(
+        (timestamp for _record, timestamp in recent_journal),
+        default=None,
+    )
+    latest_journal_lag_hours = None
+    if latest_completed_at is not None and latest_journal_at is not None:
+        latest_journal_lag_hours = round(
+            (latest_journal_at - latest_completed_at).total_seconds() / 3600,
+            2,
+        )
+
+    sparse_journal_follow_through = (
+        completed_codex_count >= _EXECUTION_LOOP_MANY_COMPLETED_THRESHOLD
+        and journal_follow_through_rate < _EXECUTION_LOOP_MIN_JOURNAL_FOLLOW_THROUGH_RATE
+    )
+    missing_journal_follow_through = completed_codex_count > 0 and journal_count == 0
+    no_completed_codex = completed_codex_count == 0
+    ctx_inactivity_informational = active_ctx_count == 0
+    ctx_state = "active" if active_ctx_count else "inactive_informational"
+    next_action = _execution_loop_next_action(
+        completed_codex_count=completed_codex_count,
+        active_ctx_count=active_ctx_count,
+        journal_count=journal_count,
+        journal_follow_through_rate=journal_follow_through_rate,
+    )
+
+    if missing_journal_follow_through:
+        score = 0.55
+        detail = "Completed Codex deliveries lack journal follow-through."
+    elif sparse_journal_follow_through:
+        score = 0.7
+        detail = "Completed Codex delivery volume has sparse journal follow-through."
+    elif no_completed_codex:
+        score = 0.6
+        detail = "No completed local Codex deliveries were recorded in the throughput window."
+    else:
+        score = 1.0
+        detail = "Execution loop is converting local Codex deliveries with journal evidence."
+        if ctx_inactivity_informational:
+            detail += " Inactive ctx is informational on this host."
+
+    return _build_benchmark_item(
+        "execution_loop",
+        "Execution loop",
+        score=score,
+        weight=0,
+        detail=detail,
+        critical=False,
+        metrics={
+            "window_days": _EXECUTION_LOOP_WINDOW_DAYS,
+            "completed_codex_runs_14d": completed_codex_count,
+            "active_ctx_binding_count": active_ctx_count,
+            "journal_entries_14d": journal_count,
+            "journal_follow_through_rate": journal_follow_through_rate,
+            "minimum_journal_follow_through_rate": (
+                _EXECUTION_LOOP_MIN_JOURNAL_FOLLOW_THROUGH_RATE
+            ),
+            "many_completed_codex_threshold": _EXECUTION_LOOP_MANY_COMPLETED_THRESHOLD,
+            "ctx_binding_state": ctx_state,
+            "ctx_inactivity_informational": ctx_inactivity_informational,
+            "ctx_inactivity_blocking": False,
+            "latest_completed_codex_at": (
+                latest_completed_at.isoformat() if latest_completed_at else None
+            ),
+            "latest_journal_entry_at": (
+                latest_journal_at.isoformat() if latest_journal_at else None
+            ),
+            "latest_journal_lag_hours": latest_journal_lag_hours,
+            "missing_journal_follow_through": missing_journal_follow_through,
+            "sparse_journal_follow_through": sparse_journal_follow_through,
+            "next_throughput_action": next_action,
+            "completed_codex_examples": [
+                _recent_record_example(record, timestamp)
+                for record, timestamp in recent_completed_codex[:5]
+            ],
+            "journal_examples": [
+                _recent_record_example(record, timestamp)
+                for record, timestamp in recent_journal[:5]
+            ],
+        },
+    )
+
+
 def _assess_make_work_item(item: dict[str, Any]) -> dict[str, Any]:
     record = item.get("record") or {}
     text = str(item.get("text") or "")
@@ -1863,6 +2166,13 @@ def _evaluate_operator_value_alignment_check(
     journal_payload = _load_json(journal_path)
     codex_payload = _load_json(codex_runs_path)
     ctx_payload = _load_json(ctx_bindings_path)
+    execution_throughput = _build_execution_throughput_signal(
+        journal_payload=journal_payload,
+        codex_payload=codex_payload,
+        ctx_payload=ctx_payload,
+        now=now,
+        freshness_hours=freshness_hours,
+    )
     assessments = [
         _assess_operator_value_item(item)
         for item in _iter_recent_claimed_work_items(
@@ -1921,6 +2231,11 @@ def _evaluate_operator_value_alignment_check(
             detail = "Claimed work supports operator decisions, but lacks verified system change."
         else:
             detail = "Operator-value evidence is incomplete across claimed work."
+        if execution_throughput.get("remediation_required"):
+            detail += (
+                " Completed Codex deliveries outpace journal follow-through; "
+                "treat journal evidence as the execution-loop bottleneck."
+            )
         if decision_support_fields:
             detail += (
                 " Decision-support evidence fields: "
@@ -1959,6 +2274,7 @@ def _evaluate_operator_value_alignment_check(
                 else 1.0
             ),
             "quantity_guardrail_basis": "average_evidence_quality_not_item_count",
+            "execution_throughput": execution_throughput,
             "issue_examples": issue_items[:5],
             "aligned_examples": [item for item in assessments if item["aligned"]][:5],
             "operator_decision_support_examples": decision_support_examples,
@@ -2467,12 +2783,56 @@ def _format_harbinger_mitigation_detail(
     return " | ".join(parts)
 
 
+def _format_execution_throughput_remediation(signal: dict[str, Any]) -> str:
+    if not signal.get("remediation_required"):
+        return ""
+    actions = [
+        str(action).strip()
+        for action in signal.get("actions", [])
+        if str(action).strip()
+    ]
+    action_detail = "; ".join(actions[:3]) or "repair journal follow-through"
+    ctx_detail = (
+        "inactive ctx is informational, not the throughput blocker"
+        if signal.get("ctx_inactivity_informational")
+        else "ctx inactivity is not the throughput blocker"
+    )
+    return (
+        "Execution-loop throughput remediation: "
+        f"{signal.get('recent_completed_codex_count')} completed Codex run(s) vs "
+        f"{signal.get('recent_journal_work_item_count')} journal work item(s); "
+        f"{ctx_detail}; next actions: {action_detail}."
+    )
+
+
+def _execution_throughput_remediation_payload(signal: dict[str, Any]) -> dict[str, Any]:
+    if not signal.get("remediation_required"):
+        return {"required": False}
+    return {
+        "required": True,
+        "blocking_surface": signal.get("blocking_surface"),
+        "recent_completed_codex_count": signal.get("recent_completed_codex_count"),
+        "recent_journal_work_item_count": signal.get("recent_journal_work_item_count"),
+        "journal_to_codex_ratio": signal.get("journal_to_codex_ratio"),
+        "actions": signal.get("actions") or [],
+        "ctx_status": signal.get("ctx_status"),
+        "ctx_active_count": signal.get("ctx_active_count"),
+        "ctx_inactivity_blocking": False,
+        "detail": _format_execution_throughput_remediation(signal),
+    }
+
+
 def _evaluate_leading_indicator_drift_check(
     operator_value_check: dict[str, Any],
     history: dict[str, Any],
     current_checks: Optional[dict[str, dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     current_score = float(operator_value_check.get("score") or 0.0)
+    operator_value_metrics = dict(operator_value_check.get("metrics") or {})
+    execution_throughput = dict(operator_value_metrics.get("execution_throughput") or {})
+    execution_throughput_detail = _format_execution_throughput_remediation(
+        execution_throughput
+    )
     prior_scores = _history_check_scores(history, "operator_value_alignment")
     previous_score = prior_scores[-1] if prior_scores else None
     delta = round(current_score - previous_score, 4) if previous_score is not None else None
@@ -2513,7 +2873,11 @@ def _evaluate_leading_indicator_drift_check(
         score = 1.0
         detail = "Operator-value leading indicator is stable or improving."
 
-    metrics = dict(operator_value_check.get("metrics") or {})
+    if execution_throughput_detail:
+        detail += " " + execution_throughput_detail
+        score = min(score, 0.6)
+
+    metrics = operator_value_metrics
     metrics.update(
         {
             "previous_operator_value_score": (
@@ -2529,6 +2893,9 @@ def _evaluate_leading_indicator_drift_check(
             "triggered_harbingers": triggered_harbingers,
             "harbinger_scorecard": indicator_payload["scorecard"],
             "recommended_mitigations": indicator_payload["recommended_mitigations"],
+            "execution_throughput_remediation": _execution_throughput_remediation_payload(
+                execution_throughput
+            ),
         }
     )
     return _build_benchmark_item(
@@ -2551,6 +2918,7 @@ def _build_issue_selection_summary(
         for name, check in checks.items()
         if name in {
             "reliability_gate",
+            "execution_loop",
             "anti_make_work_check",
             "operator_value_alignment",
             "leading_indicator_drift",
@@ -2559,20 +2927,51 @@ def _build_issue_selection_summary(
     }
     quantity_guardrail_active = bool(guardrail_checks)
     reliability_blocked = "reliability_gate" in guardrail_checks
+    execution_blocked = "execution_loop" in guardrail_checks
     gate = gate or {}
     ctx_remediation = gate.get("ctx_remediation") or {}
     ontology_repair = (gate.get("ontology") or {}).get("external_repair") or {}
+    operator_metrics = (checks.get("operator_value_alignment") or {}).get("metrics") or {}
+    drift_metrics = (checks.get("leading_indicator_drift") or {}).get("metrics") or {}
+    execution_throughput = operator_metrics.get("execution_throughput") or {}
+    execution_remediation = (
+        drift_metrics.get("execution_throughput_remediation")
+        or _execution_throughput_remediation_payload(execution_throughput)
+    )
+    execution_actions = [
+        str(action).strip()
+        for action in execution_remediation.get("actions", [])
+        if str(action).strip()
+    ]
     remediation_actions = [
         str(item.get("action") or "").strip()
         for item in (ctx_remediation, ontology_repair)
         if item.get("required") and str(item.get("action") or "").strip()
     ]
+    remediation_actions.extend(execution_actions)
     if reliability_blocked:
         recommended_focus = "self-improvement evidence freshness repair"
         detail = (
             "Repair self-improvement evidence freshness before selecting throughput or operator-value work: "
             + "; ".join(remediation_actions or ["inspect reliability gate provenance"])
         )
+    elif execution_remediation.get("required"):
+        recommended_focus = "Codex delivery journal follow-through"
+        detail = (
+            "Prioritize completed Codex delivery follow-through before selecting more issue volume: "
+            f"{execution_remediation.get('recent_completed_codex_count')} recent completed Codex run(s), "
+            f"{execution_remediation.get('recent_journal_work_item_count')} journal work item(s). "
+            "Inactive ctx evidence is informational on this host. "
+            + "; ".join(execution_actions)
+        )
+    elif execution_blocked:
+        execution = checks.get("execution_loop") or {}
+        action = str(
+            ((execution.get("metrics") or {}).get("next_throughput_action"))
+            or "convert planned self-improvement work into completed Codex delivery plus journal evidence"
+        )
+        recommended_focus = "self-improvement execution follow-through"
+        detail = "Restore execution-loop throughput before selecting raw volume work: " + action
     elif quantity_guardrail_active:
         recommended_focus = "operator decision support plus verified system change"
         detail = (
@@ -2590,6 +2989,7 @@ def _build_issue_selection_summary(
         "recommended_focus": recommended_focus,
         "detail": detail,
         "remediation_actions": remediation_actions,
+        "execution_throughput": execution_remediation,
     }
 
 
@@ -2630,10 +3030,12 @@ def _build_operator_summary(
     checks: dict[str, dict[str, Any]],
     issue_selection: dict[str, Any],
 ) -> dict[str, str]:
+    execution = checks["execution_loop"]
     operator_value = checks["operator_value_alignment"]
     drift = checks["leading_indicator_drift"]
     operator_value_metrics = operator_value.get("metrics") or {}
     return {
+        "execution_loop": str(execution.get("detail") or ""),
         "operator_value_alignment": str(operator_value.get("detail") or ""),
         "operator_decision_support_evidence": _operator_decision_support_summary(
             operator_value_metrics
@@ -2713,6 +3115,12 @@ def evaluate_self_improvement_benchmark(
             ),
         },
     )
+    execution_loop = _evaluate_execution_loop_check(
+        journal_path=journal_path,
+        codex_runs_path=codex_runs_path,
+        ctx_bindings_path=ctx_bindings_path,
+        now=current,
+    )
     anti_make_work_check = _evaluate_anti_make_work_check(
         journal_path=journal_path,
         codex_runs_path=codex_runs_path,
@@ -2739,6 +3147,7 @@ def evaluate_self_improvement_benchmark(
     )
     checks = {
         "reliability_gate": reliability_gate,
+        "execution_loop": execution_loop,
         "anti_make_work_check": anti_make_work_check,
         "operator_value_alignment": operator_value_alignment,
         "leading_indicator_drift": leading_indicator_drift,
@@ -2787,6 +3196,14 @@ def evaluate_self_improvement_benchmark(
         "gate": gate,
         "checks": checks,
         "critical_failures": critical_failures,
+        "execution_loop": {
+            "status": execution_loop.get("status"),
+            "score": execution_loop.get("score"),
+            "metrics": execution_loop.get("metrics"),
+            "next_throughput_action": (
+                (execution_loop.get("metrics") or {}).get("next_throughput_action")
+            ),
+        },
         "operator_value_score": operator_value_alignment.get("score"),
         "operator_value_checks": operator_value_checks,
         "anti_make_work": {
@@ -2840,11 +3257,13 @@ def _pipeline_benchmark_summary(benchmark: dict[str, Any]) -> dict[str, Any]:
     drift = (benchmark.get("checks") or {}).get("leading_indicator_drift") or {}
     drift_metrics = drift.get("metrics") or {}
     if drift:
+        execution_remediation = drift_metrics.get("execution_throughput_remediation") or {}
         summary["leading_indicator_drift"] = {
             "score": drift.get("score"),
             "status": drift.get("status"),
             "triggered_harbingers": drift_metrics.get("triggered_harbingers") or [],
             "recommended_mitigations": drift_metrics.get("recommended_mitigations") or [],
+            "execution_throughput_remediation": execution_remediation,
         }
     return summary
 
@@ -2887,6 +3306,9 @@ def _pipeline_top_candidate(
         candidate["triggered_harbingers"] = metrics.get("triggered_harbingers") or []
         candidate["recommended_mitigations"] = metrics.get("recommended_mitigations") or []
         candidate["harbinger_scorecard"] = metrics.get("harbinger_scorecard") or {}
+        candidate["execution_throughput_remediation"] = (
+            metrics.get("execution_throughput_remediation") or {}
+        )
     return candidate
 
 
@@ -2897,11 +3319,13 @@ def _format_pipeline_summary(
 ) -> str:
     checks = benchmark.get("checks") or {}
     reliability = checks.get("reliability_gate") or {}
+    execution = checks.get("execution_loop") or {}
     drift = checks.get("leading_indicator_drift") or {}
     lines = [
         "Self-improvement pipeline:",
         f"- score={benchmark.get('score')}",
         f"- reliability_gate={reliability.get('score')} {reliability.get('status')}",
+        f"- execution_loop={execution.get('score')} {execution.get('status')}",
         f"- leading_indicator_drift={drift.get('score')} {drift.get('status')}",
     ]
     drift_metrics = drift.get("metrics") or {}
@@ -2926,6 +3350,16 @@ def _format_pipeline_summary(
             if next_action:
                 line += f" next_action={next_action}"
             lines.append(line.rstrip(";"))
+    execution_remediation = drift_metrics.get("execution_throughput_remediation") or {}
+    if execution_remediation.get("required"):
+        lines.append(
+            "- execution_throughput_remediation="
+            f"{execution_remediation.get('recent_completed_codex_count')} completed Codex run(s), "
+            f"{execution_remediation.get('recent_journal_work_item_count')} journal work item(s), "
+            f"blocker={execution_remediation.get('blocking_surface')}"
+        )
+        for action in execution_remediation.get("actions") or []:
+            lines.append(f"- execution_throughput_action={action}")
     critical = benchmark.get("critical_failures") or []
     if critical:
         lines.append(f"- critical_failures={', '.join(str(item) for item in critical)}")
