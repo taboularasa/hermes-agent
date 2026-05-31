@@ -343,6 +343,124 @@ def test_stale_retired_ctx_status_records_are_inactive_not_degraded(tmp_path):
     assert benchmark["critical_failures"] == []
 
 
+def test_active_ctx_staleness_uses_active_timestamp_when_retired_record_is_fresher(tmp_path):
+    now = datetime(2026, 5, 22, 15, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+    stale_active = (now - timedelta(hours=144)).isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+    live_worktree = tmp_path / "live-worktree"
+    live_worktree.mkdir()
+
+    _write_json(journal_path, {"entries": [{"occurredAt": recent}]})
+    _write_json(
+        codex_path,
+        {"runs": {"codex_1": {"run_id": "codex_1", "status": "completed", "completed_at": recent}}},
+    )
+    _write_json(
+        ctx_path,
+        {
+            "sessions": {
+                "ctx_active_stale": {
+                    "session_id": "ctx_active_stale",
+                    "active": True,
+                    "updated_at": stale_active,
+                    "worktree_path": str(live_worktree),
+                },
+                "ctx_retired_recent": {
+                    "session_id": "ctx_retired_recent",
+                    "active": False,
+                    "updated_at": recent,
+                },
+            }
+        },
+    )
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    ctx_source = benchmark["gate"]["sources"]["ctx_bindings"]
+    reliability_gate = benchmark["checks"]["reliability_gate"]
+    assert benchmark["gate"]["status"] == "degraded"
+    assert ctx_source["status"] == "stale"
+    assert ctx_source["latest_timestamp"] == stale_active
+    assert ctx_source["active_latest_timestamp"] == stale_active
+    assert ctx_source["latest_record_timestamp"] == recent
+    assert ctx_source["freshness_required"] is True
+    assert reliability_gate["status"] == "fail"
+    assert reliability_gate["metrics"]["stale_source_count"] == 1
+    assert benchmark["gate"]["ctx_remediation"]["stale_active_count"] == 1
+    assert "reliability_gate" in benchmark["critical_failures"]
+
+
+def test_active_ctx_without_timestamp_is_degraded_not_masked_by_retired_timestamp(tmp_path):
+    now = datetime(2026, 5, 22, 15, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+    live_worktree = tmp_path / "live-worktree"
+    live_worktree.mkdir()
+
+    _write_json(journal_path, {"entries": [{"occurredAt": recent}]})
+    _write_json(
+        codex_path,
+        {"runs": {"codex_1": {"run_id": "codex_1", "status": "completed", "completed_at": recent}}},
+    )
+    _write_json(
+        ctx_path,
+        {
+            "sessions": {
+                "ctx_active_missing_timestamp": {
+                    "session_id": "ctx_active_missing_timestamp",
+                    "active": True,
+                    "worktree_path": str(live_worktree),
+                },
+                "ctx_retired_recent": {
+                    "session_id": "ctx_retired_recent",
+                    "active": False,
+                    "updated_at": recent,
+                },
+            }
+        },
+    )
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    ctx_source = benchmark["gate"]["sources"]["ctx_bindings"]
+    reliability_gate = benchmark["checks"]["reliability_gate"]
+    assert benchmark["gate"]["status"] == "degraded"
+    assert ctx_source["status"] == "degraded"
+    assert ctx_source["latest_timestamp"] is None
+    assert ctx_source["active_latest_timestamp"] is None
+    assert ctx_source["latest_record_timestamp"] == recent
+    assert ctx_source["detail"] == "Active ctx bindings do not include freshness timestamps."
+    assert benchmark["gate"]["ctx_remediation"]["required"] is True
+    assert reliability_gate["status"] == "fail"
+    assert reliability_gate["metrics"]["ctx_remediation_required"] is True
+    assert "reliability_gate" in benchmark["critical_failures"]
+
+
 def test_missing_ctx_bindings_block_issue_selection_with_repair_guidance(tmp_path):
     now = datetime(2026, 5, 22, 15, 0, 0, tzinfo=timezone.utc)
     recent = now.isoformat()
