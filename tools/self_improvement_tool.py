@@ -648,18 +648,41 @@ def _summarize_ctx_bindings(
         return summary
 
     records = list(_iter_ctx_records(payload))
-    latest = _latest_timestamp(_iter_ctx_timestamps(payload))
-    active_count = sum(1 for record in records if _ctx_record_is_active(record))
+    active_records = [record for record in records if _ctx_record_is_active(record)]
+    active_latest = _latest_timestamp(
+        timestamp
+        for record in active_records
+        if (
+            timestamp := _record_timestamp(
+                record,
+                "updated_at",
+                "updatedAt",
+                "created_at",
+                "createdAt",
+                "timestamp",
+            )
+        )
+        is not None
+    )
+    latest_record = _latest_timestamp(_iter_ctx_timestamps(payload))
+    active_count = len(active_records)
+    latest = active_latest if active_count else latest_record
     summary = _summarize_source("ctx_bindings", latest, freshness_hours, now)
     summary.update(
         {
             "record_count": len(records),
             "active_count": active_count,
+            "inactive_count": len(records) - active_count,
             "freshness_required": bool(active_count),
+            "active_latest_timestamp": active_latest.isoformat() if active_latest else None,
+            "latest_record_timestamp": latest_record.isoformat() if latest_record else None,
         }
     )
 
-    if active_count == 0:
+    if active_count and active_latest is None:
+        summary["status"] = "degraded"
+        summary["detail"] = "Active ctx bindings do not include freshness timestamps."
+    elif active_count == 0:
         summary["status"] = "inactive"
         summary["detail"] = (
             "No active ctx bindings; retired binding timestamps are informational."
@@ -1138,7 +1161,6 @@ def evaluate_self_improvement_evidence(
 
     journal_latest = _latest_timestamp(_iter_journal_timestamps(journal_payload))
     codex_latest = _latest_timestamp(_iter_codex_timestamps(codex_payload))
-    ctx_latest = _latest_timestamp(_iter_ctx_timestamps(ctx_payload))
     ctx_summary = _summarize_ctx_bindings(ctx_payload, freshness_hours, current)
     ontology_latest = _parse_time(ontology_summary.get("latest_timestamp"))
 
@@ -1164,12 +1186,17 @@ def evaluate_self_improvement_evidence(
         planning_contradictions,
     )
 
+    ctx_effective_latest = (
+        None
+        if ctx_summary.get("status") == "inactive"
+        else _parse_time(ctx_summary.get("latest_timestamp"))
+    )
     latest_timestamps = [
         item
         for item in (
             journal_latest,
             codex_latest,
-            None if ctx_summary.get("status") == "inactive" else ctx_latest,
+            ctx_effective_latest,
             ontology_latest,
         )
         if item is not None
