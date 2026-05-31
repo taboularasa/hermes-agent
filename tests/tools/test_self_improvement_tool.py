@@ -3,6 +3,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from tools import self_improvement_tool
+from tools.registry import registry
+from toolsets import resolve_toolset
 
 
 def _write_json(path: Path, payload) -> None:
@@ -1287,3 +1289,87 @@ def test_degraded_ontology_status_still_degrades_reliability_floor(tmp_path):
     assert gate["status"] == "degraded"
     assert "ontology_intelligence evidence degraded" in gate["warnings"]
     assert "ontology intelligence artifacts are stale, missing, or degraded" in gate["contradictions"]
+
+
+def test_pipeline_uses_core_benchmark_contract_without_persisting(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+    stale_retired = (now - timedelta(days=15)).isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    history_path = tmp_path / "history.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(journal_path, {"entries": [{"occurredAt": recent}]})
+    _write_json(
+        codex_path,
+        {"runs": {"codex_1": {"run_id": "codex_1", "status": "completed", "completed_at": recent}}},
+    )
+    _write_json(
+        ctx_path,
+        {
+            "sessions": {
+                "ctx_retired": {
+                    "session_id": "ctx_retired",
+                    "active": False,
+                    "updated_at": stale_retired,
+                }
+            }
+        },
+    )
+
+    result = json.loads(
+        self_improvement_tool.self_improvement_pipeline(
+            journal_path=str(journal_path),
+            codex_runs_path=str(codex_path),
+            ctx_bindings_path=str(ctx_path),
+            ontology_root=str(ontology_root),
+            history_path=str(history_path),
+            now=recent,
+            persist=False,
+            auto_repair_linear=True,
+            auto_close_resolved=True,
+        )
+    )
+    pipeline = result["pipeline"]
+    benchmark = pipeline["benchmark"]
+    reliability_gate = benchmark["checks"]["reliability_gate"]
+    drift = benchmark["checks"]["leading_indicator_drift"]
+
+    assert pipeline["runtime_surface"] == "hermes-agent-core"
+    assert pipeline["linear"]["available"] is False
+    assert "Linear writeback is not part" in pipeline["linear"]["error"]
+    assert benchmark["contract_version"] == self_improvement_tool.BENCHMARK_CONTRACT_VERSION
+    assert benchmark["gate"]["sources"]["ctx_bindings"]["status"] == "inactive"
+    assert reliability_gate["score"] == 1.0
+    assert reliability_gate["status"] == "pass"
+    assert drift["id"] == "leading_indicator_drift"
+    assert drift["status"] in {"pass", "warn", "fail"}
+    assert history_path.exists() is False
+    assert "reliability_gate=1.0 pass" in pipeline["summary_markdown"]
+
+
+def test_core_self_improvement_pipeline_owns_default_tool_surface():
+    entry = registry.get_entry("self_improvement_pipeline")
+    assert entry is not None
+    assert entry.toolset == "self_improvement"
+    handler = entry.handler
+
+    registry.register(
+        name="self_improvement_pipeline",
+        toolset="hadto-self-improvement",
+        schema={
+            "name": "self_improvement_pipeline",
+            "description": "shadow attempt",
+            "parameters": {},
+        },
+        handler=lambda _args, **_kw: "{}",
+    )
+
+    assert registry.get_entry("self_improvement_pipeline").handler is handler
+    cli_tools = resolve_toolset("hermes-cli")
+    assert "self_improvement_evidence_gate" in cli_tools
+    assert "self_improvement_benchmark" in cli_tools
+    assert "self_improvement_pipeline" in cli_tools
