@@ -440,6 +440,27 @@ _VALUE_CATEGORY_SIGNAL_MAP = {
         "system_capability_changed",
     },
 }
+_CODEX_SUCCESS_STATUSES = {
+    "completed",
+    "complete",
+    "done",
+    "finished",
+    "success",
+    "succeeded",
+}
+_CODEX_FAILURE_STATUSES = {
+    "aborted",
+    "cancelled",
+    "canceled",
+    "error",
+    "errored",
+    "failed",
+    "failure",
+    "killed",
+    "stale",
+    "timed_out",
+    "timeout",
+}
 
 
 SELF_IMPROVEMENT_EVIDENCE_SCHEMA = {
@@ -1230,7 +1251,9 @@ def _codex_record_status(record: dict[str, Any]) -> str:
 
 def _codex_record_is_completed(record: dict[str, Any]) -> bool:
     status = _codex_record_status(record)
-    if status in {"completed", "complete", "done", "finished", "success", "succeeded"}:
+    if status in _CODEX_FAILURE_STATUSES:
+        return False
+    if status in _CODEX_SUCCESS_STATUSES:
         return True
     exit_code = record.get("exit_code")
     if exit_code == 0 or str(exit_code).strip() == "0":
@@ -1930,6 +1953,11 @@ def _iter_recent_claimed_work_items(
     )
     for source, records in source_records:
         for record in records:
+            if (
+                source == "codex_runs"
+                and _codex_record_status(record) in _CODEX_FAILURE_STATUSES
+            ):
+                continue
             timestamp = _record_claimed_timestamp(record)
             if timestamp is not None:
                 age_hours = max(0.0, (now - timestamp).total_seconds() / 3600)
@@ -1966,7 +1994,9 @@ def _recent_record_timestamp(
 
 def _codex_record_is_completed_delivery(record: dict[str, Any]) -> bool:
     status = _codex_record_status(record)
-    if status in {"completed", "complete", "done", "success", "succeeded"}:
+    if status in _CODEX_FAILURE_STATUSES:
+        return False
+    if status in _CODEX_SUCCESS_STATUSES:
         return True
     if record.get("completed_at") is not None:
         return True
