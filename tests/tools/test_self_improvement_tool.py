@@ -798,6 +798,94 @@ def test_raw_throughput_does_not_pass_operator_value_alignment(tmp_path):
     assert "decision support" in benchmark["summary"]["operator_value_alignment"]
 
 
+def test_failed_codex_runs_with_completed_at_do_not_count_as_deliveries(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "journal-followthrough",
+                    "occurredAt": recent,
+                    "summary": "Recorded benchmark delivery follow-through.",
+                    "operatorDecisionSupport": (
+                        "Operator can distinguish failed attempts from completed deliveries."
+                    ),
+                    "changedFiles": ["tools/self_improvement_tool.py"],
+                    "tests": ["pytest tests/tools/test_self_improvement_tool.py passed"],
+                }
+            ]
+        },
+    )
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_failed": {
+                    "run_id": "codex_failed",
+                    "status": "failed",
+                    "completed_at": recent,
+                    "exit_code": 1,
+                    "last_agent_message": (
+                        "The rebase resolution is staged, and focused checks passed. "
+                        "I am continuing the rebase now."
+                    ),
+                    "output_tail": '{"status":"completed","summary":"next steps queued"}',
+                },
+                "codex_completed": {
+                    "run_id": "codex_completed",
+                    "status": "completed",
+                    "completed_at": recent,
+                    "exit_code": 0,
+                    "last_agent_message": (
+                        "Fixed the benchmark delivery classifier. "
+                        "CHANGED_FILES: tools/self_improvement_tool.py. "
+                        "VERIFICATION: pytest tests/tools/test_self_improvement_tool.py passed. "
+                        "COMMIT: abc1234 commit. PULL_REQUEST: PR #271. "
+                        "OPERATOR_DECISION_SUPPORT: Operator decision can trust that failed "
+                        "attempts do not inflate completed-delivery evidence."
+                    ),
+                },
+            }
+        },
+    )
+    _write_json(
+        ctx_path,
+        {"sessions": {"ctx_1": {"session_id": "ctx_1", "active": False, "updated_at": recent}}},
+    )
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    execution = benchmark["checks"]["execution_loop"]
+    assert execution["metrics"]["completed_codex_runs_14d"] == 1
+    assert execution["status"] == "pass"
+
+    anti_make_work = benchmark["checks"]["anti_make_work_check"]
+    assert anti_make_work["status"] == "pass"
+    assert anti_make_work["metrics"]["assessed_work_item_count"] == 2
+    assert anti_make_work["metrics"]["shallow_work_item_count"] == 0
+
+    operator_value = benchmark["checks"]["operator_value_alignment"]
+    assert operator_value["status"] == "pass"
+    assert operator_value["metrics"]["assessed_work_item_count"] == 2
+    assert operator_value["metrics"]["aligned_work_item_count"] == 2
+
+
 def test_execution_throughput_gap_prioritizes_journal_followthrough_without_ctx_blocker(tmp_path):
     now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
     recent = now.isoformat()
@@ -1856,6 +1944,162 @@ def test_pipeline_uses_core_benchmark_contract_without_persisting(tmp_path):
     assert drift["status"] in {"pass", "warn", "fail"}
     assert history_path.exists() is False
     assert "reliability_gate=1.0 pass" in pipeline["summary_markdown"]
+
+
+def test_benchmark_exposes_journal_reporting_contract_from_focus_schema(tmp_path):
+    now = datetime(2026, 5, 3, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+    older = (now - timedelta(days=1)).isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    history_path = tmp_path / "history.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "2026-05-02-previous-focus",
+                    "occurredAt": older,
+                    "summary": "Recorded prior journal reporting work.",
+                    "operatorDecisionSupport": "Operator can compare prior outcomes.",
+                    "changedFiles": ["src/data/journal.json"],
+                    "tests": ["npm run check passed"],
+                    "selfImprovementFocus": [
+                        {
+                            "title": "Preserve prior journal outcome history",
+                            "activeLinearIssueIds": ["HAD-127"],
+                            "outcomeNote": "Older focus items remain available as recent outcomes.",
+                        }
+                    ],
+                },
+                {
+                    "id": "2026-05-03-had-700-contract",
+                    "occurredAt": recent,
+                    "summary": "Used the journal focus schema as the reporting contract.",
+                    "operatorDecisionSupport": "Operator can inspect the durable reporting fields.",
+                    "changedFiles": ["tools/self_improvement_tool.py"],
+                    "tests": ["pytest tests/tools/test_self_improvement_tool.py passed"],
+                    "selfImprovementFocus": [
+                        {
+                            "title": "Use the journal schema for active focus",
+                            "activeLinearIssueIds": ["HAD-700", "HAD-127"],
+                            "outcomeNote": (
+                                "Hermes loops can report active improvement work through "
+                                "selfImprovementFocus without a second surface."
+                            ),
+                        },
+                        {
+                            "title": "Reuse focus items as recent outcomes",
+                            "activeLinearIssueIds": ["HAD-700"],
+                            "outcomeNote": (
+                                "Recent outcomes derive from the same focus item fields."
+                            ),
+                        },
+                    ],
+                },
+            ]
+        },
+    )
+    _write_json(
+        codex_path,
+        {"runs": {"codex_1": {"run_id": "codex_1", "status": "completed", "completed_at": recent}}},
+    )
+    _write_json(ctx_path, {"sessions": {}})
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=history_path,
+        now=now,
+        persist=False,
+    )
+    contract = benchmark["journal_reporting_contract"]
+
+    assert contract["contract_version"] == self_improvement_tool.JOURNAL_REPORTING_CONTRACT_VERSION
+    assert contract["status"] == "pass"
+    assert contract["schema"]["focus_field"] == "selfImprovementFocus"
+    assert contract["schema"]["recent_outcomes_derive_from"] == "entries[].selfImprovementFocus[]"
+    assert contract["schema"]["recent_outcome_fields"] == [
+        "entryId",
+        "occurredAt",
+        "title",
+        "activeLinearIssueIds",
+        "outcomeNote",
+    ]
+    assert contract["active_focus_entry_id"] == "2026-05-03-had-700-contract"
+    assert [item["title"] for item in contract["active_focus"]] == [
+        "Use the journal schema for active focus",
+        "Reuse focus items as recent outcomes",
+    ]
+    assert contract["recent_outcomes"][0] == {
+        "entryId": "2026-05-03-had-700-contract",
+        "occurredAt": recent,
+        "title": "Use the journal schema for active focus",
+        "activeLinearIssueIds": ["HAD-700", "HAD-127"],
+        "outcomeNote": (
+            "Hermes loops can report active improvement work through "
+            "selfImprovementFocus without a second surface."
+        ),
+    }
+
+    pipeline = self_improvement_tool.evaluate_self_improvement_pipeline(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=history_path,
+        now=now,
+        persist=False,
+    )
+    assert pipeline["reporting_contract"] == contract
+    assert pipeline["benchmark_before"]["journal_reporting_contract"] == {
+        "contract_version": self_improvement_tool.JOURNAL_REPORTING_CONTRACT_VERSION,
+        "status": "pass",
+        "active_focus_count": 2,
+        "recent_outcome_count": 3,
+    }
+    assert "journal_reporting_contract=pass focus=2 outcomes=3" in pipeline["summary_markdown"]
+
+
+def test_journal_reporting_contract_flags_focus_schema_violations():
+    payload = {
+        "entries": [
+            {
+                "id": "2026-05-03-had-700-contract",
+                "occurredAt": "2026-05-03T12:00:00+00:00",
+                "selfImprovementFocus": [
+                    {
+                        "title": "Missing outcome note",
+                        "activeLinearIssueIds": ["HAD-700"],
+                    },
+                    {
+                        "title": "Malformed issue IDs",
+                        "activeLinearIssueIds": ["HAD-700", ""],
+                        "outcomeNote": "This item cannot be a durable recent outcome.",
+                    },
+                ],
+            }
+        ]
+    }
+
+    contract = self_improvement_tool._build_journal_reporting_contract(payload)
+
+    assert contract["status"] == "warn"
+    assert contract["active_focus"] == []
+    assert contract["recent_outcomes"] == []
+    assert {
+        violation["path"]: violation["issue"]
+        for violation in contract["violations"]
+    } == {
+        "entries[0].selfImprovementFocus[0].outcomeNote": "missing_required_field",
+        "entries[0].selfImprovementFocus[1].activeLinearIssueIds": "invalid_required_field",
+    }
 
 
 def test_core_self_improvement_pipeline_owns_default_tool_surface():
