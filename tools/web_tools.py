@@ -45,7 +45,9 @@ import logging
 import os
 import re
 import asyncio
-from typing import List, Dict, Any, Optional, TYPE_CHECKING
+import hashlib
+from html.parser import HTMLParser
+from typing import List, Dict, Any, Optional, TYPE_CHECKING, Tuple
 import httpx  # noqa: F401 — kept at module top so tests can patch tools.web_tools.httpx
 # After the web-provider plugin migration (PR #25182), the Firecrawl SDK
 # proxy, client construction, and response-shape normalizers all live in
@@ -221,6 +223,85 @@ def _is_backend_available(backend: str) -> bool:
     return False
 
 
+def _web_provider_fallback_candidates(primary_name: str, capability: str) -> List[Any]:
+    """Return available providers to try after a configured provider fails."""
+    _ensure_web_search_plugins_registered()
+    try:
+        from agent.web_search_registry import get_provider, list_providers
+    except Exception:
+        return []
+
+    primary_name = str(primary_name or "").strip()
+    registered = {str(provider.name): provider for provider in list_providers()}
+    seen_names = {primary_name}
+    ordered_names = []
+    for name in _MATRIX_PROVIDER_ORDER:
+        if name not in seen_names:
+            ordered_names.append(name)
+            seen_names.add(name)
+    ordered_names.extend(sorted(name for name in registered if name not in seen_names))
+
+    capability_check = {
+        "search": "supports_search",
+        "extract": "supports_extract",
+        "crawl": "supports_crawl",
+    }.get(capability)
+    if capability_check is None:
+        return []
+
+    candidates = []
+    for name in ordered_names:
+        provider = get_provider(name)
+        if provider is None:
+            continue
+        supports = getattr(provider, capability_check, None)
+        try:
+            provider_supported = bool(callable(supports) and supports())
+        except Exception:
+            provider_supported = False
+        if not provider_supported:
+            continue
+        try:
+            available = bool(provider.is_available())
+        except Exception:
+            available = False
+        if available:
+            candidates.append(provider)
+    return candidates
+
+
+def _web_search_error_message(response_data: Any, default: str = "web search failed") -> str:
+    """Return a compact provider error message for fallback metadata."""
+    if isinstance(response_data, dict):
+        error = response_data.get("error") or response_data.get("message")
+        if error:
+            return str(error)
+    return default
+
+
+def _web_search_should_try_fallback(response_data: Any) -> bool:
+    if not isinstance(response_data, dict):
+        return True
+    if response_data.get("success", False):
+        return False
+    error = str(response_data.get("error") or "").lower()
+    if not error:
+        return True
+    retryable_markers = (
+        "payment required",
+        "insufficient credits",
+        "quota",
+        "rate limit",
+        "429",
+        "402",
+        "432",
+        "timeout",
+        "temporarily",
+        "unavailable",
+    )
+    return any(marker in error for marker in retryable_markers)
+
+
 def _ddgs_package_importable() -> bool:
     """Return True when the ``ddgs`` Python package can be imported.
 
@@ -284,6 +365,263 @@ def _web_requires_env() -> list[str]:
 
 
 DEFAULT_MIN_LENGTH_FOR_SUMMARIZATION = 5000
+_DIRECT_HTTP_FALLBACK_MAX_TEXT_CHARS = 1_000_000
+
+
+def _classify_web_extract_failure(error: Any, provider_name: str = "") -> Optional[str]:
+    """Return a stable machine-readable category for web extraction failures."""
+    text = str(error or "").lower()
+    provider = str(provider_name or "").lower()
+    if not text:
+        return None
+    if provider == "firecrawl" and (
+        "payment required" in text
+        or "insufficient credits" in text
+        or "credits have been exhausted" in text
+        or "top up" in text
+        or "402" in text
+    ):
+        return "provider_credit_exhaustion"
+    if (
+        "api key" in text
+        or "not configured" in text
+        or "missing direct config" in text
+        or "missing credentials" in text
+    ):
+        return "provider_credentials_absent"
+    return None
+
+
+class _HTMLTextExtractor(HTMLParser):
+    """Small stdlib HTML-to-text extractor for direct HTTP fallback."""
+
+    _BLOCK_TAGS = {
+        "address", "article", "aside", "blockquote", "br", "div", "dl", "fieldset",
+        "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5",
+        "h6", "header", "hr", "li", "main", "nav", "ol", "p", "pre", "section",
+        "table", "tr", "ul",
+    }
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: List[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: List[tuple[str, Optional[str]]]) -> None:
+        if tag in {"script", "style", "noscript"}:
+            self._skip_depth += 1
+            return
+        if tag in self._BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"script", "style", "noscript"} and self._skip_depth:
+            self._skip_depth -= 1
+            return
+        if tag in self._BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if not self._skip_depth and data:
+            self._parts.append(data)
+
+    def text(self) -> str:
+        text = "".join(self._parts)
+        text = re.sub(r"[ \t\r\f\v]+", " ", text)
+        text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
+        return text.strip()
+
+
+def _html_to_text(content: str) -> str:
+    parser = _HTMLTextExtractor()
+    try:
+        parser.feed(content)
+        parser.close()
+        text = parser.text()
+    except Exception:
+        text = re.sub(r"<[^>]+>", " ", content)
+        text = re.sub(r"\s+", " ", text).strip()
+    return text or content
+
+
+def _extract_html_title(content: str) -> str:
+    match = re.search(r"<title[^>]*>(.*?)</title>", content, re.IGNORECASE | re.DOTALL)
+    if not match:
+        return ""
+    title = re.sub(r"\s+", " ", match.group(1)).strip()
+    return title
+
+
+def _truncate_direct_http_content(content: str) -> str:
+    if len(content) <= _DIRECT_HTTP_FALLBACK_MAX_TEXT_CHARS:
+        return content
+    return (
+        content[:_DIRECT_HTTP_FALLBACK_MAX_TEXT_CHARS]
+        + "\n\n[Direct HTTP fallback content truncated after "
+        + f"{_DIRECT_HTTP_FALLBACK_MAX_TEXT_CHARS:,} characters.]"
+    )
+
+
+async def _direct_http_extract_one(url: str, format: Optional[str] = None) -> Dict[str, Any]:
+    """Fetch one URL without a scrape provider for credit-exhaustion fallback."""
+    blocked = check_website_access(url)
+    if blocked:
+        return {
+            "url": url,
+            "title": "",
+            "content": "",
+            "raw_content": "",
+            "error": blocked["message"],
+            "blocked_by_policy": {
+                "host": blocked["host"],
+                "rule": blocked["rule"],
+                "source": blocked["source"],
+            },
+        }
+
+    headers = {
+        "User-Agent": (
+            "Hermes web_extract direct-http fallback "
+            "(provider credit exhaustion recovery)"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/pdf,text/plain,*/*;q=0.8",
+    }
+    async with httpx.AsyncClient(follow_redirects=True, timeout=30.0, headers=headers) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+
+    final_url = str(response.url)
+    if not is_safe_url(final_url):
+        return {
+            "url": final_url,
+            "title": "",
+            "content": "",
+            "raw_content": "",
+            "error": "Blocked: URL redirected to a private or internal network address",
+        }
+
+    final_blocked = check_website_access(final_url)
+    if final_blocked:
+        return {
+            "url": final_url,
+            "title": "",
+            "content": "",
+            "raw_content": "",
+            "error": final_blocked["message"],
+            "blocked_by_policy": {
+                "host": final_blocked["host"],
+                "rule": final_blocked["rule"],
+                "source": final_blocked["source"],
+            },
+        }
+
+    body = response.content or b""
+    content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
+    metadata = {
+        "source": "direct_http",
+        "content_type": content_type or None,
+        "byte_length": len(body),
+        "sha256": hashlib.sha256(body).hexdigest(),
+    }
+
+    is_pdf = content_type == "application/pdf" or final_url.lower().split("?", 1)[0].endswith(".pdf")
+    if is_pdf:
+        content = (
+            "[Direct HTTP fallback fetched PDF source bytes; text extraction was not "
+            "available in the scraper fallback. "
+            f"byte_length={metadata['byte_length']} sha256={metadata['sha256']}]"
+        )
+        return {
+            "url": final_url,
+            "title": "",
+            "content": content,
+            "raw_content": content,
+            "metadata": metadata,
+        }
+
+    text = response.text or body.decode(response.encoding or "utf-8", errors="replace")
+    title = _extract_html_title(text)
+    if format != "html" and ("html" in content_type or re.search(r"<html[\s>]", text, re.IGNORECASE)):
+        text = _html_to_text(text)
+    text = _truncate_direct_http_content(text)
+    return {
+        "url": final_url,
+        "title": title,
+        "content": text,
+        "raw_content": text,
+        "metadata": metadata,
+    }
+
+
+async def _apply_web_extract_degradation_fallback(
+    *,
+    provider_name: str,
+    results: List[Dict[str, Any]],
+    format: Optional[str],
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Apply deterministic fallback for known provider degradation categories."""
+    if str(provider_name or "").lower() != "firecrawl":
+        return results, []
+
+    updated: List[Dict[str, Any]] = []
+    degradations: List[Dict[str, Any]] = []
+    for result in results:
+        if not isinstance(result, dict):
+            updated.append(result)
+            continue
+
+        error = result.get("error")
+        category = _classify_web_extract_failure(error, provider_name)
+        if category != "provider_credit_exhaustion":
+            updated.append(result)
+            continue
+
+        url = str(result.get("url") or "").strip()
+        degradation = {
+            "category": category,
+            "primary_provider": "firecrawl",
+            "primary_operation": "web_extract",
+            "primary_status": "failed",
+            "primary_error": str(error or ""),
+            "fallback_provider": "direct_http",
+            "fallback_status": "not_attempted",
+        }
+
+        if not url or not is_safe_url(url):
+            degradation["fallback_status"] = "blocked"
+            degradation["fallback_error"] = "URL was empty or failed safety checks"
+            retained = dict(result)
+            retained["degradation"] = degradation
+            updated.append(retained)
+            degradations.append(degradation)
+            continue
+
+        try:
+            fallback = await _direct_http_extract_one(url, format=format)
+        except Exception as exc:  # noqa: BLE001 - preserve primary failure
+            fallback = {
+                "url": url,
+                "title": "",
+                "content": "",
+                "raw_content": "",
+                "error": str(exc),
+            }
+
+        retained: Dict[str, Any]
+        if isinstance(fallback, dict) and fallback.get("content") and not fallback.get("error"):
+            degradation["fallback_status"] = "succeeded"
+            retained = dict(fallback)
+            retained["degradation"] = degradation
+        else:
+            degradation["fallback_status"] = "failed"
+            degradation["fallback_error"] = str((fallback or {}).get("error") or "direct HTTP fallback failed")
+            retained = dict(result)
+            retained["degradation"] = degradation
+
+        updated.append(retained)
+        degradations.append(degradation)
+
+    return updated, degradations
 
 def _is_nous_auxiliary_client(client: Any) -> bool:
     """Return True when the resolved auxiliary backend is Nous Portal."""
@@ -819,7 +1157,89 @@ def web_search_tool(query: str, limit: int = 5) -> str:
                 "Web search via %s: '%s' (limit: %d)",
                 provider.name, query, limit,
             )
-            response_data = provider.search(query, limit)
+            primary_exception = None
+            try:
+                response_data = provider.search(query, limit)
+            except Exception as exc:  # noqa: BLE001 - fallback may recover quota outages
+                primary_exception = exc
+                response_data = {"success": False, "error": str(exc)}
+
+            if _web_search_should_try_fallback(response_data):
+                attempted = [provider.name]
+                fallback_errors = {}
+                fallback_succeeded = False
+                first_error = _web_search_error_message(response_data)
+                for fallback_provider in _web_provider_fallback_candidates(
+                    provider.name, "search"
+                ):
+                    if fallback_provider.name in attempted:
+                        continue
+                    attempted.append(fallback_provider.name)
+                    logger.info(
+                        "Web search fallback via %s after %s failed",
+                        fallback_provider.name,
+                        provider.name,
+                    )
+                    try:
+                        fallback_response = fallback_provider.search(query, limit)
+                    except Exception as exc:  # noqa: BLE001 - keep walking retryable fallbacks
+                        fallback_response = {"success": False, "error": str(exc)}
+
+                    if isinstance(fallback_response, dict) and fallback_response.get(
+                        "success", False
+                    ):
+                        fallback_response.setdefault("meta", {})
+                        if isinstance(fallback_response["meta"], dict):
+                            fallback_response["meta"].update(
+                                {
+                                    "primary_provider": provider.name,
+                                    "provider": fallback_provider.name,
+                                    "fallback_from": provider.name,
+                                    "fallback_reason": first_error,
+                                    "providers_attempted": attempted,
+                                }
+                            )
+                            if fallback_errors:
+                                fallback_response["meta"]["fallback_errors"] = fallback_errors
+                        response_data = fallback_response
+                        fallback_succeeded = True
+                        break
+
+                    fallback_errors[fallback_provider.name] = _web_search_error_message(
+                        fallback_response
+                    )
+                    if not _web_search_should_try_fallback(fallback_response):
+                        break
+
+                if primary_exception is not None and not fallback_succeeded:
+                    raise primary_exception
+
+                if (
+                    len(attempted) > 1
+                    and isinstance(response_data, dict)
+                    and not response_data.get("success", False)
+                ):
+                    response_data.setdefault("meta", {})
+                    if isinstance(response_data["meta"], dict):
+                        response_data["meta"].update(
+                            {
+                                "primary_provider": provider.name,
+                                "provider": provider.name,
+                                "providers_attempted": attempted,
+                                "fallback_errors": fallback_errors,
+                            }
+                        )
+            elif primary_exception is not None:
+                raise primary_exception
+
+        if not isinstance(response_data, dict):
+            response_data = {
+                "success": False,
+                "error": _web_search_error_message(
+                    response_data,
+                    default="web search returned an invalid response",
+                ),
+            }
 
         debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
         result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
@@ -837,6 +1257,527 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         _debug.save()
 
         return tool_error(error_msg)
+
+
+def _normalize_matrix_queries(queries: Any) -> Tuple[List[Dict[str, str]], Optional[str]]:
+    """Normalize matrix-search query input into labeled query objects."""
+    if isinstance(queries, str):
+        raw_items = [line.strip() for line in queries.splitlines() if line.strip()]
+    elif isinstance(queries, list):
+        raw_items = queries
+    else:
+        return [], "queries must be a list of strings/objects or newline-delimited text"
+
+    normalized: List[Dict[str, str]] = []
+    for item in raw_items:
+        if isinstance(item, str):
+            query = item.strip()
+            label = query
+        elif isinstance(item, dict):
+            query = str(item.get("query") or item.get("q") or "").strip()
+            label = str(item.get("label") or item.get("id") or query).strip()
+        else:
+            return [], "each query must be a string or an object with a query field"
+        if query:
+            normalized.append({"label": label or query, "query": query})
+
+    if not normalized:
+        return [], "at least one non-empty query is required"
+    return normalized[:12], None
+
+
+def _coerce_matrix_provider_list(value: Any) -> List[str]:
+    """Normalize caller-supplied provider names without logging secrets."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_items = value.split(",")
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = value
+    else:
+        return []
+
+    normalized: List[str] = []
+    for item in raw_items:
+        name = str(item or "").strip().lower()
+        if name and name not in normalized:
+            normalized.append(name)
+    return normalized[:12]
+
+
+_MATRIX_PROVIDER_ENV_KEYS = {
+    "exa": ("EXA_API_KEY",),
+    "parallel": ("PARALLEL_API_KEY",),
+    "tavily": ("TAVILY_API_KEY",),
+    "firecrawl": ("FIRECRAWL_API_KEY", "FIRECRAWL_API_URL", "FIRECRAWL_GATEWAY_URL"),
+    "searxng": ("SEARXNG_URL",),
+    "brave-free": ("BRAVE_SEARCH_API_KEY",),
+    "ddgs": (),
+}
+_MATRIX_PROVIDER_ORDER = (
+    "firecrawl",
+    "parallel",
+    "tavily",
+    "exa",
+    "searxng",
+    "brave-free",
+    "ddgs",
+)
+
+
+def _ensure_web_search_plugins_registered() -> None:
+    """Best-effort load of bundled web provider plugins for direct callers."""
+    try:
+        from agent.web_search_registry import list_providers
+
+        if list_providers():
+            return
+        from hermes_cli.plugins import discover_plugins
+
+        discover_plugins()
+    except Exception as exc:  # noqa: BLE001 - matrix can still report no providers
+        logger.debug("Could not ensure web provider plugins are registered: %s", exc)
+
+
+def _provider_present_env_keys(provider: str) -> List[str]:
+    return [key for key in _MATRIX_PROVIDER_ENV_KEYS.get(provider, ()) if _has_env(key)]
+
+
+def _provider_matrix_status() -> Dict[str, Any]:
+    """Return registry-backed provider availability without network calls."""
+    _ensure_web_search_plugins_registered()
+    try:
+        from agent.web_search_registry import get_provider, list_providers
+    except Exception:
+        return {
+            "available_providers": [],
+            "missing_providers": list(_MATRIX_PROVIDER_ORDER),
+            "providers": {},
+        }
+
+    registered = {provider.name for provider in list_providers()}
+    ordered = list(_MATRIX_PROVIDER_ORDER)
+    ordered.extend(sorted(registered - set(ordered)))
+
+    available: List[str] = []
+    missing: List[str] = []
+    providers: Dict[str, Dict[str, Any]] = {}
+    for name in ordered:
+        provider = get_provider(name)
+        supports_search = bool(provider and provider.supports_search())
+        try:
+            provider_available = bool(provider and supports_search and provider.is_available())
+        except Exception as exc:  # noqa: BLE001
+            provider_available = False
+            availability_error = str(exc)
+        else:
+            availability_error = None
+        entry: Dict[str, Any] = {
+            "registered": provider is not None,
+            "supports_search": supports_search,
+            "available": provider_available,
+            "required_env_keys": list(_MATRIX_PROVIDER_ENV_KEYS.get(name, ())),
+            "present_env_keys": _provider_present_env_keys(name),
+        }
+        if availability_error:
+            entry["availability_error"] = availability_error
+        providers[name] = entry
+        if provider_available:
+            available.append(name)
+        else:
+            missing.append(name)
+
+    return {
+        "available_providers": available,
+        "missing_providers": missing,
+        "providers": providers,
+    }
+
+
+def _canonicalize_matrix_result_url(url: str) -> str:
+    if not url:
+        return ""
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+
+        parts = urlsplit(url.strip())
+        path = parts.path.rstrip("/") or "/"
+        return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, parts.query, ""))
+    except Exception:
+        return url.strip()
+
+
+def _normalize_provider_matrix_results(
+    provider: str, response_data: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    results = (
+        response_data.get("data", {}).get("web", [])
+        if isinstance(response_data, dict)
+        else []
+    )
+    normalized: List[Dict[str, Any]] = []
+    for index, result in enumerate(results):
+        if not isinstance(result, dict):
+            continue
+        normalized.append(
+            {
+                "provider": provider,
+                "url": result.get("url", ""),
+                "title": result.get("title", ""),
+                "description": result.get("description", ""),
+                "position": int(result.get("position") or index + 1),
+            }
+        )
+    return normalized
+
+
+def _web_provider_matrix_search(
+    query: str,
+    limit: int = 5,
+    providers: Any = None,
+    required_providers: Any = None,
+) -> Dict[str, Any]:
+    """Search one query across all requested registered web providers."""
+    query = str(query or "").strip()
+    if not query:
+        return {"success": False, "error": "query is required for provider matrix search"}
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 5
+    limit = min(max(limit, 1), 10)
+
+    status = _provider_matrix_status()
+    requested = _coerce_matrix_provider_list(providers)
+    if not requested or "all" in requested:
+        requested = [
+            name
+            for name, entry in status.get("providers", {}).items()
+            if entry.get("registered")
+        ]
+
+    required = set(_coerce_matrix_provider_list(required_providers))
+    if not requested:
+        return {
+            "success": False,
+            "coverage_status": "failed",
+            "degraded_coverage": True,
+            "error": "No configured web search providers are available for provider matrix search.",
+            "provider_status": status,
+            "requested_providers": requested,
+            "providers": [],
+        }
+
+    try:
+        from agent.web_search_registry import get_provider
+        from tools.interrupt import is_interrupted
+    except Exception as exc:
+        return {"success": False, "error": f"Web provider registry unavailable: {exc}"}
+
+    provider_results: Dict[str, Dict[str, Any]] = {}
+    provider_reports: List[Dict[str, Any]] = []
+    fused_index: Dict[str, Dict[str, Any]] = {}
+    required_failures: List[str] = []
+
+    for provider_name in requested:
+        if is_interrupted():
+            return {"success": False, "error": "Interrupted"}
+
+        provider = get_provider(provider_name)
+        if provider is None:
+            provider_results[provider_name] = {
+                "success": False,
+                "result_count": 0,
+                "error": f"Web search provider {provider_name!r} is not registered.",
+                "results": [],
+            }
+            provider_reports.append({
+                "provider": provider_name,
+                "status": "unavailable",
+                "error": "provider is not registered",
+                "results": [],
+            })
+            if provider_name in required:
+                required_failures.append(provider_name)
+            continue
+
+        display_name = getattr(provider, "display_name", provider_name)
+        try:
+            supports_search = bool(provider.supports_search())
+        except Exception:
+            supports_search = False
+        if not supports_search:
+            provider_results[provider_name] = {
+                "success": False,
+                "result_count": 0,
+                "error": "provider does not support search",
+                "results": [],
+            }
+            provider_reports.append({
+                "provider": provider_name,
+                "display_name": display_name,
+                "status": "unsupported",
+                "error": "provider does not support search",
+                "results": [],
+            })
+            if provider_name in required:
+                required_failures.append(provider_name)
+            continue
+
+        provider_status = status.get("providers", {}).get(provider_name, {})
+        if not provider_status.get("available"):
+            provider_results[provider_name] = {
+                "success": False,
+                "result_count": 0,
+                "error": "provider credentials or endpoint are unavailable",
+                "results": [],
+            }
+            provider_reports.append({
+                "provider": provider_name,
+                "display_name": display_name,
+                "status": "unavailable",
+                "error": "provider credentials or endpoint are unavailable",
+                "results": [],
+            })
+            if provider_name in required:
+                required_failures.append(provider_name)
+            continue
+
+        try:
+            response_data = provider.search(query, limit=limit)
+            provider_success = bool(
+                isinstance(response_data, dict) and response_data.get("success", False)
+            )
+            normalized = _normalize_provider_matrix_results(provider_name, response_data)
+            provider_results[provider_name] = {
+                "success": provider_success,
+                "result_count": len(normalized),
+                "results": normalized,
+            }
+            if not provider_success:
+                error = (
+                    response_data.get("error") if isinstance(response_data, dict) else "provider search failed"
+                )
+                provider_results[provider_name]["error"] = error
+                provider_reports.append({
+                    "provider": provider_name,
+                    "display_name": display_name,
+                    "status": "error",
+                    "error": str(error or "search failed"),
+                    "results": [],
+                })
+                if provider_name in required:
+                    required_failures.append(provider_name)
+                continue
+            provider_reports.append({
+                "provider": provider_name,
+                "display_name": display_name,
+                "status": "ok",
+                "result_count": len(normalized),
+                "results": normalized,
+            })
+            for item in normalized:
+                key = (
+                    _canonicalize_matrix_result_url(item["url"])
+                    or item["url"]
+                    or f"{provider_name}:{item['position']}"
+                )
+                entry = fused_index.setdefault(
+                    key,
+                    {
+                        "url": item["url"],
+                        "title": item["title"],
+                        "description": item["description"],
+                        "providers": [],
+                        "positions": {},
+                    },
+                )
+                if item["provider"] not in entry["providers"]:
+                    entry["providers"].append(item["provider"])
+                entry["positions"][item["provider"]] = item["position"]
+                if not entry.get("title") and item["title"]:
+                    entry["title"] = item["title"]
+                if not entry.get("description") and item["description"]:
+                    entry["description"] = item["description"]
+        except Exception as exc:
+            provider_results[provider_name] = {
+                "success": False,
+                "result_count": 0,
+                "error": str(exc),
+                "results": [],
+            }
+            provider_reports.append({
+                "provider": provider_name,
+                "display_name": display_name,
+                "status": "error",
+                "error": f"search failed: {type(exc).__name__}: {exc}",
+                "results": [],
+            })
+            if provider_name in required:
+                required_failures.append(provider_name)
+
+    fused_results = []
+    for entry in fused_index.values():
+        provider_hits = len(entry["providers"])
+        avg_position = sum(entry["positions"].values()) / max(1, provider_hits)
+        fused_results.append(
+            {
+                "url": entry["url"],
+                "title": entry["title"],
+                "description": entry["description"],
+                "providers": sorted(entry["providers"]),
+                "provider_hits": provider_hits,
+                "positions": entry["positions"],
+                "position": min(entry["positions"].values()) if entry["positions"] else None,
+                "_avg_position": avg_position,
+            }
+        )
+    fused_results.sort(
+        key=lambda item: (
+            -int(item.get("provider_hits") or 0),
+            float(item.get("_avg_position") or 999.0),
+            str(item.get("title") or ""),
+        )
+    )
+
+    trimmed_results = []
+    for item in fused_results[:limit]:
+        payload = dict(item)
+        payload.pop("_avg_position", None)
+        trimmed_results.append(payload)
+
+    successful = [
+        provider
+        for provider, result in provider_results.items()
+        if result.get("success")
+    ]
+    failed_or_unavailable = [
+        report for report in provider_reports if report.get("status") != "ok"
+    ]
+    coverage_status = "complete"
+    if not successful:
+        coverage_status = "failed"
+    elif failed_or_unavailable:
+        coverage_status = "degraded"
+
+    response: Dict[str, Any] = {
+        "success": bool(successful) and not required_failures,
+        "query": query,
+        "strategy": "provider_matrix",
+        "coverage_status": coverage_status,
+        "degraded_coverage": coverage_status != "complete",
+        "data": {"web": trimmed_results},
+        "provider_status": status,
+        "providers_requested": len(provider_reports),
+        "providers_succeeded": len(successful),
+        "providers_used": successful,
+        "providers_missing": [item["provider"] for item in failed_or_unavailable],
+        "providers": provider_reports,
+        "provider_results": provider_results,
+    }
+    if required:
+        response["required_providers"] = sorted(required)
+    if not successful:
+        response["error"] = "All requested web search providers failed."
+    if required_failures:
+        response["error"] = (
+            "Required search providers unavailable or failed: "
+            + ", ".join(sorted(set(required_failures)))
+        )
+    return response
+
+
+def web_search_matrix_tool(
+    queries: Any = None,
+    limit_per_query: int = 3,
+    *,
+    query: Any = None,
+    limit: Any = None,
+    providers: Any = None,
+    required_providers: Any = None,
+) -> str:
+    """Run a bounded matrix of web searches and return per-query + deduped results."""
+    if query is None and isinstance(queries, str):
+        query = queries
+        queries = None
+
+    if query is not None or providers or required_providers:
+        response_data = _web_provider_matrix_search(
+            query=query,
+            limit=limit if limit is not None else limit_per_query,
+            providers=providers,
+            required_providers=required_providers,
+        )
+        return json.dumps(response_data, indent=2, ensure_ascii=False)
+
+    normalized, error = _normalize_matrix_queries(queries)
+    if error:
+        return tool_error(error, success=False)
+
+    try:
+        limit = int(limit_per_query)
+    except (TypeError, ValueError):
+        limit = 3
+    limit = min(max(limit, 1), 10)
+
+    matrix = []
+    deduped = []
+    seen_urls = set()
+    failures = []
+
+    for item in normalized:
+        query = item["query"]
+        raw = web_search_tool(query, limit=limit)
+        try:
+            payload = json.loads(raw)
+        except Exception as exc:
+            payload = {"success": False, "error": f"Invalid web_search response: {exc}"}
+
+        results = []
+        if isinstance(payload, dict):
+            results = ((payload.get("data") or {}).get("web") or [])
+            if not payload.get("success", False):
+                failures.append({
+                    "label": item["label"],
+                    "query": query,
+                    "error": payload.get("error") or "web_search failed",
+                })
+
+        for result in results:
+            url = str(result.get("url") or "").strip()
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            deduped.append({
+                "query_label": item["label"],
+                "query": query,
+                **result,
+            })
+
+        matrix.append({
+            "label": item["label"],
+            "query": query,
+            "success": bool(isinstance(payload, dict) and payload.get("success", False)),
+            "results_count": len(results),
+            "results": results,
+            "error": payload.get("error") if isinstance(payload, dict) else None,
+        })
+
+    response_data = {
+        "success": not failures,
+        "data": {
+            "matrix": matrix,
+            "deduped_web": deduped,
+        },
+        "meta": {
+            "query_count": len(normalized),
+            "limit_per_query": limit,
+            "configured_backend": _get_search_backend(),
+        },
+    }
+    if failures:
+        response_data["errors"] = failures
+    return json.dumps(response_data, indent=2, ensure_ascii=False)
 
 
 async def web_extract_tool(
@@ -912,6 +1853,9 @@ async def web_extract_tool(
             else:
                 safe_urls.append(url)
 
+        extract_provider_name = None
+        extract_degradations: List[Dict[str, Any]] = []
+
         # Dispatch only safe URLs to the configured backend
         if not safe_urls:
             results = []
@@ -968,6 +1912,7 @@ async def web_extract_tool(
             logger.info(
                 "Web extract via %s: %d URL(s)", provider.name, len(safe_urls)
             )
+            extract_provider_name = provider.name
 
             # Async-or-sync dispatch: parallel + firecrawl have async
             # extract(); exa + tavily are sync.
@@ -980,6 +1925,14 @@ async def web_extract_tool(
                 results = await asyncio.to_thread(
                     provider.extract, safe_urls, format=format
                 )
+
+            if not isinstance(results, list):
+                results = []
+            results, extract_degradations = await _apply_web_extract_degradation_fallback(
+                provider_name=extract_provider_name or "",
+                results=results,
+                format=format,
+            )
 
         # Merge any SSRF-blocked results back in
         if ssrf_blocked:
@@ -1078,17 +2031,38 @@ async def web_extract_tool(
                 logger.info("%s (%d characters)", url, content_length)
 
         # Trim output to minimal fields per entry: title, content, error
-        trimmed_results = [
-            {
+        trimmed_results = []
+        for r in response.get("results", []):
+            trimmed = {
                 "url": r.get("url", ""),
                 "title": r.get("title", ""),
                 "content": r.get("content", ""),
                 "error": r.get("error"),
-                **({  "blocked_by_policy": r["blocked_by_policy"]} if "blocked_by_policy" in r else {}),
             }
-            for r in response.get("results", [])
-        ]
+            if "provider_status" in r:
+                trimmed["provider_status"] = r["provider_status"]
+            if "blocked_by_policy" in r:
+                trimmed["blocked_by_policy"] = r["blocked_by_policy"]
+            if "degradation" in r:
+                trimmed["degradation"] = r["degradation"]
+            trimmed_results.append(trimmed)
         trimmed_response = {"results": trimmed_results}
+        provider_status = next(
+            (
+                r.get("provider_status")
+                for r in response.get("results", [])
+                if isinstance(r.get("provider_status"), dict)
+            ),
+            None,
+        )
+        if provider_status:
+            trimmed_response["provider_status"] = provider_status
+        if extract_provider_name or extract_degradations:
+            trimmed_response["meta"] = {
+                "extract_provider": extract_provider_name,
+            }
+            if extract_degradations:
+                trimmed_response["meta"]["degradations"] = extract_degradations
 
         if trimmed_response.get("results") == []:
             result_json = tool_error("Content was inaccessible or not found")
@@ -1387,6 +2361,16 @@ _WEB_PROVIDER_CONFIG_VARS = {
     "tavily": ("TAVILY_API_KEY",),
 }
 _WEB_MATRIX_CAPABILITIES = ("search", "extract", "crawl")
+_WEB_MATRIX_SEARCH_PROVIDERS = (
+    "all",
+    "brave-free",
+    "ddgs",
+    "exa",
+    "firecrawl",
+    "parallel",
+    "searxng",
+    "tavily",
+)
 
 
 def _normalize_matrix_items(value: Any, *, allowed: Optional[set[str]] = None) -> list[str]:
@@ -1446,20 +2430,273 @@ def _provider_matrix_row(provider: Any) -> dict[str, Any]:
     }
 
 
+def _configured_browser_cloud_provider() -> str:
+    try:
+        from hermes_cli.config import load_config
+
+        browser_cfg = (load_config() or {}).get("browser", {})
+        if isinstance(browser_cfg, dict):
+            return str(browser_cfg.get("cloud_provider") or "").strip().lower()
+    except Exception as exc:
+        logger.debug("Could not read browser cloud provider config: %s", exc)
+    return ""
+
+
+def _firecrawl_surface_status(providers_by_name: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    provider = providers_by_name.get("firecrawl") or {}
+    capabilities = provider.get("capabilities") if isinstance(provider, dict) else {}
+    available = bool(provider.get("available")) if isinstance(provider, dict) else False
+    browser_provider = _configured_browser_cloud_provider()
+    browser_key_present = _has_env("FIRECRAWL_API_KEY")
+    return {
+        "search": available and bool(capabilities.get("search")),
+        "scrape": available and bool(capabilities.get("extract")),
+        "extract": available and bool(capabilities.get("extract")),
+        "crawl": available and bool(capabilities.get("crawl")),
+        "interact": browser_provider == "firecrawl" and browser_key_present,
+        "browser_cloud_provider": browser_provider or None,
+        "config": {
+            "present": [name for name in ("FIRECRAWL_API_KEY", "FIRECRAWL_API_URL") if _has_env(name)],
+            "missing": [name for name in ("FIRECRAWL_API_KEY", "FIRECRAWL_API_URL") if not _has_env(name)],
+        },
+    }
+
+
+def _matrix_provider_status(providers: list[dict[str, Any]]) -> dict[str, Any]:
+    available = sorted(
+        row["name"]
+        for row in providers
+        if row.get("available")
+    )
+    providers_by_name = {
+        row["name"]: {
+            "available": row.get("available", False),
+            "capabilities": row.get("capabilities", {}),
+            "required_env_keys": list(_WEB_PROVIDER_CONFIG_VARS.get(row["name"], ())),
+            "present_env_keys": row.get("config", {}).get("present", []),
+            "missing_env_keys": row.get("config", {}).get("missing", []),
+        }
+        for row in providers
+    }
+    return {
+        "available_providers": available,
+        "missing_providers": sorted(
+            row["name"]
+            for row in providers
+            if not row.get("available")
+        ),
+        "providers": providers_by_name,
+    }
+
+
+def _canonicalize_matrix_result_url(url: str) -> str:
+    if not url:
+        return ""
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+
+        parts = urlsplit(url.strip())
+    except Exception:
+        return url.strip()
+    path = parts.path.rstrip("/") or "/"
+    return urlunsplit(
+        (parts.scheme.lower(), parts.netloc.lower(), path, parts.query, "")
+    )
+
+
+def _normalize_matrix_search_results(
+    provider: str,
+    response_data: dict[str, Any],
+) -> list[dict[str, Any]]:
+    results = (
+        response_data.get("data", {}).get("web", [])
+        if isinstance(response_data, dict)
+        else []
+    )
+    normalized: list[dict[str, Any]] = []
+    for index, result in enumerate(results):
+        if not isinstance(result, dict):
+            continue
+        normalized.append(
+            {
+                "provider": provider,
+                "url": str(result.get("url") or ""),
+                "title": str(result.get("title") or ""),
+                "description": str(result.get("description") or ""),
+                "position": int(result.get("position") or index + 1),
+            }
+        )
+    return normalized
+
+
+def _run_web_search_matrix_query(
+    query: str,
+    limit: int,
+    providers: list[dict[str, Any]],
+    requested_providers: list[str],
+) -> dict[str, Any]:
+    from agent.web_search_registry import get_provider
+
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 5
+    limit = min(max(limit, 1), 10)
+
+    providers_by_name = {row["name"]: row for row in providers}
+    if not requested_providers or "all" in requested_providers:
+        requested = [
+            row["name"]
+            for row in providers
+            if row.get("available") and row.get("capabilities", {}).get("search")
+        ]
+    else:
+        requested = [
+            provider
+            for provider in requested_providers
+            if provider in providers_by_name and provider != "all"
+        ]
+
+    available_requested = [
+        provider
+        for provider in requested
+        if providers_by_name.get(provider, {}).get("available")
+        and providers_by_name.get(provider, {}).get("capabilities", {}).get("search")
+    ]
+    missing_requested = [
+        provider for provider in requested if provider not in available_requested
+    ]
+
+    provider_results: dict[str, dict[str, Any]] = {}
+    fused_index: dict[str, dict[str, Any]] = {}
+
+    for provider_name in available_requested:
+        provider = get_provider(provider_name)
+        if provider is None:
+            provider_results[provider_name] = {
+                "success": False,
+                "result_count": 0,
+                "error": f"Web search provider {provider_name!r} is not registered.",
+                "results": [],
+            }
+            continue
+        try:
+            response_data = provider.search(query, limit=limit)
+            normalized = _normalize_matrix_search_results(provider_name, response_data)
+            provider_results[provider_name] = {
+                "success": bool(response_data.get("success", True)),
+                "result_count": len(normalized),
+                "results": normalized,
+            }
+            if response_data.get("error"):
+                provider_results[provider_name]["error"] = str(response_data["error"])
+            for item in normalized:
+                key = (
+                    _canonicalize_matrix_result_url(item["url"])
+                    or item["url"]
+                    or f"{provider_name}:{item['position']}"
+                )
+                entry = fused_index.setdefault(
+                    key,
+                    {
+                        "url": item["url"],
+                        "title": item["title"],
+                        "description": item["description"],
+                        "providers": [],
+                        "positions": {},
+                    },
+                )
+                if item["provider"] not in entry["providers"]:
+                    entry["providers"].append(item["provider"])
+                entry["positions"][item["provider"]] = item["position"]
+                if not entry.get("title") and item["title"]:
+                    entry["title"] = item["title"]
+                if not entry.get("description") and item["description"]:
+                    entry["description"] = item["description"]
+        except Exception as exc:
+            provider_results[provider_name] = {
+                "success": False,
+                "result_count": 0,
+                "error": str(exc),
+                "results": [],
+            }
+
+    fused_results = []
+    for entry in fused_index.values():
+        provider_hits = len(entry["providers"])
+        avg_position = sum(entry["positions"].values()) / max(1, provider_hits)
+        fused_results.append(
+            {
+                "url": entry["url"],
+                "title": entry["title"],
+                "description": entry["description"],
+                "providers": sorted(entry["providers"]),
+                "provider_hits": provider_hits,
+                "positions": entry["positions"],
+                "position": (
+                    min(entry["positions"].values()) if entry["positions"] else None
+                ),
+                "_avg_position": avg_position,
+            }
+        )
+
+    fused_results.sort(
+        key=lambda item: (
+            -int(item.get("provider_hits") or 0),
+            float(item.get("_avg_position") or 999.0),
+            str(item.get("title") or ""),
+        )
+    )
+    trimmed_results = []
+    for item in fused_results[:limit]:
+        payload = dict(item)
+        payload.pop("_avg_position", None)
+        trimmed_results.append(payload)
+
+    if not available_requested:
+        return {
+            "query": query,
+            "strategy": "all_available" if not requested_providers or "all" in requested_providers else "requested",
+            "data": {"web": []},
+            "providers_used": [],
+            "providers_missing": missing_requested,
+            "provider_results": provider_results,
+            "search_error": "No configured web search providers are available for web_search_matrix.",
+        }
+
+    return {
+        "query": query,
+        "strategy": "all_available" if not requested_providers or "all" in requested_providers else "requested",
+        "data": {"web": trimmed_results},
+        "providers_used": available_requested,
+        "providers_missing": missing_requested,
+        "provider_results": provider_results,
+    }
+
+
 def web_search_matrix(
+    query: Optional[str] = None,
+    limit: int = 5,
+    providers: Optional[List[str]] = None,
     require_capabilities: Optional[List[str]] = None,
     require_providers: Optional[List[str]] = None,
 ) -> str:
-    """Return a safe web-provider capability matrix for agents and cron jobs.
+    """Return provider status, or run a fused multi-provider search.
 
-    The result reports provider names, capability flags, availability, and
-    env-var presence by variable name only. It never includes env values.
+    The result reports provider names, capability flags, availability, active
+    providers, and env-var presence by variable name only. It never includes
+    env values. When ``query`` is supplied, the same payload also includes
+    fused search results across the available/requested search providers.
     """
     required_caps = _normalize_matrix_items(
         require_capabilities,
         allowed=set(_WEB_MATRIX_CAPABILITIES),
     )
     required_providers = _normalize_matrix_items(require_providers)
+    requested_search_providers = _normalize_matrix_items(
+        providers,
+        allowed=set(_WEB_MATRIX_SEARCH_PROVIDERS),
+    )
 
     try:
         from hermes_cli.plugins import discover_plugins
@@ -1517,18 +2754,51 @@ def web_search_matrix(
             )
 
     status = "dependency_blocked" if blocked_reasons else "ok"
-    return json.dumps(
-        {
-            "success": not blocked_reasons,
-            "status": status,
-            "requirements": {
-                "capabilities": required_caps,
-                "providers": required_providers,
-            },
-            "active": active,
-            "providers": providers,
-            "blocked_reasons": blocked_reasons,
+    payload: dict[str, Any] = {
+        "success": not blocked_reasons,
+        "status": status,
+        "requirements": {
+            "capabilities": required_caps,
+            "providers": required_providers,
         },
+        "active": active,
+        "providers": providers,
+        "provider_status": _matrix_provider_status(providers),
+        "firecrawl_surfaces": _firecrawl_surface_status(providers_by_name),
+        "blocked_reasons": blocked_reasons,
+    }
+
+    query_text = str(query or "").strip()
+    if query_text and not blocked_reasons:
+        search_payload = _run_web_search_matrix_query(
+            query_text,
+            limit,
+            providers,
+            requested_search_providers,
+        )
+        payload.update(search_payload)
+        if search_payload.get("search_error"):
+            payload["success"] = False
+            payload["status"] = "dependency_blocked"
+            payload["blocked_reasons"] = [
+                *payload["blocked_reasons"],
+                str(search_payload["search_error"]),
+            ]
+    elif query_text:
+        payload.update(
+            {
+                "query": query_text,
+                "strategy": "skipped_dependency_blocked",
+                "data": {"web": []},
+                "providers_used": [],
+                "providers_missing": requested_search_providers,
+                "provider_results": {},
+                "search_error": "web_search_matrix requirements are unavailable; search skipped.",
+            }
+        )
+
+    return json.dumps(
+        payload,
         indent=2,
         ensure_ascii=False,
     )
@@ -1693,15 +2963,84 @@ WEB_EXTRACT_SCHEMA = {
 WEB_SEARCH_MATRIX_SCHEMA = {
     "name": "web_search_matrix",
     "description": (
-        "Report the configured web provider capability matrix. Returns provider "
-        "names, availability, supported capabilities, active search/extract/crawl "
-        "providers, and env-var presence by variable name only. Use this before "
-        "scheduled research source capture to verify web dependencies without "
-        "exposing secret values."
+        "Search across configured web providers, run labeled query matrices, "
+        "and report provider capability status. Returns fused results when "
+        "query is supplied, plus provider availability, active "
+        "search/extract/crawl providers, Firecrawl surface status, and env-var "
+        "presence by variable name only."
     ),
     "parameters": {
         "type": "object",
         "properties": {
+            "query": {
+                "type": "string",
+                "description": (
+                    "Optional search query. Omit this to report provider status "
+                    "without making external search calls."
+                ),
+            },
+            "queries": {
+                "type": "array",
+                "items": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {
+                            "type": "object",
+                            "properties": {
+                                "label": {"type": "string"},
+                                "query": {"type": "string"},
+                            },
+                            "required": ["query"],
+                        },
+                    ]
+                },
+                "description": "One to twelve source-discovery queries, as strings or {label, query} objects.",
+                "minItems": 1,
+                "maxItems": 12,
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of fused search results to return.",
+                "minimum": 1,
+                "maximum": 10,
+            },
+            "limit_per_query": {
+                "type": "integer",
+                "description": "Maximum results per labeled query. Defaults to 3.",
+                "minimum": 1,
+                "maximum": 10,
+                "default": 3,
+            },
+            "providers": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": list(_WEB_MATRIX_SEARCH_PROVIDERS),
+                },
+                "description": (
+                    "Optional search provider subset. Defaults to all available "
+                    "search providers when query is supplied."
+                ),
+            },
+            "required_providers": {
+                "type": "array",
+                "description": (
+                    "Providers that must succeed in source-discovery query mode. "
+                    "Use when a research protocol explicitly requires a named provider."
+                ),
+                "items": {
+                    "type": "string",
+                    "enum": [
+                        "brave-free",
+                        "ddgs",
+                        "exa",
+                        "firecrawl",
+                        "parallel",
+                        "searxng",
+                        "tavily",
+                    ],
+                },
+            },
             "require_capabilities": {
                 "type": "array",
                 "items": {
@@ -1737,6 +3076,26 @@ WEB_SEARCH_MATRIX_SCHEMA = {
     },
 }
 
+
+def _handle_web_search_matrix_registry(args, **kw):
+    if args.get("queries") is not None or args.get("required_providers") is not None:
+        return web_search_matrix_tool(
+            args.get("queries"),
+            limit_per_query=args.get("limit_per_query", 3),
+            query=args.get("query"),
+            limit=args.get("limit"),
+            providers=args.get("providers"),
+            required_providers=args.get("required_providers"),
+        )
+    return web_search_matrix(
+        query=args.get("query"),
+        limit=args.get("limit") or 5,
+        providers=args.get("providers"),
+        require_capabilities=args.get("require_capabilities"),
+        require_providers=args.get("require_providers"),
+    )
+
+
 registry.register(
     name="web_search",
     toolset="web",
@@ -1763,10 +3122,7 @@ registry.register(
     name="web_search_matrix",
     toolset="web",
     schema=WEB_SEARCH_MATRIX_SCHEMA,
-    handler=lambda args, **kw: web_search_matrix(
-        require_capabilities=args.get("require_capabilities"),
-        require_providers=args.get("require_providers"),
-    ),
+    handler=_handle_web_search_matrix_registry,
     check_fn=lambda: True,
     emoji="🔎",
     max_result_size_chars=100_000,

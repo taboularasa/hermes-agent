@@ -30,7 +30,7 @@ from typing import List, Dict, Any, Set, Optional
 # Edit this once to update all platforms simultaneously.
 _HERMES_CORE_TOOLS = [
     # Web
-    "web_search", "web_extract", "web_search_matrix",
+    "web_search", "web_search_matrix", "web_extract",
     # Terminal + process management
     "terminal", "process",
     # File manipulation
@@ -56,6 +56,9 @@ _HERMES_CORE_TOOLS = [
     "execute_code", "delegate_task",
     # Cronjob management
     "cronjob",
+    # Hermes self-improvement reliability floor
+    "self_improvement_evidence_gate", "self_improvement_benchmark",
+    "self_improvement_pipeline",
     # Cross-platform messaging (gated on gateway running via check_fn)
     "send_message",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
@@ -79,13 +82,13 @@ TOOLSETS = {
     # Basic toolsets - individual tool categories
     "web": {
         "description": "Web research and content extraction tools",
-        "tools": ["web_search", "web_extract", "web_search_matrix"],
+        "tools": ["web_search", "web_search_matrix", "web_extract"],
         "includes": []  # No other toolsets included
     },
 
     "search": {
         "description": "Web search only (no content extraction/scraping)",
-        "tools": ["web_search"],
+        "tools": ["web_search", "web_search_matrix"],
         "includes": []
     },
 
@@ -320,8 +323,7 @@ TOOLSETS = {
     "hermes-acp": {
         "description": "Editor integration (VS Code, Zed, JetBrains) — coding-focused tools without messaging, audio, or clarify UI",
         "tools": [
-            "web_search", "web_extract",
-            "web_search_matrix",
+            "web_search", "web_search_matrix", "web_extract",
             "terminal", "process",
             "read_file", "write_file", "patch", "search_files",
             "vision_analyze",
@@ -341,7 +343,7 @@ TOOLSETS = {
         "description": "OpenAI-compatible API server — full agent tools accessible via HTTP (no interactive UI tools like clarify or send_message)",
         "tools": [
             # Web
-            "web_search", "web_extract", "web_search_matrix",
+            "web_search", "web_search_matrix", "web_extract",
             # Terminal + process management
             "terminal", "process",
             # File manipulation

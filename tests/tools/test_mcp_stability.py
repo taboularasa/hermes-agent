@@ -133,9 +133,9 @@ class TestStdioPidTracking:
         # Post-#21561 the alive check routes through
         # ``gateway.status._pid_exists`` (so it's safe on Windows — see
         # bpo-14484). Return True so the SIGKILL escalation fires.
-        with patch("tools.mcp_tool.os.kill") as mock_kill, \
+        with patch("tools.mcp_tool._orphan_cleanup_kill") as mock_kill, \
              patch("gateway.status._pid_exists", return_value=True), \
-             patch("time.sleep") as mock_sleep:
+             patch("tools.mcp_tool._orphan_cleanup_sleep") as mock_sleep:
             _kill_orphaned_mcp_children()
 
         # SIGTERM then SIGKILL; the alive check no longer touches os.kill.
@@ -162,8 +162,8 @@ class TestStdioPidTracking:
 
         monkeypatch.delattr(signal, "SIGKILL", raising=False)
 
-        with patch("tools.mcp_tool.os.kill") as mock_kill, \
-             patch("time.sleep") as mock_sleep:
+        with patch("tools.mcp_tool._orphan_cleanup_kill") as mock_kill, \
+             patch("tools.mcp_tool._orphan_cleanup_sleep") as mock_sleep:
             _kill_orphaned_mcp_children()
 
         # SIGTERM phase, alive check raises (process gone), no escalation

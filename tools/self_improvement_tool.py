@@ -33,8 +33,398 @@ DEFAULT_ACTIVE_STALE_HOURS = 12
 PROVENANCE_CONTRACT_VERSION = "v1"
 BENCHMARK_CONTRACT_VERSION = "v1"
 _BENCHMARK_HISTORY_LIMIT = 200
+_EXECUTION_LOOP_WINDOW_DAYS = 14
+_EXECUTION_LOOP_MANY_COMPLETED_THRESHOLD = 3
+_EXECUTION_LOOP_MIN_JOURNAL_FOLLOW_THROUGH_RATE = 0.5
+_THROUGHPUT_CODEX_COMPLETION_MIN = _EXECUTION_LOOP_MANY_COMPLETED_THRESHOLD
+_THROUGHPUT_JOURNAL_RATIO_MIN = _EXECUTION_LOOP_MIN_JOURNAL_FOLLOW_THROUGH_RATE
+_LEADING_INDICATOR_CHECK_IDS = (
+    "reliability_gate",
+    "anti_make_work_check",
+    "operator_value_alignment",
+)
+_LEADING_INDICATOR_HARBINGERS = (
+    "critical_slowing_down",
+    "variance_explosion",
+    "flickering",
+    "correlation_explosion",
+)
+_HARBINGER_EVIDENCE_FIELDS = {
+    "critical_slowing_down": (
+        "sample_count",
+        "prior_peak",
+        "current_score",
+        "recovery_gap",
+        "recent_deltas",
+        "flat_or_negative_delta_count",
+    ),
+    "variance_explosion": (
+        "sample_count",
+        "baseline_stddev",
+        "recent_stddev",
+        "recent_range",
+        "recent_scores",
+    ),
+    "flickering": (
+        "sample_count",
+        "recent_statuses",
+        "transition_count",
+        "pass_boundary_crossings",
+    ),
+    "correlation_explosion": (
+        "dropped_check_count",
+        "dropped_checks",
+        "check_deltas",
+        "correlated_drop_threshold",
+    ),
+}
 _ONTOLOGY_SCAN_SUFFIXES = {".json", ".yaml", ".yml", ".md"}
-_ONTOLOGY_SCAN_PRUNED_DIRS = {".git"}
+_ONTOLOGY_SCAN_PRUNED_DIRS = {".git", "__pycache__", ".pytest_cache", "tests"}
+_ONTOLOGY_REQUIRED_ARTIFACTS = (
+    ("ontology_metrics", Path("evolution/metrics.json")),
+    ("ontology_delta_report", Path("evolution/delta_report.json")),
+    ("ontology_daily_report", Path("evolution/daily_report.md")),
+)
+_FUTURE_TIMESTAMP_TOLERANCE_SECONDS = 300
+_TEXT_EVIDENCE_EXCLUDED_KEYS = {
+    "command",
+    "prompt",
+    "command_args",
+    "ctx_worktree_path",
+    "latest_path",
+    "last_message_path",
+    "record_path",
+    "workdir",
+    "worktree_path",
+}
+_CLAIM_TEXT_KEYS = {
+    "detail",
+    "final_message",
+    "last_agent_message",
+    "notes",
+    "outcome_note",
+    "reason",
+    "result",
+    "summary",
+    "title",
+}
+_CLAIM_CONTAINER_KEYS = {
+    "active_agenda",
+    "current_strategy",
+    "lane_links",
+    "self_improvement_focus",
+}
+_OPERATOR_DECISION_SUPPORT_STRUCTURED_KEYS = {
+    "blocker",
+    "blockers",
+    "decision",
+    "decisions",
+    "manual_step",
+    "manual_steps",
+    "next_decision",
+    "next_operator_decision",
+    "operator_decision_support",
+    "recommended_next_decision",
+    "selected_issue",
+    "selected_issue_id",
+    "selected_work",
+    "trade_off",
+    "trade_offs",
+    "tradeoff",
+    "tradeoffs",
+}
+_OPERATOR_DECISION_SUPPORT_EVIDENCE_FIELDS = {
+    "blocker": "blocker",
+    "blockers": "blocker",
+    "decision": "decision",
+    "decisions": "decision",
+    "decision_owner": "owner",
+    "manual_step": "manual_step",
+    "manual_steps": "manual_step",
+    "next_decision": "next_decision",
+    "next_operator_decision": "next_decision",
+    "operator_decision_support": "operator_decision_support",
+    "operator_owner": "owner",
+    "owner": "owner",
+    "owners": "owner",
+    "recommended_next_decision": "next_decision",
+    "selected_issue": "selected_work",
+    "selected_issue_id": "selected_work",
+    "selected_work": "selected_work",
+    "trade_off": "tradeoff",
+    "trade_offs": "tradeoff",
+    "tradeoff": "tradeoff",
+    "tradeoffs": "tradeoff",
+    "work_owner": "owner",
+}
+_DURABLE_EVIDENCE_KEYS = {
+    "artifact_path",
+    "artifact_paths",
+    "artifacts",
+    "changed_files",
+    "changed_paths",
+    "checks",
+    "ci",
+    "commit",
+    "commit_sha",
+    "commit_shas",
+    "commits",
+    "control_ownership_preserved",
+    "control_preservation",
+    "control_preserved",
+    "decision",
+    "decisions",
+    "durable_artifacts",
+    "evidence",
+    "files_changed",
+    "incident_risk_reduced",
+    "ownership_preservation",
+    "ownership_preserved",
+    "operator_decision_support",
+    "pr_url",
+    "pr_urls",
+    "proof_artifact",
+    "proof_artifacts",
+    "pull_request",
+    "pull_request_url",
+    "pull_requests",
+    "risk_reduction",
+    "risk_reduced",
+    "system_capability_changed",
+    "test_results",
+    "tests",
+    "verification",
+    *_OPERATOR_DECISION_SUPPORT_STRUCTURED_KEYS,
+}
+_ALLOWED_VALUE_CATEGORIES = (
+    ("operator_decision_support", "operator decision support"),
+    ("durable_asset_created", "durable asset created"),
+    ("control_ownership_preserved", "control/ownership preserved"),
+    ("incident_risk_reduced", "incident risk reduced"),
+    ("system_capability_changed", "system capability changed"),
+)
+_ALLOWED_VALUE_CATEGORY_LABELS = {
+    category: label for category, label in _ALLOWED_VALUE_CATEGORIES
+}
+_VALUE_CATEGORY_REMEDIATION = {
+    "operator_decision_support": (
+        "document the operator decision, blocker, trade-off, or manual choice the work enables"
+    ),
+    "durable_asset_created": (
+        "link a commit, PR, changed file, generated artifact, or verification result"
+    ),
+    "control_ownership_preserved": (
+        "show preserved ownership, authority, rollback state, or protected control boundary"
+    ),
+    "incident_risk_reduced": (
+        "name the incident risk and the mitigation, prevention, or recovery evidence"
+    ),
+    "system_capability_changed": (
+        "identify the behavior, tool, workflow, config, schema, or test capability changed"
+    ),
+}
+_STATUS_ONLY_PATTERNS = (
+    re.compile(r"\bactionable\b", re.IGNORECASE),
+    re.compile(r"\bactive work\b", re.IGNORECASE),
+    re.compile(r"\bin[- ]progress\b", re.IGNORECASE),
+    re.compile(r"\bnext steps?\b", re.IGNORECASE),
+    re.compile(r"\bqueued\b", re.IGNORECASE),
+    re.compile(r"\bselected\b", re.IGNORECASE),
+    re.compile(r"\bstatus(?:\s+update)?\b", re.IGNORECASE),
+    re.compile(r"\bsummary\b", re.IGNORECASE),
+    re.compile(r"\btriage(?:d|s|)\b", re.IGNORECASE),
+    re.compile(r"\bworking on\b", re.IGNORECASE),
+)
+_DURABLE_TEXT_PATTERNS = (
+    ("commit", re.compile(r"\b(?:commit|committed|sha)\b[^.\n]{0,120}\b[0-9a-f]{7,40}\b", re.IGNORECASE)),
+    ("commit", re.compile(r"\b[0-9a-f]{7,40}\b[^.\n]{0,120}\b(?:commit|sha)\b", re.IGNORECASE)),
+    ("pull_request", re.compile(r"https://github\.com/[^\s)]+/[^\s)]+/pull/\d+", re.IGNORECASE)),
+    ("pull_request", re.compile(r"\b(?:PR|pull request)\s*#?\d+\b", re.IGNORECASE)),
+    (
+        "verification",
+        re.compile(
+            r"\b(?:pytest|npm test|uv run pytest|ruff|mypy|git diff --check|GitHub Actions|CI)\b"
+            r"[^.\n]{0,160}\b(?:passed|pass|success|succeeded|green|\d+\s+passed|0\s+failed)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    ("changed_files", re.compile(r"\bCHANGED_FILES\b|\bchanged files?\b", re.IGNORECASE)),
+    (
+        "artifact",
+        re.compile(
+            r"\b(?:durable|checked-in|repo-visible)\b[^.\n]{0,120}\b(?:artifact|evidence|record)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "durable_asset_created",
+        re.compile(
+            r"\b(?:created|wrote|added|published|generated)\b"
+            r"[^.\n]{0,160}\b(?:asset|artifact|file|record|report|branch|commit|PR|pull request|test)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "state_transition",
+        re.compile(
+            r"\b(?:merged|pushed|opened|created|closed|resolved|completed)\b"
+            r"[^.\n]{0,120}\b(?:PR|pull request|branch|issue|commit|state|artifact|file|test)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "operator_decision_support",
+        re.compile(
+            r"\b(?:blocked|blocker|missing|unavailable|permission|403|401|unable to)\b"
+            r"[^.\n]{0,160}\b(?:operator|token|scope|credential|auth|permission|artifact|secret|manual)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "operator_decision_support",
+        re.compile(
+            r"\b(?:operator|human|user)\b[^.\n]{0,160}"
+            r"\b(?:decision|decide|choose|approval|blocker|risk|trade[- ]off|manual step|recommended)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "operator_decision_support",
+        re.compile(
+            r"\b(?:decision|decide|choose|approval|blocker|risk|trade[- ]off|manual step|recommended)\b"
+            r"[^.\n]{0,160}\b(?:operator|human|user)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "control_ownership_preserved",
+        re.compile(
+            r"\b(?:preserved|retained|kept|protected)\b"
+            r"[^.\n]{0,160}\b(?:control|ownership|authority|rollback|handoff|state|boundary)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "control_ownership_preserved",
+        re.compile(
+            r"\b(?:control|ownership|authority|rollback|handoff|state|boundary)\b"
+            r"[^.\n]{0,160}\b(?:preserved|retained|kept|protected)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "incident_risk_reduced",
+        re.compile(
+            r"\b(?:reduced|mitigated|lowered|prevented|removed|closed)\b"
+            r"[^.\n]{0,160}\b(?:incident|risk|outage|regression|failure|security|data loss|rollback)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "incident_risk_reduced",
+        re.compile(
+            r"\b(?:incident|risk|outage|regression|failure|security|data loss|rollback)\b"
+            r"[^.\n]{0,160}\b(?:reduced|mitigated|lowered|prevented|removed|closed)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "capability_change",
+        re.compile(
+            r"\b(?:added|implemented|fixed|hardened|repaired|wired|enabled)\b"
+            r"[^.\n]{0,160}\b(?:tool|runtime|service|gateway|config|workflow|benchmark|check|test|schema)\b",
+            re.IGNORECASE,
+        ),
+    ),
+)
+_OPERATOR_DECISION_SUPPORT_SIGNALS = {
+    "decision",
+    "decisions",
+    "operator_decision_support",
+    "risk_reduction",
+    *_OPERATOR_DECISION_SUPPORT_STRUCTURED_KEYS,
+}
+_VERIFIED_SYSTEM_CHANGE_SIGNALS = {
+    "artifact",
+    "artifact_path",
+    "artifact_paths",
+    "artifacts",
+    "capability_change",
+    "changed_files",
+    "changed_paths",
+    "checks",
+    "ci",
+    "commit",
+    "commit_sha",
+    "commit_shas",
+    "commits",
+    "durable_artifacts",
+    "evidence",
+    "files_changed",
+    "pr_url",
+    "pr_urls",
+    "proof_artifact",
+    "proof_artifacts",
+    "pull_request",
+    "pull_request_url",
+    "pull_requests",
+    "state_transition",
+    "test_results",
+    "tests",
+    "verification",
+}
+_VALUE_CATEGORY_SIGNAL_MAP = {
+    "operator_decision_support": _OPERATOR_DECISION_SUPPORT_SIGNALS,
+    "durable_asset_created": {
+        "artifact",
+        "artifact_path",
+        "artifact_paths",
+        "artifacts",
+        "changed_files",
+        "changed_paths",
+        "checks",
+        "ci",
+        "commit",
+        "commit_sha",
+        "commit_shas",
+        "commits",
+        "durable_artifacts",
+        "durable_asset_created",
+        "evidence",
+        "files_changed",
+        "pr_url",
+        "pr_urls",
+        "proof_artifact",
+        "proof_artifacts",
+        "pull_request",
+        "pull_request_url",
+        "pull_requests",
+        "state_transition",
+        "test_results",
+        "tests",
+        "verification",
+    },
+    "control_ownership_preserved": {
+        "control_ownership_preserved",
+        "control_preservation",
+        "control_preserved",
+        "ownership_preservation",
+        "ownership_preserved",
+    },
+    "incident_risk_reduced": {
+        "incident_risk_reduced",
+        "risk_reduced",
+        "risk_reduction",
+    },
+    "system_capability_changed": {
+        "capability_change",
+        "changed_files",
+        "changed_paths",
+        "files_changed",
+        "state_transition",
+        "system_capability_changed",
+    },
+}
 
 
 SELF_IMPROVEMENT_EVIDENCE_SCHEMA = {
@@ -77,6 +467,33 @@ SELF_IMPROVEMENT_BENCHMARK_SCHEMA = {
             "freshness_hours": {"type": "integer", "minimum": 1},
             "active_stale_hours": {"type": "integer", "minimum": 1},
             "persist": {"type": "boolean"},
+        },
+        "required": [],
+    },
+}
+
+
+SELF_IMPROVEMENT_PIPELINE_SCHEMA = {
+    "name": "self_improvement_pipeline",
+    "description": (
+        "Run the Hermes self-improvement reliability pipeline using the "
+        "repo-local benchmark contract without Linear writeback."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "journal_path": {"type": "string"},
+            "codex_runs_path": {"type": "string"},
+            "ctx_bindings_path": {"type": "string"},
+            "ontology_root": {"type": "string"},
+            "history_path": {"type": "string"},
+            "now": {"type": "string"},
+            "freshness_hours": {"type": "integer", "minimum": 1},
+            "active_stale_hours": {"type": "integer", "minimum": 1},
+            "persist": {"type": "boolean"},
+            "candidate_limit": {"type": "integer", "minimum": 1},
+            "auto_repair_linear": {"type": "boolean"},
+            "auto_close_resolved": {"type": "boolean"},
         },
         "required": [],
     },
@@ -209,6 +626,18 @@ def _iter_ctx_timestamps(payload: Any) -> Iterable[datetime]:
             yield parsed
 
 
+def _ctx_record_status(record: dict[str, Any]) -> str:
+    return str(record.get("status") or "").strip().lower()
+
+
+def _ctx_record_is_active(record: dict[str, Any]) -> bool:
+    if record.get("active") is True:
+        return True
+    if record.get("active") is False:
+        return False
+    return _ctx_record_status(record) in {"active", "running", "in_progress", "queued"}
+
+
 def _latest_timestamp(values: Iterable[datetime]) -> Optional[datetime]:
     return max(values, default=None)
 
@@ -233,6 +662,69 @@ def _summarize_source(
         "age_hours": round(age_hours, 2),
         "latest_timestamp": latest.isoformat(),
     }
+
+
+def _summarize_ctx_bindings(
+    payload: Any,
+    freshness_hours: int,
+    now: datetime,
+) -> dict[str, Any]:
+    if payload is None:
+        summary = _summarize_source("ctx_bindings", None, freshness_hours, now)
+        summary.update(
+            {
+                "record_count": None,
+                "active_count": None,
+                "freshness_required": True,
+                "detail": "ctx bindings evidence unavailable.",
+            }
+        )
+        return summary
+
+    records = list(_iter_ctx_records(payload))
+    active_records = [record for record in records if _ctx_record_is_active(record)]
+    active_latest = _latest_timestamp(
+        timestamp
+        for record in active_records
+        if (
+            timestamp := _record_timestamp(
+                record,
+                "updated_at",
+                "updatedAt",
+                "created_at",
+                "createdAt",
+                "timestamp",
+            )
+        )
+        is not None
+    )
+    latest_record = _latest_timestamp(_iter_ctx_timestamps(payload))
+    active_count = len(active_records)
+    latest = active_latest if active_count else latest_record
+    summary = _summarize_source("ctx_bindings", latest, freshness_hours, now)
+    summary.update(
+        {
+            "record_count": len(records),
+            "active_count": active_count,
+            "inactive_count": len(records) - active_count,
+            "freshness_required": bool(active_count),
+            "active_latest_timestamp": active_latest.isoformat() if active_latest else None,
+            "latest_record_timestamp": latest_record.isoformat() if latest_record else None,
+        }
+    )
+
+    if active_count and active_latest is None:
+        summary["status"] = "degraded"
+        summary["detail"] = "Active ctx bindings do not include freshness timestamps."
+    elif active_count == 0:
+        summary["status"] = "inactive"
+        summary["detail"] = (
+            "No active ctx bindings; retired binding timestamps are informational."
+            if latest is not None
+            else "No ctx bindings recorded; no active ctx sessions require freshness."
+        )
+
+    return summary
 
 
 def _extract_timestamps_from_text(text: str) -> Iterable[datetime]:
@@ -297,6 +789,110 @@ def _iter_ontology_files(root: Path) -> Iterable[Path]:
                 yield path
 
 
+def _split_future_timestamps(
+    timestamps: Iterable[datetime],
+    now: datetime,
+) -> tuple[list[datetime], list[datetime]]:
+    valid: list[datetime] = []
+    future: list[datetime] = []
+    for timestamp in timestamps:
+        if (timestamp - now).total_seconds() > _FUTURE_TIMESTAMP_TOLERANCE_SECONDS:
+            future.append(timestamp)
+        else:
+            valid.append(timestamp)
+    return valid, future
+
+
+def _artifact_summary_from_timestamps(
+    *,
+    name: str,
+    path: Path,
+    timestamps: Iterable[datetime],
+    alerts: Iterable[str],
+    freshness_hours: int,
+    now: datetime,
+) -> dict[str, Any]:
+    valid_timestamps, future_timestamps = _split_future_timestamps(timestamps, now)
+    latest = _latest_timestamp(valid_timestamps)
+    alert_reasons = [str(item).strip() for item in alerts if str(item).strip()]
+    reasons = list(alert_reasons)
+
+    if latest is None:
+        status = "missing"
+        age_hours = None
+        latest_timestamp = None
+        if future_timestamps:
+            reasons.append(f"{name} only has future timestamps")
+    else:
+        age_hours = round(max(0.0, (now - latest).total_seconds() / 3600), 2)
+        latest_timestamp = latest.isoformat()
+        status = "fresh" if age_hours <= freshness_hours else "stale"
+        if status == "stale":
+            reasons.append(f"{name} stale ({age_hours}h)")
+
+    if alert_reasons and status in {"fresh", "stale"}:
+        status = "degraded"
+
+    return {
+        "source": name,
+        "path": str(path),
+        "status": status,
+        "age_hours": age_hours,
+        "latest_timestamp": latest_timestamp,
+        "future_timestamp_count": len(future_timestamps),
+        "ignored_future_timestamps": [
+            timestamp.isoformat() for timestamp in sorted(future_timestamps)[-5:]
+        ],
+        "reasons": reasons,
+    }
+
+
+def _summarize_required_ontology_artifacts(
+    root: Path,
+    freshness_hours: int,
+    now: datetime,
+) -> dict[str, dict[str, Any]]:
+    summaries: dict[str, dict[str, Any]] = {}
+    for name, relative_path in _ONTOLOGY_REQUIRED_ARTIFACTS:
+        path = root / relative_path
+        if not path.exists():
+            summaries[name] = {
+                "source": name,
+                "path": str(path),
+                "status": "missing",
+                "age_hours": None,
+                "latest_timestamp": None,
+                "future_timestamp_count": 0,
+                "ignored_future_timestamps": [],
+                "reasons": [f"{name} missing"],
+            }
+            continue
+        timestamps, alerts = _scan_ontology_file(path)
+        summaries[name] = _artifact_summary_from_timestamps(
+            name=name,
+            path=path,
+            timestamps=timestamps,
+            alerts=alerts,
+            freshness_hours=freshness_hours,
+            now=now,
+        )
+    return summaries
+
+
+def _ontology_external_repair(root: Path, required_artifacts: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    invalid_artifacts = [
+        summary
+        for summary in required_artifacts.values()
+        if str(summary.get("status") or "") in {"stale", "missing", "degraded"}
+    ]
+    return {
+        "required": bool(invalid_artifacts),
+        "repository": str(root),
+        "action": "refresh ontology evolution reporting artifacts",
+        "artifacts": invalid_artifacts,
+    }
+
+
 def _summarize_ontology(root: Path, freshness_hours: int, now: datetime) -> dict[str, Any]:
     if not root.exists():
         return {
@@ -305,6 +901,7 @@ def _summarize_ontology(root: Path, freshness_hours: int, now: datetime) -> dict
             "age_hours": None,
             "reasons": ["ontology root missing"],
             "alerts": [],
+            "required_artifacts": {},
         }
 
     timestamps: list[datetime] = []
@@ -314,14 +911,34 @@ def _summarize_ontology(root: Path, freshness_hours: int, now: datetime) -> dict
         timestamps.extend(file_timestamps)
         alerts.extend(file_alerts)
 
-    latest = _latest_timestamp(timestamps)
+    required_artifacts = _summarize_required_ontology_artifacts(root, freshness_hours, now)
+    required_latest = [
+        parsed
+        for summary in required_artifacts.values()
+        if (parsed := _parse_time(summary.get("latest_timestamp"))) is not None
+    ]
+    invalid_required = [
+        summary
+        for summary in required_artifacts.values()
+        if str(summary.get("status") or "") in {"stale", "missing", "degraded"}
+    ]
+    external_repair = _ontology_external_repair(root, required_artifacts)
+
+    valid_timestamps, future_timestamps = _split_future_timestamps(timestamps, now)
+    latest = _latest_timestamp(required_latest) or _latest_timestamp(valid_timestamps)
     if latest is None:
+        reasons = ["ontology intelligence timestamp missing"]
+        if future_timestamps:
+            reasons.append("ontology intelligence only has future timestamps")
         return {
             "status": "missing",
             "latest_timestamp": None,
             "age_hours": None,
-            "reasons": ["ontology intelligence timestamp missing"],
+            "reasons": reasons,
             "alerts": alerts,
+            "ignored_future_timestamp_count": len(future_timestamps),
+            "required_artifacts": required_artifacts,
+            "external_repair": external_repair,
         }
 
     age_hours = max(0.0, (now - latest).total_seconds() / 3600)
@@ -329,6 +946,14 @@ def _summarize_ontology(root: Path, freshness_hours: int, now: datetime) -> dict
     reasons: list[str] = []
     if status == "stale":
         reasons.append(f"ontology_intelligence stale ({round(age_hours, 2)}h)")
+    for summary in invalid_required:
+        for reason in summary.get("reasons") or [f"{summary.get('source')} {summary.get('status')}"]:
+            text = str(reason).strip()
+            if text and text not in reasons:
+                reasons.append(text)
+    if invalid_required:
+        required_statuses = {str(summary.get("status") or "") for summary in invalid_required}
+        status = "degraded" if required_statuses.intersection({"missing", "degraded"}) else "stale"
     if alerts:
         status = "degraded"
         reasons.extend(alerts)
@@ -338,11 +963,24 @@ def _summarize_ontology(root: Path, freshness_hours: int, now: datetime) -> dict
         "age_hours": round(age_hours, 2),
         "reasons": reasons,
         "alerts": alerts,
+        "ignored_future_timestamp_count": len(future_timestamps),
+        "required_artifacts": required_artifacts,
+        "external_repair": external_repair,
     }
 
 
 def _codex_record_status(record: dict[str, Any]) -> str:
     return str(record.get("status") or "").strip().lower()
+
+
+def _codex_record_is_completed(record: dict[str, Any]) -> bool:
+    status = _codex_record_status(record)
+    if status in {"completed", "complete", "done", "finished", "success", "succeeded"}:
+        return True
+    exit_code = record.get("exit_code")
+    if exit_code == 0 or str(exit_code).strip() == "0":
+        return True
+    return record.get("completed_at") is not None
 
 
 def _codex_record_is_active(record: dict[str, Any]) -> bool:
@@ -393,7 +1031,7 @@ def _find_stale_active_ctx(
 ) -> list[dict[str, Any]]:
     stale: list[dict[str, Any]] = []
     for record in _iter_ctx_records(payload):
-        if not record.get("active"):
+        if not _ctx_record_is_active(record):
             continue
         updated = _record_timestamp(record, "updated_at", "updatedAt", "created_at", "createdAt")
         if updated is None:
@@ -414,7 +1052,7 @@ def _find_stale_active_ctx(
 def _find_planning_contradictions(codex_payload: Any, ctx_payload: Any) -> list[dict[str, Any]]:
     contradictions: list[dict[str, Any]] = []
     for record in _iter_ctx_records(ctx_payload):
-        if not record.get("active"):
+        if not _ctx_record_is_active(record):
             continue
         worktree_path = str(record.get("worktree_path") or "").strip()
         reason = str(record.get("reason") or "").strip().lower()
@@ -466,6 +1104,66 @@ def _find_planning_contradictions(codex_payload: Any, ctx_payload: Any) -> list[
     return contradictions
 
 
+def _build_ctx_remediation(
+    ctx_bindings_path: Path,
+    ctx_summary: dict[str, Any],
+    stale_active_ctx: list[dict[str, Any]],
+    planning_contradictions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    status = str(ctx_summary.get("status") or "")
+    ctx_contradictions = [
+        item
+        for item in planning_contradictions
+        if str(item.get("type") or "").startswith("ctx_")
+    ]
+    required = status in {"missing", "stale", "degraded"} or bool(stale_active_ctx or ctx_contradictions)
+
+    if not required:
+        return {
+            "required": False,
+            "path": str(ctx_bindings_path),
+            "action": "none",
+            "reason": str(
+                ctx_summary.get("detail")
+                or "ctx session-binding evidence is current."
+            ),
+            "active_count": ctx_summary.get("active_count"),
+            "stale_active_count": 0,
+            "contradiction_count": 0,
+        }
+
+    actions: list[str] = []
+    reasons: list[str] = []
+    if status == "missing":
+        actions.append("restore or regenerate ctx session-binding evidence")
+        reasons.append("ctx session-binding evidence is unavailable")
+    elif status == "stale":
+        actions.append("refresh active ctx session bindings or retire sessions that are no longer live")
+        reasons.append(f"ctx session-binding evidence is stale ({ctx_summary.get('age_hours')}h)")
+    elif status == "degraded":
+        actions.append("repair degraded ctx session-binding evidence before selecting new work")
+        reasons.append("ctx session-binding evidence is degraded")
+
+    if stale_active_ctx:
+        actions.append("retire stale active ctx bindings or refresh them from the live ctx runtime")
+        reasons.append(f"{len(stale_active_ctx)} active ctx binding(s) exceed freshness limits")
+    if ctx_contradictions:
+        actions.append("repair ctx binding store contradictions")
+        reasons.append(f"{len(ctx_contradictions)} ctx binding contradiction(s) detected")
+
+    return {
+        "required": True,
+        "path": str(ctx_bindings_path),
+        "action": "; ".join(dict.fromkeys(actions)),
+        "reasons": list(dict.fromkeys(reasons)),
+        "active_count": ctx_summary.get("active_count"),
+        "stale_active_count": len(stale_active_ctx),
+        "stale_active_sessions": stale_active_ctx[:5],
+        "contradiction_count": len(ctx_contradictions),
+        "contradictions": ctx_contradictions[:5],
+    }
+
+
 def _build_provenance_item(tag: str, path: Path, summary: dict[str, Any]) -> dict[str, Any]:
     return {
         "tag": tag,
@@ -507,13 +1205,13 @@ def evaluate_self_improvement_evidence(
 
     journal_latest = _latest_timestamp(_iter_journal_timestamps(journal_payload))
     codex_latest = _latest_timestamp(_iter_codex_timestamps(codex_payload))
-    ctx_latest = _latest_timestamp(_iter_ctx_timestamps(ctx_payload))
+    ctx_summary = _summarize_ctx_bindings(ctx_payload, freshness_hours, current)
     ontology_latest = _parse_time(ontology_summary.get("latest_timestamp"))
 
     sources = {
         "journal_entries": _summarize_source("journal_entries", journal_latest, freshness_hours, current),
         "codex_runs": _summarize_source("codex_runs", codex_latest, freshness_hours, current),
-        "ctx_bindings": _summarize_source("ctx_bindings", ctx_latest, freshness_hours, current),
+        "ctx_bindings": ctx_summary,
         "ontology_intelligence": {
             "source": "ontology_intelligence",
             "status": ontology_summary.get("status"),
@@ -525,10 +1223,26 @@ def evaluate_self_improvement_evidence(
     stale_active_codex = _find_stale_active_codex(codex_payload, current, active_stale_hours)
     stale_active_ctx = _find_stale_active_ctx(ctx_payload, current, active_stale_hours)
     planning_contradictions = _find_planning_contradictions(codex_payload, ctx_payload)
+    ctx_remediation = _build_ctx_remediation(
+        ctx_bindings_path,
+        ctx_summary,
+        stale_active_ctx,
+        planning_contradictions,
+    )
 
+    ctx_effective_latest = (
+        None
+        if ctx_summary.get("status") == "inactive"
+        else _parse_time(ctx_summary.get("latest_timestamp"))
+    )
     latest_timestamps = [
         item
-        for item in (journal_latest, codex_latest, ctx_latest, ontology_latest)
+        for item in (
+            journal_latest,
+            codex_latest,
+            ctx_effective_latest,
+            ontology_latest,
+        )
         if item is not None
     ]
     freshness_spread_hours = None
@@ -594,6 +1308,8 @@ def evaluate_self_improvement_evidence(
         provenance_items[1]["notes"] = f"{len(stale_active_codex)} active run(s) exceed {active_stale_hours}h"
     if stale_active_ctx:
         provenance_items[2]["notes"] = f"{len(stale_active_ctx)} active session(s) exceed {active_stale_hours}h"
+    elif ctx_summary.get("status") == "inactive":
+        provenance_items[2]["notes"] = str(ctx_summary.get("detail") or "ctx inactive")
     if ontology_alerts:
         provenance_items[3]["notes"] = " | ".join(ontology_alerts)
 
@@ -609,6 +1325,7 @@ def evaluate_self_improvement_evidence(
         "warnings": warnings,
         "ontology": ontology_summary,
         "ontology_alerts": ontology_alerts,
+        "ctx_remediation": ctx_remediation,
         "contradictions": contradictions,
         "reasons": reasons,
         "suppression": {
@@ -673,6 +1390,1659 @@ def _load_benchmark_history(path: Path) -> dict[str, Any]:
 def _save_benchmark_history(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_json_write(path, payload)
+
+
+def _benchmark_history_check_snapshot(check_id: str, check: dict[str, Any]) -> dict[str, Any]:
+    snapshot = {
+        "score": check.get("score"),
+        "status": check.get("status"),
+    }
+    if check_id != "leading_indicator_drift":
+        return snapshot
+
+    metrics = check.get("metrics") or {}
+    snapshot["detail"] = check.get("detail")
+    snapshot["triggered_harbingers"] = metrics.get("triggered_harbingers") or []
+    snapshot["harbinger_scorecard"] = metrics.get("harbinger_scorecard") or {}
+    snapshot["recommended_mitigations"] = metrics.get("recommended_mitigations") or []
+    snapshot["execution_throughput_remediation"] = (
+        metrics.get("execution_throughput_remediation") or {}
+    )
+    return snapshot
+
+
+def _normalize_evidence_key(key: Any) -> str:
+    text = str(key or "").strip()
+    text = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", text)
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", text)
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+
+
+def _value_has_content(value: Any) -> bool:
+    if value is None or value is False:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, dict):
+        return any(_value_has_content(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_value_has_content(item) for item in value)
+    return True
+
+
+def _collect_record_text(value: Any, key: str = "") -> list[str]:
+    normalized_key = _normalize_evidence_key(key)
+    if normalized_key in _TEXT_EVIDENCE_EXCLUDED_KEYS:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for child_key, child_value in value.items():
+            parts.extend(_collect_record_text(child_value, str(child_key)))
+        return parts
+    if isinstance(value, list):
+        parts = []
+        for child_value in value:
+            parts.extend(_collect_record_text(child_value, key))
+        return parts
+    return []
+
+
+def _redact_operator_evidence_value(text: str) -> str:
+    redacted = re.sub(
+        r"\b(Bearer\s+)[A-Za-z0-9._~+/=-]{12,}",
+        r"\1[REDACTED]",
+        text,
+        flags=re.IGNORECASE,
+    )
+    redacted = re.sub(
+        r"\b(token|api[_-]?key|password|secret)\s*[:=]\s*[^\s,;]+",
+        r"\1=[REDACTED]",
+        redacted,
+        flags=re.IGNORECASE,
+    )
+    return redacted
+
+
+def _compact_operator_evidence_value(value: Any, *, limit: int = 240) -> Optional[str]:
+    if not _value_has_content(value):
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+    elif isinstance(value, (int, float, bool)):
+        text = str(value)
+    else:
+        try:
+            text = json.dumps(value, ensure_ascii=True, sort_keys=True, default=str)
+        except TypeError:
+            text = str(value)
+    text = text.replace("\\n", " ").replace("\\r", " ").replace("\\t", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return None
+    text = _redact_operator_evidence_value(text)
+    if len(text) > limit:
+        return text[: limit - 3].rstrip() + "..."
+    return text
+
+
+def _dedupe_operator_evidence(items: Iterable[dict[str, str]]) -> list[dict[str, str]]:
+    deduped: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in items:
+        key = (
+            str(item.get("field") or ""),
+            str(item.get("source_key") or ""),
+            str(item.get("value") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
+def _collect_operator_decision_support_evidence(value: Any, key: str = "") -> list[dict[str, str]]:
+    normalized_key = _normalize_evidence_key(key)
+    if normalized_key in _TEXT_EVIDENCE_EXCLUDED_KEYS:
+        return []
+
+    field = _OPERATOR_DECISION_SUPPORT_EVIDENCE_FIELDS.get(normalized_key)
+    if field:
+        compact_value = _compact_operator_evidence_value(value)
+        if compact_value is not None:
+            return [
+                {
+                    "field": field,
+                    "source_key": normalized_key,
+                    "value": compact_value,
+                }
+            ]
+        return []
+
+    if isinstance(value, dict):
+        evidence: list[dict[str, str]] = []
+        for child_key, child_value in value.items():
+            evidence.extend(
+                _collect_operator_decision_support_evidence(child_value, str(child_key))
+            )
+        return _dedupe_operator_evidence(evidence)
+    if isinstance(value, list):
+        evidence = []
+        for child_value in value:
+            evidence.extend(_collect_operator_decision_support_evidence(child_value, key))
+        return _dedupe_operator_evidence(evidence)
+    return []
+
+
+def _operator_decision_support_text_evidence(text: str) -> list[dict[str, str]]:
+    evidence: list[dict[str, str]] = []
+    for label, pattern in _DURABLE_TEXT_PATTERNS:
+        if label != "operator_decision_support":
+            continue
+        match = pattern.search(text)
+        if not match:
+            continue
+        compact_value = _compact_operator_evidence_value(match.group(0))
+        if compact_value is None:
+            continue
+        evidence.append(
+            {
+                "field": "operator_decision_support",
+                "source_key": "text_match",
+                "value": compact_value,
+            }
+        )
+    return _dedupe_operator_evidence(evidence)
+
+
+def _record_has_claim_field(value: Any, key: str = "") -> bool:
+    normalized_key = _normalize_evidence_key(key)
+    if normalized_key in _CLAIM_TEXT_KEYS and _value_has_content(value):
+        return True
+    if normalized_key in _CLAIM_CONTAINER_KEYS and _value_has_content(value):
+        return True
+    if normalized_key in _TEXT_EVIDENCE_EXCLUDED_KEYS:
+        return False
+    if isinstance(value, dict):
+        return any(_record_has_claim_field(child_value, str(child_key)) for child_key, child_value in value.items())
+    if isinstance(value, list):
+        return any(_record_has_claim_field(child_value, key) for child_value in value)
+    return False
+
+
+def _structured_durable_signals(value: Any, key: str = "") -> set[str]:
+    normalized_key = _normalize_evidence_key(key)
+    signals: set[str] = set()
+    if normalized_key in _DURABLE_EVIDENCE_KEYS and _value_has_content(value):
+        signals.add(normalized_key)
+    if isinstance(value, dict):
+        for child_key, child_value in value.items():
+            signals.update(_structured_durable_signals(child_value, str(child_key)))
+    elif isinstance(value, list):
+        for child_value in value:
+            signals.update(_structured_durable_signals(child_value, key))
+    return signals
+
+
+def _text_durable_signals(text: str) -> set[str]:
+    return {label for label, pattern in _DURABLE_TEXT_PATTERNS if pattern.search(text)}
+
+
+def _status_only_markers(text: str) -> set[str]:
+    return {pattern.pattern for pattern in _STATUS_ONLY_PATTERNS if pattern.search(text)}
+
+
+def _value_categories_from_signals(signals: set[str]) -> list[str]:
+    categories: list[str] = []
+    for category, _label in _ALLOWED_VALUE_CATEGORIES:
+        if signals.intersection(_VALUE_CATEGORY_SIGNAL_MAP.get(category, set())):
+            categories.append(category)
+    return categories
+
+
+def _value_category_labels(categories: Iterable[str]) -> list[str]:
+    return [
+        _ALLOWED_VALUE_CATEGORY_LABELS[category]
+        for category in categories
+        if category in _ALLOWED_VALUE_CATEGORY_LABELS
+    ]
+
+
+def _allowed_value_category_guidance() -> list[dict[str, str]]:
+    return [
+        {
+            "category": category,
+            "label": label,
+            "remediation": _VALUE_CATEGORY_REMEDIATION[category],
+        }
+        for category, label in _ALLOWED_VALUE_CATEGORIES
+    ]
+
+
+def _make_work_remediation(categories: list[str]) -> Optional[str]:
+    if categories:
+        return None
+    guidance = "; ".join(
+        f"{label}: {_VALUE_CATEGORY_REMEDIATION[category]}"
+        for category, label in _ALLOWED_VALUE_CATEGORIES
+    )
+    return f"Add evidence for at least one allowed value category: {guidance}."
+
+
+def _record_claimed_timestamp(record: dict[str, Any]) -> Optional[datetime]:
+    return _record_timestamp(
+        record,
+        "completed_at",
+        "updated_at",
+        "updatedAt",
+        "occurredAt",
+        "occurred_at",
+        "created_at",
+        "createdAt",
+        "started_at",
+        "process_started_at",
+        "timestamp",
+        "date",
+    )
+
+
+def _record_claims_work(record: dict[str, Any], text: str) -> bool:
+    if _record_has_claim_field(record):
+        return True
+    if record.get("active") is True and _status_only_markers(text):
+        return True
+    status = str(record.get("status") or "").strip().lower()
+    if status in {"active", "in_progress", "running", "queued"} and _status_only_markers(text):
+        return True
+    return False
+
+
+def _iter_recent_claimed_work_items(
+    *,
+    journal_payload: Any,
+    codex_payload: Any,
+    ctx_payload: Any,
+    now: datetime,
+    freshness_hours: int,
+) -> Iterable[dict[str, Any]]:
+    source_records = (
+        ("journal_entries", _iter_records(journal_payload, "entries")),
+        ("codex_runs", _iter_codex_records(codex_payload)),
+        ("ctx_bindings", _iter_ctx_records(ctx_payload)),
+    )
+    for source, records in source_records:
+        for record in records:
+            timestamp = _record_claimed_timestamp(record)
+            if timestamp is not None:
+                age_hours = max(0.0, (now - timestamp).total_seconds() / 3600)
+                if age_hours > freshness_hours:
+                    continue
+            text = "\n".join(_collect_record_text(record))
+            if not _record_claims_work(record, text):
+                continue
+            yield {
+                "source": source,
+                "id": (
+                    record.get("id")
+                    or record.get("run_id")
+                    or record.get("session_id")
+                    or record.get("external_key")
+                ),
+                "timestamp": timestamp.isoformat() if timestamp is not None else None,
+                "record": record,
+                "text": text,
+            }
+
+
+def _recent_record_timestamp(
+    record: dict[str, Any],
+    now: datetime,
+    freshness_hours: int,
+) -> Optional[datetime]:
+    timestamp = _record_claimed_timestamp(record)
+    if timestamp is None:
+        return None
+    age_hours = max(0.0, (now - timestamp).total_seconds() / 3600)
+    return timestamp if age_hours <= freshness_hours else None
+
+
+def _codex_record_is_completed_delivery(record: dict[str, Any]) -> bool:
+    status = _codex_record_status(record)
+    if status in {"completed", "complete", "done", "success", "succeeded"}:
+        return True
+    if record.get("completed_at") is not None:
+        return True
+    exit_code = record.get("exit_code")
+    if exit_code == 0:
+        return True
+    if isinstance(exit_code, str) and exit_code.strip() == "0":
+        return True
+    return False
+
+
+def _journal_entry_claims_work(record: dict[str, Any]) -> bool:
+    text = "\n".join(_collect_record_text(record))
+    return _record_claims_work(record, text)
+
+
+def _build_execution_throughput_signal(
+    *,
+    journal_payload: Any,
+    codex_payload: Any,
+    ctx_payload: Any,
+    now: datetime,
+    freshness_hours: int,
+) -> dict[str, Any]:
+    recent_codex_deliveries = [
+        {
+            "run_id": record.get("run_id") or record.get("id"),
+            "status": record.get("status"),
+            "timestamp": timestamp.isoformat(),
+        }
+        for record in _iter_codex_records(codex_payload)
+        if _codex_record_is_completed_delivery(record)
+        if (timestamp := _recent_record_timestamp(record, now, freshness_hours)) is not None
+    ]
+    recent_journal_work = [
+        {
+            "id": record.get("id") or record.get("external_key"),
+            "timestamp": timestamp.isoformat(),
+        }
+        for record in _iter_records(journal_payload, "entries")
+        if _journal_entry_claims_work(record)
+        if (timestamp := _recent_record_timestamp(record, now, freshness_hours)) is not None
+    ]
+    ctx_summary = _summarize_ctx_bindings(ctx_payload, freshness_hours, now)
+    codex_count = len(recent_codex_deliveries)
+    journal_count = len(recent_journal_work)
+    journal_ratio = round(journal_count / codex_count, 4) if codex_count else 1.0
+    journal_gap = (
+        codex_count >= _THROUGHPUT_CODEX_COMPLETION_MIN
+        and journal_ratio < _THROUGHPUT_JOURNAL_RATIO_MIN
+    )
+    ctx_status = str(ctx_summary.get("status") or "")
+    ctx_active_count = int(ctx_summary.get("active_count") or 0)
+    ctx_inactive_informational = ctx_status == "inactive" and ctx_active_count == 0
+    actions: list[str] = []
+    if journal_gap:
+        actions = [
+            "backfill journal entries for completed Codex deliveries that lack follow-through evidence",
+            "record changed files, tests, PR or commit, and operator decision support for the next completed delivery",
+            "select completed Codex deliveries without journal follow-through before starting more raw issue volume",
+        ]
+
+    return {
+        "state": "codex_delivery_journal_gap" if journal_gap else "balanced",
+        "remediation_required": journal_gap,
+        "blocking_surface": "journal_follow_through" if journal_gap else "none",
+        "recent_completed_codex_count": codex_count,
+        "recent_journal_work_item_count": journal_count,
+        "journal_to_codex_ratio": journal_ratio,
+        "journal_ratio_threshold": _THROUGHPUT_JOURNAL_RATIO_MIN,
+        "codex_completion_threshold": _THROUGHPUT_CODEX_COMPLETION_MIN,
+        "sample_codex_deliveries": recent_codex_deliveries[:5],
+        "sample_journal_work_items": recent_journal_work[:5],
+        "actions": actions,
+        "ctx_status": ctx_status,
+        "ctx_active_count": ctx_active_count,
+        "ctx_inactivity_informational": ctx_inactive_informational,
+        "ctx_inactivity_blocking": False,
+    }
+
+
+def _timestamp_in_window(timestamp: Optional[datetime], now: datetime, window_hours: int) -> bool:
+    if timestamp is None:
+        return False
+    age_hours = (now - timestamp).total_seconds() / 3600
+    return 0 <= age_hours <= window_hours
+
+
+def _iter_recent_journal_records(
+    payload: Any,
+    now: datetime,
+    window_hours: int,
+) -> Iterable[tuple[dict[str, Any], datetime]]:
+    for record in _iter_records(payload, "entries"):
+        timestamp = _record_claimed_timestamp(record)
+        if _timestamp_in_window(timestamp, now, window_hours):
+            yield record, timestamp
+
+
+def _iter_recent_completed_codex_records(
+    payload: Any,
+    now: datetime,
+    window_hours: int,
+) -> Iterable[tuple[dict[str, Any], datetime]]:
+    for record in _iter_codex_records(payload):
+        if not _codex_record_is_completed(record):
+            continue
+        timestamp = _record_timestamp(
+            record,
+            "completed_at",
+            "updated_at",
+            "started_at",
+            "process_started_at",
+            "created_at",
+            "timestamp",
+        )
+        if _timestamp_in_window(timestamp, now, window_hours):
+            yield record, timestamp
+
+
+def _recent_record_example(record: dict[str, Any], timestamp: datetime) -> dict[str, Any]:
+    return {
+        "id": (
+            record.get("id")
+            or record.get("run_id")
+            or record.get("session_id")
+            or record.get("external_key")
+        ),
+        "timestamp": timestamp.isoformat(),
+        "status": record.get("status"),
+    }
+
+
+def _execution_loop_next_action(
+    *,
+    completed_codex_count: int,
+    active_ctx_count: int,
+    journal_count: int,
+    journal_follow_through_rate: float,
+) -> str:
+    _ = active_ctx_count
+    if completed_codex_count == 0:
+        return (
+            "Complete one scoped self-improvement task with local Codex and add journal "
+            "evidence."
+        )
+    if journal_count == 0:
+        return "Add journal evidence for recent completed Codex deliveries before launching more work."
+    if (
+        completed_codex_count >= _EXECUTION_LOOP_MANY_COMPLETED_THRESHOLD
+        and journal_follow_through_rate < _EXECUTION_LOOP_MIN_JOURNAL_FOLLOW_THROUGH_RATE
+    ):
+        return "Backfill journal evidence for recent completed Codex deliveries before launching more work."
+    return "Keep converting self-improvement work into completed local Codex runs and journal each delivery."
+
+
+def _evaluate_execution_loop_check(
+    *,
+    journal_path: Path,
+    codex_runs_path: Path,
+    ctx_bindings_path: Path,
+    now: datetime,
+) -> dict[str, Any]:
+    journal_payload = _load_json(journal_path)
+    codex_payload = _load_json(codex_runs_path)
+    ctx_payload = _load_json(ctx_bindings_path)
+    window_hours = _EXECUTION_LOOP_WINDOW_DAYS * 24
+
+    recent_journal = list(_iter_recent_journal_records(journal_payload, now, window_hours))
+    recent_completed_codex = list(
+        _iter_recent_completed_codex_records(codex_payload, now, window_hours)
+    )
+    ctx_records = list(_iter_ctx_records(ctx_payload))
+    active_ctx_records = [record for record in ctx_records if _ctx_record_is_active(record)]
+
+    completed_codex_count = len(recent_completed_codex)
+    journal_count = len(recent_journal)
+    active_ctx_count = len(active_ctx_records)
+    journal_follow_through_rate = (
+        round(journal_count / completed_codex_count, 4)
+        if completed_codex_count
+        else 1.0
+    )
+    latest_completed_at = max(
+        (timestamp for _record, timestamp in recent_completed_codex),
+        default=None,
+    )
+    latest_journal_at = max(
+        (timestamp for _record, timestamp in recent_journal),
+        default=None,
+    )
+    latest_journal_lag_hours = None
+    if latest_completed_at is not None and latest_journal_at is not None:
+        latest_journal_lag_hours = round(
+            (latest_journal_at - latest_completed_at).total_seconds() / 3600,
+            2,
+        )
+
+    sparse_journal_follow_through = (
+        completed_codex_count >= _EXECUTION_LOOP_MANY_COMPLETED_THRESHOLD
+        and journal_follow_through_rate < _EXECUTION_LOOP_MIN_JOURNAL_FOLLOW_THROUGH_RATE
+    )
+    missing_journal_follow_through = completed_codex_count > 0 and journal_count == 0
+    no_completed_codex = completed_codex_count == 0
+    ctx_inactivity_informational = active_ctx_count == 0
+    ctx_state = "active" if active_ctx_count else "inactive_informational"
+    next_action = _execution_loop_next_action(
+        completed_codex_count=completed_codex_count,
+        active_ctx_count=active_ctx_count,
+        journal_count=journal_count,
+        journal_follow_through_rate=journal_follow_through_rate,
+    )
+
+    if missing_journal_follow_through:
+        score = 0.55
+        detail = "Completed Codex deliveries lack journal follow-through."
+    elif sparse_journal_follow_through:
+        score = 0.7
+        detail = "Completed Codex delivery volume has sparse journal follow-through."
+    elif no_completed_codex:
+        score = 0.6
+        detail = "No completed local Codex deliveries were recorded in the throughput window."
+    else:
+        score = 1.0
+        detail = "Execution loop is converting local Codex deliveries with journal evidence."
+        if ctx_inactivity_informational:
+            detail += " Inactive ctx is informational on this host."
+
+    return _build_benchmark_item(
+        "execution_loop",
+        "Execution loop",
+        score=score,
+        weight=0,
+        detail=detail,
+        critical=False,
+        metrics={
+            "window_days": _EXECUTION_LOOP_WINDOW_DAYS,
+            "completed_codex_runs_14d": completed_codex_count,
+            "active_ctx_binding_count": active_ctx_count,
+            "journal_entries_14d": journal_count,
+            "journal_follow_through_rate": journal_follow_through_rate,
+            "minimum_journal_follow_through_rate": (
+                _EXECUTION_LOOP_MIN_JOURNAL_FOLLOW_THROUGH_RATE
+            ),
+            "many_completed_codex_threshold": _EXECUTION_LOOP_MANY_COMPLETED_THRESHOLD,
+            "ctx_binding_state": ctx_state,
+            "ctx_inactivity_informational": ctx_inactivity_informational,
+            "ctx_inactivity_blocking": False,
+            "latest_completed_codex_at": (
+                latest_completed_at.isoformat() if latest_completed_at else None
+            ),
+            "latest_journal_entry_at": (
+                latest_journal_at.isoformat() if latest_journal_at else None
+            ),
+            "latest_journal_lag_hours": latest_journal_lag_hours,
+            "missing_journal_follow_through": missing_journal_follow_through,
+            "sparse_journal_follow_through": sparse_journal_follow_through,
+            "next_throughput_action": next_action,
+            "completed_codex_examples": [
+                _recent_record_example(record, timestamp)
+                for record, timestamp in recent_completed_codex[:5]
+            ],
+            "journal_examples": [
+                _recent_record_example(record, timestamp)
+                for record, timestamp in recent_journal[:5]
+            ],
+        },
+    )
+
+
+def _assess_make_work_item(item: dict[str, Any]) -> dict[str, Any]:
+    record = item.get("record") or {}
+    text = str(item.get("text") or "")
+    durable_signals = _structured_durable_signals(record)
+    durable_signals.update(_text_durable_signals(text))
+    status_markers = _status_only_markers(text)
+    value_categories = _value_categories_from_signals(durable_signals)
+    category_labels = _value_category_labels(value_categories)
+    durable = bool(value_categories)
+    issue = None
+    if not durable and status_markers:
+        issue = "status_language_without_value_category_evidence"
+    elif not durable:
+        issue = "claimed_work_without_value_category_evidence"
+
+    return {
+        "source": item.get("source"),
+        "id": item.get("id"),
+        "timestamp": item.get("timestamp"),
+        "durable": durable,
+        "signals": sorted(durable_signals),
+        "value_categories": value_categories,
+        "value_category_labels": category_labels,
+        "status_language": bool(status_markers),
+        "issue": issue,
+        "remediation": _make_work_remediation(value_categories),
+    }
+
+
+def _assess_operator_value_item(item: dict[str, Any]) -> dict[str, Any]:
+    make_work = _assess_make_work_item(item)
+    record = item.get("record") or {}
+    text = str(item.get("text") or "")
+    durable_signals = set(make_work.get("signals") or [])
+    decision_support_signals = durable_signals.intersection(_OPERATOR_DECISION_SUPPORT_SIGNALS)
+    verified_change_signals = durable_signals.intersection(_VERIFIED_SYSTEM_CHANGE_SIGNALS)
+    operator_decision_support_evidence = _collect_operator_decision_support_evidence(record)
+    if decision_support_signals and not operator_decision_support_evidence:
+        operator_decision_support_evidence = _operator_decision_support_text_evidence(text)
+    operator_decision_support_evidence = _dedupe_operator_evidence(
+        operator_decision_support_evidence
+    )[:8]
+
+    item_score = 0.0
+    issue = make_work.get("issue")
+    if make_work["durable"]:
+        if decision_support_signals and verified_change_signals:
+            item_score = 1.0
+        elif decision_support_signals:
+            item_score = 0.65
+            issue = "decision_support_without_verified_system_change"
+        elif verified_change_signals:
+            item_score = 0.45
+            issue = "verified_change_without_operator_decision_support"
+        else:
+            item_score = 0.25
+            issue = "durable_evidence_without_operator_value_signal"
+
+    return {
+        "source": make_work.get("source"),
+        "id": make_work.get("id"),
+        "timestamp": make_work.get("timestamp"),
+        "score": item_score,
+        "durable": make_work["durable"],
+        "signals": sorted(durable_signals),
+        "operator_decision_support": bool(decision_support_signals),
+        "operator_decision_support_signals": sorted(decision_support_signals),
+        "operator_decision_support_evidence": operator_decision_support_evidence,
+        "verified_system_change": bool(verified_change_signals),
+        "verified_system_change_signals": sorted(verified_change_signals),
+        "aligned": bool(decision_support_signals and verified_change_signals),
+        "issue": issue,
+    }
+
+
+def _evaluate_anti_make_work_check(
+    *,
+    journal_path: Path,
+    codex_runs_path: Path,
+    ctx_bindings_path: Path,
+    now: datetime,
+    freshness_hours: int,
+) -> dict[str, Any]:
+    journal_payload = _load_json(journal_path)
+    codex_payload = _load_json(codex_runs_path)
+    ctx_payload = _load_json(ctx_bindings_path)
+    assessments = [
+        _assess_make_work_item(item)
+        for item in _iter_recent_claimed_work_items(
+            journal_payload=journal_payload,
+            codex_payload=codex_payload,
+            ctx_payload=ctx_payload,
+            now=now,
+            freshness_hours=freshness_hours,
+        )
+    ]
+    assessed_count = len(assessments)
+    durable_count = sum(1 for item in assessments if item["durable"])
+    shallow_items = [item for item in assessments if not item["durable"]]
+    status_only_count = sum(1 for item in shallow_items if item["status_language"])
+    value_category_counts = {
+        category: sum(
+            1
+            for item in assessments
+            if category in set(item.get("value_categories") or [])
+        )
+        for category, _label in _ALLOWED_VALUE_CATEGORIES
+    }
+
+    if assessed_count == 0:
+        score = 1.0
+        detail = "No claimed work items required anti-make-work evidence."
+    elif not shallow_items:
+        score = 1.0
+        passing_labels = [
+            label
+            for category, label in _ALLOWED_VALUE_CATEGORIES
+            if value_category_counts.get(category)
+        ]
+        detail = "Claimed work includes allowed value-category evidence: " + ", ".join(passing_labels)
+    else:
+        score = durable_count / assessed_count
+        if status_only_count:
+            score = min(score, 0.55 if durable_count else 0.0)
+        else:
+            score = min(score, 0.4)
+        examples = [
+            f"{item.get('source')}:{item.get('id') or 'unknown'}"
+            for item in shallow_items[:3]
+        ]
+        allowed_labels = ", ".join(label for _category, label in _ALLOWED_VALUE_CATEGORIES)
+        detail = (
+            "Claimed work lacks allowed value-category evidence "
+            f"({allowed_labels}): "
+            + ", ".join(examples)
+            + ". Remediation: add category evidence to each shallow claimed-work record."
+        )
+
+    return _build_benchmark_item(
+        "anti_make_work_check",
+        "Anti make-work check",
+        score=score,
+        weight=25,
+        detail=detail,
+        critical=True,
+        metrics={
+            "assessed_work_item_count": assessed_count,
+            "durable_evidence_count": durable_count,
+            "shallow_work_item_count": len(shallow_items),
+            "status_language_only_count": status_only_count,
+            "allowed_value_categories": _allowed_value_category_guidance(),
+            "value_category_counts": value_category_counts,
+            "durable_examples": [item for item in assessments if item["durable"]][:5],
+            "shallow_examples": shallow_items[:5],
+        },
+    )
+
+
+def _operator_value_example(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source": item.get("source"),
+        "id": item.get("id"),
+        "timestamp": item.get("timestamp"),
+        "score": item.get("score"),
+        "issue": item.get("issue"),
+        "aligned": item.get("aligned"),
+        "verified_system_change": item.get("verified_system_change"),
+        "verified_system_change_signals": item.get("verified_system_change_signals") or [],
+        "operator_decision_support_signals": item.get("operator_decision_support_signals") or [],
+        "evidence": item.get("operator_decision_support_evidence") or [],
+    }
+
+
+def _evaluate_operator_value_alignment_check(
+    *,
+    journal_path: Path,
+    codex_runs_path: Path,
+    ctx_bindings_path: Path,
+    now: datetime,
+    freshness_hours: int,
+) -> dict[str, Any]:
+    journal_payload = _load_json(journal_path)
+    codex_payload = _load_json(codex_runs_path)
+    ctx_payload = _load_json(ctx_bindings_path)
+    execution_throughput = _build_execution_throughput_signal(
+        journal_payload=journal_payload,
+        codex_payload=codex_payload,
+        ctx_payload=ctx_payload,
+        now=now,
+        freshness_hours=freshness_hours,
+    )
+    assessments = [
+        _assess_operator_value_item(item)
+        for item in _iter_recent_claimed_work_items(
+            journal_payload=journal_payload,
+            codex_payload=codex_payload,
+            ctx_payload=ctx_payload,
+            now=now,
+            freshness_hours=freshness_hours,
+        )
+    ]
+
+    assessed_count = len(assessments)
+    durable_count = sum(1 for item in assessments if item["durable"])
+    decision_support_count = sum(1 for item in assessments if item["operator_decision_support"])
+    verified_change_count = sum(1 for item in assessments if item["verified_system_change"])
+    aligned_count = sum(1 for item in assessments if item["aligned"])
+    issue_items = [item for item in assessments if item.get("issue")]
+    decision_support_examples = [
+        _operator_value_example(item)
+        for item in assessments
+        if item["operator_decision_support"]
+    ][:5]
+    missing_decision_support_examples = [
+        _operator_value_example(item)
+        for item in assessments
+        if item["verified_system_change"] and not item["operator_decision_support"]
+    ][:5]
+    decision_support_fields = sorted(
+        {
+            evidence.get("field")
+            for item in decision_support_examples
+            for evidence in item.get("evidence", [])
+            if evidence.get("field")
+        }
+    )
+    decision_support_evidence_count = sum(
+        len(item.get("evidence") or [])
+        for item in decision_support_examples
+    )
+
+    if assessed_count == 0:
+        score = 1.0
+        detail = "No claimed work items required operator-value assessment."
+    else:
+        score = sum(float(item["score"]) for item in assessments) / assessed_count
+        if verified_change_count and not decision_support_count:
+            score = min(score, 0.55)
+        if assessed_count >= 3 and not aligned_count:
+            score = min(score, 0.55)
+
+        if aligned_count == assessed_count:
+            detail = "Claimed work pairs operator decision support with verified system change."
+        elif not decision_support_count:
+            detail = "Claimed work shows throughput, but lacks operator decision support."
+        elif not verified_change_count:
+            detail = "Claimed work supports operator decisions, but lacks verified system change."
+        else:
+            detail = "Operator-value evidence is incomplete across claimed work."
+        if execution_throughput.get("remediation_required"):
+            detail += (
+                " Completed Codex deliveries outpace journal follow-through; "
+                "treat journal evidence as the execution-loop bottleneck."
+            )
+        if decision_support_fields:
+            detail += (
+                " Decision-support evidence fields: "
+                + ", ".join(decision_support_fields)
+                + "."
+            )
+
+    return _build_benchmark_item(
+        "operator_value_alignment",
+        "Operator-value alignment",
+        score=score,
+        weight=30,
+        detail=detail,
+        critical=True,
+        metrics={
+            "assessed_work_item_count": assessed_count,
+            "durable_evidence_count": durable_count,
+            "operator_decision_support_count": decision_support_count,
+            "operator_decision_support_evidence_count": decision_support_evidence_count,
+            "operator_decision_support_fields": decision_support_fields,
+            "verified_system_change_count": verified_change_count,
+            "aligned_work_item_count": aligned_count,
+            "operator_decision_support_rate": (
+                round(decision_support_count / assessed_count, 4)
+                if assessed_count
+                else 1.0
+            ),
+            "verified_system_change_rate": (
+                round(verified_change_count / assessed_count, 4)
+                if assessed_count
+                else 1.0
+            ),
+            "aligned_work_rate": (
+                round(aligned_count / assessed_count, 4)
+                if assessed_count
+                else 1.0
+            ),
+            "quantity_guardrail_basis": "average_evidence_quality_not_item_count",
+            "execution_throughput": execution_throughput,
+            "issue_examples": issue_items[:5],
+            "aligned_examples": [item for item in assessments if item["aligned"]][:5],
+            "operator_decision_support_examples": decision_support_examples,
+            "missing_operator_decision_support_examples": missing_decision_support_examples,
+        },
+    )
+
+
+def _weighted_project_score(checks: dict[str, dict[str, Any]]) -> float:
+    total_weight = sum(max(0, int(check.get("weight") or 0)) for check in checks.values())
+    if total_weight <= 0:
+        return 0.0
+    weighted_score = sum(
+        float(check.get("score") or 0.0) * max(0, int(check.get("weight") or 0))
+        for check in checks.values()
+    )
+    return round((weighted_score / total_weight) * 100, 2)
+
+
+def _coerce_score(value: Any) -> Optional[float]:
+    if isinstance(value, dict):
+        value = value.get("score")
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _iter_benchmark_history_entries(history: dict[str, Any]) -> Iterable[dict[str, Any]]:
+    for key in ("evaluations", "runs"):
+        entries = history.get(key)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, dict):
+                yield entry
+
+
+def _history_check_scores(history: dict[str, Any], check_id: str) -> list[float]:
+    scores: list[float] = []
+    for entry in _iter_benchmark_history_entries(history):
+        checks = entry.get("checks")
+        if not isinstance(checks, dict):
+            continue
+        score = _coerce_score(checks.get(check_id))
+        if score is not None:
+            scores.append(score)
+    return scores
+
+
+def _latest_history_project_score(history: dict[str, Any]) -> Optional[float]:
+    for entry in reversed(list(_iter_benchmark_history_entries(history))):
+        score = _coerce_score(entry.get("project_score"))
+        if score is None:
+            score = _coerce_score(entry.get("score"))
+        if score is not None:
+            return score
+    return None
+
+
+def _score_direction(current: float, previous: Optional[float], *, threshold: float = 0.01) -> str:
+    if previous is None:
+        return "stable"
+    delta = current - previous
+    if delta > threshold:
+        return "positive"
+    if delta < -threshold:
+        return "negative"
+    return "stable"
+
+
+def _rounded_float(value: Any, digits: int = 4) -> Optional[float]:
+    try:
+        return round(float(value), digits)
+    except (TypeError, ValueError):
+        return None
+
+
+def _population_stddev(values: list[float]) -> float:
+    if len(values) < 2:
+        return 0.0
+    mean = sum(values) / len(values)
+    return (sum((value - mean) ** 2 for value in values) / len(values)) ** 0.5
+
+
+def _detect_stabilization_hold(scores: list[float]) -> dict[str, Any]:
+    hold_window = 3
+    delta_tolerance = 0.001
+    range_tolerance = 0.005
+    min_recovery_gap = 0.05
+
+    recent_scores = scores[-hold_window:] if len(scores) >= hold_window else list(scores)
+    recent_deltas = [
+        recent_scores[idx] - recent_scores[idx - 1]
+        for idx in range(1, len(recent_scores))
+    ]
+    prior_scores = scores[:-hold_window]
+    prior_peak = max(prior_scores) if prior_scores else None
+    current_score = scores[-1] if scores else None
+    recovery_gap = (
+        prior_peak - current_score
+        if prior_peak is not None and current_score is not None
+        else 0.0
+    )
+    recent_range = max(recent_scores) - min(recent_scores) if recent_scores else 0.0
+    low_variance_hold = (
+        len(recent_scores) == hold_window
+        and recent_range <= range_tolerance
+        and len(recent_deltas) == hold_window - 1
+        and all(abs(delta) <= delta_tolerance for delta in recent_deltas)
+    )
+    active = (
+        len(scores) >= 6
+        and current_score is not None
+        and _check_status(current_score) != "pass"
+        and recovery_gap >= min_recovery_gap
+        and low_variance_hold
+    )
+    recovered = (
+        len(scores) >= 6
+        and current_score is not None
+        and _check_status(current_score) == "pass"
+        and low_variance_hold
+    )
+    state = "none"
+    if active:
+        state = "stabilization_hold"
+    elif recovered:
+        state = "recovered_low_variance"
+
+    return {
+        "active": active,
+        "recovered": recovered,
+        "settled": active or recovered,
+        "state": state,
+        "sample_count": len(scores),
+        "hold_window": hold_window,
+        "recent_scores": [round(score, 4) for score in recent_scores],
+        "recent_deltas": [round(delta, 4) for delta in recent_deltas],
+        "prior_peak": _rounded_float(prior_peak),
+        "current_score": _rounded_float(current_score),
+        "recovery_gap": round(recovery_gap, 4),
+        "recent_range": round(recent_range, 4),
+        "delta_tolerance": delta_tolerance,
+        "range_tolerance": range_tolerance,
+        "mitigation": (
+            "Hold the operator-value guardrail steady instead of escalating inactive drift."
+            if active
+            else ""
+        ),
+        "next_action": (
+            "Require recovery in operator-value evidence before treating the plateau as resolved."
+            if active
+            else ""
+        ),
+    }
+
+
+def _coerce_check_status(value: Any) -> str:
+    score = _coerce_score(value)
+    if isinstance(value, dict):
+        status = str(value.get("status") or "").strip().lower()
+        if status:
+            return status
+    if score is not None:
+        return _check_status(score)
+    return "unknown"
+
+
+def _normalize_benchmark_check(value: Any) -> Optional[dict[str, Any]]:
+    score = _coerce_score(value)
+    if score is None:
+        return None
+    return {"score": round(score, 4), "status": _coerce_check_status(value)}
+
+
+def _benchmark_indicator_series(
+    history: dict[str, Any],
+    current_checks: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    series: list[dict[str, Any]] = []
+    for entry in _iter_benchmark_history_entries(history):
+        checks = entry.get("checks")
+        if not isinstance(checks, dict):
+            continue
+        normalized_checks = {
+            check_id: normalized
+            for check_id in _LEADING_INDICATOR_CHECK_IDS
+            if (normalized := _normalize_benchmark_check(checks.get(check_id))) is not None
+        }
+        if not normalized_checks:
+            continue
+        series.append(
+            {
+                "source": "history",
+                "generated_at": entry.get("generated_at") or entry.get("evaluated_at"),
+                "checks": normalized_checks,
+            }
+        )
+
+    normalized_current = {
+        check_id: normalized
+        for check_id in _LEADING_INDICATOR_CHECK_IDS
+        if (normalized := _normalize_benchmark_check(current_checks.get(check_id))) is not None
+    }
+    if normalized_current:
+        series.append({"source": "current", "generated_at": None, "checks": normalized_current})
+    return series
+
+
+def _check_score_series(series: list[dict[str, Any]], check_id: str) -> list[float]:
+    scores: list[float] = []
+    for entry in series:
+        check = (entry.get("checks") or {}).get(check_id)
+        score = _coerce_score(check)
+        if score is not None:
+            scores.append(score)
+    return scores
+
+
+def _check_status_series(series: list[dict[str, Any]], check_id: str) -> list[str]:
+    statuses: list[str] = []
+    for entry in series:
+        check = (entry.get("checks") or {}).get(check_id)
+        if check is None:
+            continue
+        status = _coerce_check_status(check)
+        if status != "unknown":
+            statuses.append(status)
+    return statuses
+
+
+def _harbinger_payload(
+    *,
+    triggered: bool,
+    evidence: dict[str, Any],
+    mitigation: str,
+    next_action: str,
+) -> dict[str, Any]:
+    return {
+        "triggered": triggered,
+        "severity": "fail" if triggered else "none",
+        "evidence": evidence,
+        "mitigation": mitigation,
+        "next_action": next_action,
+    }
+
+
+def _compact_harbinger_metric(value: Any) -> str:
+    if isinstance(value, float):
+        return str(round(value, 4))
+    if isinstance(value, list):
+        return "[" + ", ".join(_compact_harbinger_metric(item) for item in value) + "]"
+    if isinstance(value, dict):
+        parts = [
+            f"{key}: {_compact_harbinger_metric(value[key])}"
+            for key in sorted(value)
+        ]
+        return "{" + ", ".join(parts) + "}"
+    if value is None:
+        return "None"
+    return str(value)
+
+
+def _harbinger_evidence_summary(harbinger: str, evidence: dict[str, Any]) -> str:
+    fields = _HARBINGER_EVIDENCE_FIELDS.get(harbinger, tuple(evidence.keys()))
+    parts = [
+        f"{field}={_compact_harbinger_metric(evidence[field])}"
+        for field in fields
+        if field in evidence
+    ]
+    return "; ".join(parts)
+
+
+def _annotate_harbinger_payload(
+    harbinger: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    annotated = dict(payload)
+    evidence = annotated.get("evidence") if isinstance(annotated.get("evidence"), dict) else {}
+    annotated["harbinger"] = harbinger
+    annotated["evidence_summary"] = _harbinger_evidence_summary(harbinger, evidence)
+    return annotated
+
+
+def _leading_indicator_mitigation_items(
+    triggered_harbingers: Iterable[str],
+    scorecard: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for harbinger in triggered_harbingers:
+        card = scorecard[harbinger]
+        items.append(
+            {
+                "harbinger": harbinger,
+                "evidence_summary": card["evidence_summary"],
+                "mitigation": card["mitigation"],
+                "next_action": card["next_action"],
+                "evidence": card["evidence"],
+            }
+        )
+    return items
+
+
+def _detect_critical_slowing_down(
+    scores: list[float],
+    stabilization_hold: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    stabilization_hold = stabilization_hold or _detect_stabilization_hold(scores)
+    recent_scores = [round(score, 4) for score in scores[-5:]]
+    prior_peak = max(scores[:-1]) if len(scores) > 1 else (scores[-1] if scores else None)
+    current_score = scores[-1] if scores else None
+    recovery_gap = (prior_peak - current_score) if prior_peak is not None and current_score is not None else 0.0
+    deltas = [scores[idx] - scores[idx - 1] for idx in range(1, len(scores))]
+    recent_deltas = deltas[-3:]
+    flat_or_negative_count = sum(1 for delta in recent_deltas if delta <= 0.01)
+    average_recent_delta = sum(recent_deltas) / len(recent_deltas) if recent_deltas else None
+    active_signal = (
+        len(scores) >= 5
+        and recovery_gap >= 0.05
+        and len(recent_deltas) >= 3
+        and flat_or_negative_count == len(recent_deltas)
+    )
+    triggered = active_signal and not stabilization_hold["settled"]
+
+    return _harbinger_payload(
+        triggered=triggered,
+        evidence={
+            "sample_count": len(scores),
+            "recent_scores": recent_scores,
+            "prior_peak": _rounded_float(prior_peak),
+            "current_score": _rounded_float(current_score),
+            "recovery_gap": round(recovery_gap, 4),
+            "recent_deltas": [round(delta, 4) for delta in recent_deltas],
+            "average_recent_delta": _rounded_float(average_recent_delta),
+            "flat_or_negative_delta_count": flat_or_negative_count,
+            "active_signal": active_signal,
+            "stabilization_hold_active": stabilization_hold["active"],
+            "settled_operator_value_state": stabilization_hold["state"],
+            "stabilization_hold": stabilization_hold,
+        },
+        mitigation="Stop expanding self-improvement scope until the lagging operator-value signal recovers.",
+        next_action="Select the next maintenance item only if it restores operator decision support plus verified change evidence.",
+    )
+
+
+def _detect_variance_explosion(
+    scores: list[float],
+    stabilization_hold: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    stabilization_hold = stabilization_hold or _detect_stabilization_hold(scores)
+    recent_scores = scores[-4:]
+    baseline_scores = scores[:-4]
+    baseline_stddev = _population_stddev(baseline_scores)
+    recent_stddev = _population_stddev(recent_scores)
+    recent_range = max(recent_scores) - min(recent_scores) if recent_scores else 0.0
+    active_signal = (
+        len(scores) >= 6
+        and len(recent_scores) >= 4
+        and recent_range >= 0.2
+        and recent_stddev >= max(0.08, baseline_stddev * 3)
+    )
+    triggered = active_signal and not stabilization_hold["settled"]
+
+    return _harbinger_payload(
+        triggered=triggered,
+        evidence={
+            "sample_count": len(scores),
+            "baseline_scores": [round(score, 4) for score in baseline_scores[-4:]],
+            "recent_scores": [round(score, 4) for score in recent_scores],
+            "baseline_stddev": round(baseline_stddev, 4),
+            "recent_stddev": round(recent_stddev, 4),
+            "recent_range": round(recent_range, 4),
+            "active_signal": active_signal,
+            "stabilization_hold_active": stabilization_hold["active"],
+            "settled_operator_value_state": stabilization_hold["state"],
+            "stabilization_hold": stabilization_hold,
+        },
+        mitigation="Treat the benchmark as unstable and stop optimizing for throughput until score variance narrows.",
+        next_action="Run one focused stabilization pass and require the next run to include low-variance evidence before broadening lane selection.",
+    )
+
+
+def _detect_flickering(series: list[dict[str, Any]]) -> dict[str, Any]:
+    statuses = _check_status_series(series, "operator_value_alignment")[-6:]
+    transition_count = sum(
+        1
+        for idx in range(1, len(statuses))
+        if statuses[idx] != statuses[idx - 1]
+    )
+    pass_boundary_crossings = sum(
+        1
+        for idx in range(1, len(statuses))
+        if (statuses[idx] == "pass") != (statuses[idx - 1] == "pass")
+    )
+    triggered = len(statuses) >= 5 and transition_count >= 3 and pass_boundary_crossings >= 2
+
+    return _harbinger_payload(
+        triggered=triggered,
+        evidence={
+            "sample_count": len(statuses),
+            "recent_statuses": statuses,
+            "transition_count": transition_count,
+            "pass_boundary_crossings": pass_boundary_crossings,
+        },
+        mitigation="Do not treat a single passing run as stable while the signal flickers across pass/fail boundaries.",
+        next_action="Require two consecutive stable passing runs before raw issue-selection volume is allowed again.",
+    )
+
+
+def _detect_correlation_explosion(series: list[dict[str, Any]]) -> dict[str, Any]:
+    current = series[-1] if series else {}
+    current_checks = current.get("checks") if current.get("source") == "current" else {}
+    check_deltas: dict[str, float] = {}
+    for check_id in _LEADING_INDICATOR_CHECK_IDS:
+        current_score = _coerce_score((current_checks or {}).get(check_id))
+        if current_score is None:
+            continue
+        previous_score = None
+        for entry in reversed(series[:-1]):
+            previous_score = _coerce_score((entry.get("checks") or {}).get(check_id))
+            if previous_score is not None:
+                break
+        if previous_score is not None:
+            check_deltas[check_id] = round(current_score - previous_score, 4)
+
+    dropped_checks = {
+        check_id: delta
+        for check_id, delta in check_deltas.items()
+        if delta <= -0.05
+    }
+    triggered = len(dropped_checks) >= 3
+
+    return _harbinger_payload(
+        triggered=triggered,
+        evidence={
+            "check_deltas": check_deltas,
+            "dropped_check_count": len(dropped_checks),
+            "dropped_checks": sorted(dropped_checks),
+            "correlated_drop_threshold": -0.05,
+        },
+        mitigation="Treat simultaneous benchmark-check degradation as coupled risk, not isolated check noise.",
+        next_action="Pick a maintenance item that improves the shared evidence path before selecting feature or volume work.",
+    )
+
+
+def _build_leading_indicator_scorecard(
+    history: dict[str, Any],
+    current_checks: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    series = _benchmark_indicator_series(history, current_checks)
+    operator_scores = _check_score_series(series, "operator_value_alignment")
+    stabilization_hold = _detect_stabilization_hold(operator_scores)
+    raw_scorecard = {
+        "critical_slowing_down": _detect_critical_slowing_down(
+            operator_scores,
+            stabilization_hold,
+        ),
+        "variance_explosion": _detect_variance_explosion(
+            operator_scores,
+            stabilization_hold,
+        ),
+        "flickering": _detect_flickering(series),
+        "correlation_explosion": _detect_correlation_explosion(series),
+    }
+    scorecard = {
+        harbinger: _annotate_harbinger_payload(harbinger, payload)
+        for harbinger, payload in raw_scorecard.items()
+    }
+    triggered_harbingers = [
+        harbinger
+        for harbinger in _LEADING_INDICATOR_HARBINGERS
+        if scorecard[harbinger]["triggered"]
+    ]
+    return {
+        "series_sample_count": len(series),
+        "operator_value_score_series": [round(score, 4) for score in operator_scores[-8:]],
+        "stabilization_hold": stabilization_hold,
+        "scorecard": scorecard,
+        "triggered_harbingers": triggered_harbingers,
+        "recommended_mitigations": _leading_indicator_mitigation_items(
+            triggered_harbingers,
+            scorecard,
+        ),
+    }
+
+
+def _format_harbinger_mitigation_detail(
+    mitigations: Iterable[dict[str, Any]],
+    *,
+    limit: int = 4,
+) -> str:
+    parts: list[str] = []
+    for item in list(mitigations)[:limit]:
+        harbinger = str(item.get("harbinger") or "").strip()
+        evidence_summary = str(item.get("evidence_summary") or "").strip()
+        mitigation = str(item.get("mitigation") or "").strip()
+        if not harbinger:
+            continue
+        detail = harbinger
+        if evidence_summary:
+            detail += f" evidence: {evidence_summary}"
+        if mitigation:
+            detail += f"; mitigation: {mitigation}"
+        parts.append(detail)
+    return " | ".join(parts)
+
+
+def _format_execution_throughput_remediation(signal: dict[str, Any]) -> str:
+    if not signal.get("remediation_required"):
+        return ""
+    actions = [
+        str(action).strip()
+        for action in signal.get("actions", [])
+        if str(action).strip()
+    ]
+    action_detail = "; ".join(actions[:3]) or "repair journal follow-through"
+    ctx_detail = (
+        "inactive ctx is informational, not the throughput blocker"
+        if signal.get("ctx_inactivity_informational")
+        else "ctx inactivity is not the throughput blocker"
+    )
+    return (
+        "Execution-loop throughput remediation: "
+        f"{signal.get('recent_completed_codex_count')} completed Codex run(s) vs "
+        f"{signal.get('recent_journal_work_item_count')} journal work item(s); "
+        f"{ctx_detail}; next actions: {action_detail}."
+    )
+
+
+def _execution_throughput_remediation_payload(signal: dict[str, Any]) -> dict[str, Any]:
+    if not signal.get("remediation_required"):
+        return {"required": False}
+    return {
+        "required": True,
+        "blocking_surface": signal.get("blocking_surface"),
+        "recent_completed_codex_count": signal.get("recent_completed_codex_count"),
+        "recent_journal_work_item_count": signal.get("recent_journal_work_item_count"),
+        "journal_to_codex_ratio": signal.get("journal_to_codex_ratio"),
+        "actions": signal.get("actions") or [],
+        "ctx_status": signal.get("ctx_status"),
+        "ctx_active_count": signal.get("ctx_active_count"),
+        "ctx_inactivity_blocking": False,
+        "detail": _format_execution_throughput_remediation(signal),
+    }
+
+
+def _evaluate_leading_indicator_drift_check(
+    operator_value_check: dict[str, Any],
+    history: dict[str, Any],
+    current_checks: Optional[dict[str, dict[str, Any]]] = None,
+) -> dict[str, Any]:
+    current_score = float(operator_value_check.get("score") or 0.0)
+    operator_value_metrics = dict(operator_value_check.get("metrics") or {})
+    execution_throughput = dict(operator_value_metrics.get("execution_throughput") or {})
+    execution_throughput_detail = _format_execution_throughput_remediation(
+        execution_throughput
+    )
+    prior_scores = _history_check_scores(history, "operator_value_alignment")
+    previous_score = prior_scores[-1] if prior_scores else None
+    delta = round(current_score - previous_score, 4) if previous_score is not None else None
+    regressing = delta is not None and delta < -0.01
+    indicator_payload = _build_leading_indicator_scorecard(
+        history,
+        current_checks or {"operator_value_alignment": operator_value_check},
+    )
+    triggered_harbingers = indicator_payload["triggered_harbingers"]
+
+    if triggered_harbingers:
+        score = max(0.2, 0.6 - (0.15 * len(triggered_harbingers)))
+        if regressing:
+            score = min(score, 0.5)
+        mitigation_detail = _format_harbinger_mitigation_detail(
+            indicator_payload["recommended_mitigations"],
+        )
+        detail = (
+            "Leading indicators triggered: "
+            + ", ".join(triggered_harbingers)
+            + "; run mitigation before expanding self-improvement scope."
+        )
+        if mitigation_detail:
+            detail += " " + mitigation_detail
+    elif indicator_payload["stabilization_hold"]["active"]:
+        score = 0.85
+        detail = (
+            "Operator-value leading indicator is in stabilization hold after a degraded plateau; "
+            "keep operator-value guardrails active until recovery."
+        )
+    elif previous_score is None:
+        score = 1.0
+        detail = "No prior operator-value score; drift not assessed."
+    elif regressing:
+        score = 0.5
+        detail = "Operator-value alignment is regressing; keep quantity guardrail active."
+    else:
+        score = 1.0
+        detail = "Operator-value leading indicator is stable or improving."
+
+    if execution_throughput_detail:
+        detail += " " + execution_throughput_detail
+        score = min(score, 0.6)
+
+    metrics = operator_value_metrics
+    metrics.update(
+        {
+            "previous_operator_value_score": (
+                round(previous_score, 4) if previous_score is not None else None
+            ),
+            "current_operator_value_score": round(current_score, 4),
+            "operator_value_delta": delta,
+            "prior_operator_value_sample_count": len(prior_scores),
+            "leading_indicator_contract_version": "harbinger_scorecard.v2",
+            "series_sample_count": indicator_payload["series_sample_count"],
+            "operator_value_score_series": indicator_payload["operator_value_score_series"],
+            "stabilization_hold": indicator_payload["stabilization_hold"],
+            "triggered_harbingers": triggered_harbingers,
+            "harbinger_scorecard": indicator_payload["scorecard"],
+            "recommended_mitigations": indicator_payload["recommended_mitigations"],
+            "execution_throughput_remediation": _execution_throughput_remediation_payload(
+                execution_throughput
+            ),
+        }
+    )
+    return _build_benchmark_item(
+        "leading_indicator_drift",
+        "Leading-indicator drift",
+        score=score,
+        weight=20,
+        detail=detail,
+        critical=True,
+        metrics=metrics,
+    )
+
+
+def _build_issue_selection_summary(
+    checks: dict[str, dict[str, Any]],
+    gate: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    guardrail_checks = {
+        name: check
+        for name, check in checks.items()
+        if name in {
+            "reliability_gate",
+            "execution_loop",
+            "anti_make_work_check",
+            "operator_value_alignment",
+            "leading_indicator_drift",
+        }
+        and check.get("status") != "pass"
+    }
+    quantity_guardrail_active = bool(guardrail_checks)
+    reliability_blocked = "reliability_gate" in guardrail_checks
+    execution_blocked = "execution_loop" in guardrail_checks
+    gate = gate or {}
+    ctx_remediation = gate.get("ctx_remediation") or {}
+    ontology_repair = (gate.get("ontology") or {}).get("external_repair") or {}
+    operator_metrics = (checks.get("operator_value_alignment") or {}).get("metrics") or {}
+    drift_metrics = (checks.get("leading_indicator_drift") or {}).get("metrics") or {}
+    execution_throughput = operator_metrics.get("execution_throughput") or {}
+    execution_remediation = (
+        drift_metrics.get("execution_throughput_remediation")
+        or _execution_throughput_remediation_payload(execution_throughput)
+    )
+    execution_actions = [
+        str(action).strip()
+        for action in execution_remediation.get("actions", [])
+        if str(action).strip()
+    ]
+    remediation_actions = [
+        str(item.get("action") or "").strip()
+        for item in (ctx_remediation, ontology_repair)
+        if item.get("required") and str(item.get("action") or "").strip()
+    ]
+    remediation_actions.extend(execution_actions)
+    if reliability_blocked:
+        recommended_focus = "self-improvement evidence freshness repair"
+        detail = (
+            "Repair self-improvement evidence freshness before selecting throughput or operator-value work: "
+            + "; ".join(remediation_actions or ["inspect reliability gate provenance"])
+        )
+    elif execution_remediation.get("required"):
+        recommended_focus = "Codex delivery journal follow-through"
+        detail = (
+            "Prioritize completed Codex delivery follow-through before selecting more issue volume: "
+            f"{execution_remediation.get('recent_completed_codex_count')} recent completed Codex run(s), "
+            f"{execution_remediation.get('recent_journal_work_item_count')} journal work item(s). "
+            "Inactive ctx evidence is informational on this host. "
+            + "; ".join(execution_actions)
+        )
+    elif execution_blocked:
+        execution = checks.get("execution_loop") or {}
+        action = str(
+            ((execution.get("metrics") or {}).get("next_throughput_action"))
+            or "convert planned self-improvement work into completed Codex delivery plus journal evidence"
+        )
+        recommended_focus = "self-improvement execution follow-through"
+        detail = "Restore execution-loop throughput before selecting raw volume work: " + action
+    elif quantity_guardrail_active:
+        recommended_focus = "operator decision support plus verified system change"
+        detail = (
+            "Do not select issues because they increase task count; "
+            "prefer work with operator decision support and verified change evidence."
+        )
+    else:
+        recommended_focus = "normal lane selection"
+        detail = "Benchmark guardrails permit normal lane selection."
+
+    return {
+        "quantity_guardrail_active": quantity_guardrail_active,
+        "suppress_raw_throughput_selection": quantity_guardrail_active,
+        "blocked_checks": sorted(guardrail_checks),
+        "recommended_focus": recommended_focus,
+        "detail": detail,
+        "remediation_actions": remediation_actions,
+        "execution_throughput": execution_remediation,
+    }
+
+
+def _operator_decision_support_summary(metrics: dict[str, Any]) -> str:
+    fields = [
+        str(item)
+        for item in metrics.get("operator_decision_support_fields", [])
+        if str(item).strip()
+    ]
+    if fields:
+        examples = metrics.get("operator_decision_support_examples") or []
+        first = examples[0] if examples else {}
+        source = first.get("source") or "unknown"
+        item_id = first.get("id") or "unknown"
+        return (
+            "Operator decision-support evidence captured "
+            f"({', '.join(fields)}) in {source}:{item_id}."
+        )
+
+    missing = metrics.get("missing_operator_decision_support_examples") or []
+    if missing:
+        examples = [
+            f"{item.get('source')}:{item.get('id') or 'unknown'}"
+            for item in missing[:3]
+        ]
+        return (
+            "Operator decision-support evidence missing for verified system changes: "
+            + ", ".join(examples)
+            + "."
+        )
+
+    if int(metrics.get("assessed_work_item_count") or 0) == 0:
+        return "No claimed work items required operator decision-support evidence."
+    return "No explicit operator decision-support evidence was captured."
+
+
+def _build_operator_summary(
+    checks: dict[str, dict[str, Any]],
+    issue_selection: dict[str, Any],
+) -> dict[str, str]:
+    execution = checks["execution_loop"]
+    operator_value = checks["operator_value_alignment"]
+    drift = checks["leading_indicator_drift"]
+    operator_value_metrics = operator_value.get("metrics") or {}
+    return {
+        "execution_loop": str(execution.get("detail") or ""),
+        "operator_value_alignment": str(operator_value.get("detail") or ""),
+        "operator_decision_support_evidence": _operator_decision_support_summary(
+            operator_value_metrics
+        ),
+        "leading_indicator_drift": str(drift.get("detail") or ""),
+        "issue_selection": str(issue_selection.get("detail") or ""),
+    }
 
 
 def evaluate_self_improvement_benchmark(
@@ -740,39 +3110,128 @@ def evaluate_self_improvement_benchmark(
             "warning_count": len(gate.get("warnings") or []),
             "contradiction_count": len(gate.get("contradictions") or []),
             "freshness_spread_hours": gate.get("freshness_spread_hours"),
+            "ctx_remediation_required": bool(
+                (gate.get("ctx_remediation") or {}).get("required")
+            ),
         },
     )
-    checks = {"reliability_gate": reliability_gate}
-    project_score = round(reliability_gate["score"] * 100, 2)
+    execution_loop = _evaluate_execution_loop_check(
+        journal_path=journal_path,
+        codex_runs_path=codex_runs_path,
+        ctx_bindings_path=ctx_bindings_path,
+        now=current,
+    )
+    anti_make_work_check = _evaluate_anti_make_work_check(
+        journal_path=journal_path,
+        codex_runs_path=codex_runs_path,
+        ctx_bindings_path=ctx_bindings_path,
+        now=current,
+        freshness_hours=freshness_hours,
+    )
+    operator_value_alignment = _evaluate_operator_value_alignment_check(
+        journal_path=journal_path,
+        codex_runs_path=codex_runs_path,
+        ctx_bindings_path=ctx_bindings_path,
+        now=current,
+        freshness_hours=freshness_hours,
+    )
+    history = _load_benchmark_history(history_path)
+    leading_indicator_drift = _evaluate_leading_indicator_drift_check(
+        operator_value_alignment,
+        history,
+        {
+            "reliability_gate": reliability_gate,
+            "anti_make_work_check": anti_make_work_check,
+            "operator_value_alignment": operator_value_alignment,
+        },
+    )
+    checks = {
+        "reliability_gate": reliability_gate,
+        "execution_loop": execution_loop,
+        "anti_make_work_check": anti_make_work_check,
+        "operator_value_alignment": operator_value_alignment,
+        "leading_indicator_drift": leading_indicator_drift,
+    }
+    project_score = _weighted_project_score(checks)
     critical_failures = [
         name
         for name, check in checks.items()
         if check.get("critical") and check.get("status") == "fail"
     ]
+    issue_selection = _build_issue_selection_summary(checks, gate)
+    operator_summary = _build_operator_summary(checks, issue_selection)
+    previous_project_score = _latest_history_project_score(history)
+    direction = _score_direction(project_score, previous_project_score, threshold=0.1)
+    trend = "single_run" if previous_project_score is None else direction
+    if leading_indicator_drift.get("status") == "fail":
+        direction = "negative"
+        trend = "regressing"
+    operator_value_metrics = operator_value_alignment.get("metrics", {})
+    operator_value_checks = {
+        "operator_decision_support_rate": (
+            operator_value_metrics.get("operator_decision_support_rate")
+        ),
+        "verified_system_change_rate": (
+            operator_value_metrics.get("verified_system_change_rate")
+        ),
+        "aligned_work_rate": (
+            operator_value_metrics.get("aligned_work_rate")
+        ),
+        "operator_value_score": operator_value_alignment.get("score"),
+        "operator_decision_support_evidence": (
+            operator_value_metrics.get("operator_decision_support_examples") or []
+        ),
+        "missing_operator_decision_support": (
+            operator_value_metrics.get("missing_operator_decision_support_examples") or []
+        ),
+    }
+
     benchmark = {
         "contract_version": BENCHMARK_CONTRACT_VERSION,
         "generated_at": current.isoformat(),
         "project_score": project_score,
         "score": project_score,
-        "direction": "stable",
-        "trend": "single_run",
+        "direction": direction,
+        "trend": trend,
         "gate": gate,
         "checks": checks,
         "critical_failures": critical_failures,
+        "execution_loop": {
+            "status": execution_loop.get("status"),
+            "score": execution_loop.get("score"),
+            "metrics": execution_loop.get("metrics"),
+            "next_throughput_action": (
+                (execution_loop.get("metrics") or {}).get("next_throughput_action")
+            ),
+        },
+        "operator_value_score": operator_value_alignment.get("score"),
+        "operator_value_checks": operator_value_checks,
+        "anti_make_work": {
+            "status": anti_make_work_check.get("status"),
+            "score": anti_make_work_check.get("score"),
+            "flags": [
+                item.get("issue")
+                for item in anti_make_work_check.get("metrics", {}).get("shallow_examples", [])
+                if item.get("issue")
+            ],
+        },
+        "issue_selection": issue_selection,
+        "summary": operator_summary,
         "history_path": str(history_path),
     }
 
     if persist:
-        history = _load_benchmark_history(history_path)
         history["runs"].append(
             {
                 "generated_at": benchmark["generated_at"],
                 "project_score": benchmark["project_score"],
+                "direction": benchmark["direction"],
+                "critical_failures": benchmark["critical_failures"],
+                "operator_value_score": benchmark["operator_value_score"],
+                "operator_value_checks": benchmark["operator_value_checks"],
+                "issue_selection": benchmark["issue_selection"],
                 "checks": {
-                    name: {
-                        "score": check.get("score"),
-                        "status": check.get("status"),
-                    }
+                    name: _benchmark_history_check_snapshot(name, check)
                     for name, check in checks.items()
                 },
             }
@@ -781,6 +3240,189 @@ def evaluate_self_improvement_benchmark(
         _save_benchmark_history(history_path, history)
 
     return benchmark
+
+
+def _coerce_path(value: Optional[Path | str], default: Path) -> Path:
+    return Path(value).expanduser() if value else default
+
+
+def _pipeline_benchmark_summary(benchmark: dict[str, Any]) -> dict[str, Any]:
+    summary = {
+        "score": benchmark.get("score"),
+        "project_score": benchmark.get("project_score"),
+        "direction": benchmark.get("direction"),
+        "trend": benchmark.get("trend"),
+        "critical_failures": benchmark.get("critical_failures"),
+    }
+    drift = (benchmark.get("checks") or {}).get("leading_indicator_drift") or {}
+    drift_metrics = drift.get("metrics") or {}
+    if drift:
+        execution_remediation = drift_metrics.get("execution_throughput_remediation") or {}
+        summary["leading_indicator_drift"] = {
+            "score": drift.get("score"),
+            "status": drift.get("status"),
+            "triggered_harbingers": drift_metrics.get("triggered_harbingers") or [],
+            "recommended_mitigations": drift_metrics.get("recommended_mitigations") or [],
+            "execution_throughput_remediation": execution_remediation,
+        }
+    return summary
+
+
+def _pipeline_top_candidate(
+    benchmark: dict[str, Any],
+    candidate_limit: int,
+) -> Optional[dict[str, Any]]:
+    checks = benchmark.get("checks") or {}
+    blocked = [
+        check_id
+        for check_id in (benchmark.get("issue_selection") or {}).get("blocked_checks", [])
+        if check_id in checks
+    ][: max(1, int(candidate_limit or 1))]
+    if not blocked:
+        return None
+
+    check_id = blocked[0]
+    check = checks.get(check_id) or {}
+    label = str(check.get("label") or check_id.replace("_", " ")).strip()
+    detail = str(check.get("detail") or "").strip()
+    candidate = {
+        "candidate_source": "benchmark",
+        "candidate_id": check_id,
+        "benchmark_id": check_id,
+        "lane": "Maintenance",
+        "status": "ready",
+        "priority": 1 if check.get("critical") else 2,
+        "title": f"Repair {label.lower()}",
+        "score": check.get("score"),
+        "detail": detail,
+        "target_surface": "hermes-agent self-improvement reliability floor",
+        "verification": (
+            "Rerun self_improvement_pipeline and confirm the selected benchmark "
+            "check passes without weakening reliability gates."
+        ),
+    }
+    if check_id == "leading_indicator_drift":
+        metrics = check.get("metrics") or {}
+        candidate["triggered_harbingers"] = metrics.get("triggered_harbingers") or []
+        candidate["recommended_mitigations"] = metrics.get("recommended_mitigations") or []
+        candidate["harbinger_scorecard"] = metrics.get("harbinger_scorecard") or {}
+        candidate["execution_throughput_remediation"] = (
+            metrics.get("execution_throughput_remediation") or {}
+        )
+    return candidate
+
+
+def _format_pipeline_summary(
+    *,
+    benchmark: dict[str, Any],
+    top_candidate: Optional[dict[str, Any]],
+) -> str:
+    checks = benchmark.get("checks") or {}
+    reliability = checks.get("reliability_gate") or {}
+    execution = checks.get("execution_loop") or {}
+    drift = checks.get("leading_indicator_drift") or {}
+    lines = [
+        "Self-improvement pipeline:",
+        f"- score={benchmark.get('score')}",
+        f"- reliability_gate={reliability.get('score')} {reliability.get('status')}",
+        f"- execution_loop={execution.get('score')} {execution.get('status')}",
+        f"- leading_indicator_drift={drift.get('score')} {drift.get('status')}",
+    ]
+    drift_metrics = drift.get("metrics") or {}
+    triggered_harbingers = drift_metrics.get("triggered_harbingers") or []
+    if triggered_harbingers:
+        lines.append(
+            "- leading_indicator_harbingers="
+            + ", ".join(str(item) for item in triggered_harbingers)
+        )
+        for item in drift_metrics.get("recommended_mitigations") or []:
+            harbinger = str(item.get("harbinger") or "").strip()
+            evidence_summary = str(item.get("evidence_summary") or "").strip()
+            mitigation = str(item.get("mitigation") or "").strip()
+            next_action = str(item.get("next_action") or "").strip()
+            if not harbinger:
+                continue
+            line = f"- leading_indicator_{harbinger}:"
+            if evidence_summary:
+                line += f" evidence={evidence_summary};"
+            if mitigation:
+                line += f" mitigation={mitigation};"
+            if next_action:
+                line += f" next_action={next_action}"
+            lines.append(line.rstrip(";"))
+    execution_remediation = drift_metrics.get("execution_throughput_remediation") or {}
+    if execution_remediation.get("required"):
+        lines.append(
+            "- execution_throughput_remediation="
+            f"{execution_remediation.get('recent_completed_codex_count')} completed Codex run(s), "
+            f"{execution_remediation.get('recent_journal_work_item_count')} journal work item(s), "
+            f"blocker={execution_remediation.get('blocking_surface')}"
+        )
+        for action in execution_remediation.get("actions") or []:
+            lines.append(f"- execution_throughput_action={action}")
+    critical = benchmark.get("critical_failures") or []
+    if critical:
+        lines.append(f"- critical_failures={', '.join(str(item) for item in critical)}")
+    if top_candidate:
+        lines.append(f"- top_candidate={top_candidate.get('candidate_id')}")
+    else:
+        lines.append("- top_candidate=None")
+    return "\n".join(lines)
+
+
+def evaluate_self_improvement_pipeline(
+    *,
+    journal_path: Optional[Path | str] = None,
+    codex_runs_path: Optional[Path | str] = None,
+    ctx_bindings_path: Optional[Path | str] = None,
+    ontology_root: Optional[Path | str] = None,
+    history_path: Optional[Path | str] = None,
+    now: Optional[datetime] = None,
+    freshness_hours: int = DEFAULT_FRESHNESS_HOURS,
+    active_stale_hours: int = DEFAULT_ACTIVE_STALE_HOURS,
+    persist: bool = True,
+    candidate_limit: int = 3,
+    auto_repair_linear: Optional[bool] = None,
+    auto_close_resolved: Optional[bool] = None,
+) -> dict[str, Any]:
+    current = now or datetime.now(tz=timezone.utc)
+    benchmark = evaluate_self_improvement_benchmark(
+        journal_path=_coerce_path(journal_path, DEFAULT_JOURNAL_PATH),
+        codex_runs_path=_coerce_path(codex_runs_path, DEFAULT_CODEX_RUNS_PATH),
+        ctx_bindings_path=_coerce_path(ctx_bindings_path, DEFAULT_CTX_BINDINGS_PATH),
+        ontology_root=_coerce_path(ontology_root, DEFAULT_ONTOLOGY_ROOT),
+        history_path=_coerce_path(history_path, DEFAULT_BENCHMARK_HISTORY_PATH),
+        now=current,
+        freshness_hours=freshness_hours,
+        active_stale_hours=active_stale_hours,
+        persist=persist,
+    )
+    top_candidate = _pipeline_top_candidate(benchmark, candidate_limit)
+    linear_requested = bool(auto_repair_linear) or bool(auto_close_resolved)
+    pipeline = {
+        "contract_version": BENCHMARK_CONTRACT_VERSION,
+        "evaluated_at": current.isoformat(),
+        "runtime_surface": "hermes-agent-core",
+        "benchmark_before": _pipeline_benchmark_summary(benchmark),
+        "benchmark": benchmark,
+        "linear": {
+            "available": False,
+            "error": (
+                "Linear writeback is not part of the Hermes core self-improvement pipeline."
+                if linear_requested
+                else None
+            ),
+            "managed_issues": [],
+            "closed_issues": [],
+            "repairs": [],
+        },
+        "top_candidate": top_candidate,
+    }
+    pipeline["summary_markdown"] = _format_pipeline_summary(
+        benchmark=benchmark,
+        top_candidate=top_candidate,
+    )
+    return pipeline
 
 
 def self_improvement_evidence_gate(
@@ -831,6 +3473,38 @@ def self_improvement_benchmark(
     return json.dumps({"success": True, "benchmark": benchmark, "task_id": task_id})
 
 
+def self_improvement_pipeline(
+    journal_path: Optional[str] = None,
+    codex_runs_path: Optional[str] = None,
+    ctx_bindings_path: Optional[str] = None,
+    ontology_root: Optional[str] = None,
+    history_path: Optional[str] = None,
+    now: Optional[str] = None,
+    freshness_hours: Optional[int] = None,
+    active_stale_hours: Optional[int] = None,
+    persist: Optional[bool] = None,
+    candidate_limit: Optional[int] = None,
+    auto_repair_linear: Optional[bool] = None,
+    auto_close_resolved: Optional[bool] = None,
+    task_id: Optional[str] = None,
+) -> str:
+    pipeline = evaluate_self_improvement_pipeline(
+        journal_path=journal_path,
+        codex_runs_path=codex_runs_path,
+        ctx_bindings_path=ctx_bindings_path,
+        ontology_root=ontology_root,
+        history_path=history_path,
+        now=_parse_time(now) if now else None,
+        freshness_hours=int(freshness_hours) if freshness_hours else DEFAULT_FRESHNESS_HOURS,
+        active_stale_hours=int(active_stale_hours) if active_stale_hours else DEFAULT_ACTIVE_STALE_HOURS,
+        persist=True if persist is None else bool(persist),
+        candidate_limit=int(candidate_limit) if candidate_limit else 3,
+        auto_repair_linear=auto_repair_linear,
+        auto_close_resolved=auto_close_resolved,
+    )
+    return json.dumps({"success": True, "pipeline": pipeline, "task_id": task_id})
+
+
 registry.register(
     name="self_improvement_evidence_gate",
     toolset="self_improvement",
@@ -843,6 +3517,27 @@ registry.register(
         now=args.get("now"),
         freshness_hours=args.get("freshness_hours"),
         active_stale_hours=args.get("active_stale_hours"),
+        task_id=kw.get("task_id"),
+    ),
+)
+
+registry.register(
+    name="self_improvement_pipeline",
+    toolset="self_improvement",
+    schema=SELF_IMPROVEMENT_PIPELINE_SCHEMA,
+    handler=lambda args, **kw: self_improvement_pipeline(
+        journal_path=args.get("journal_path"),
+        codex_runs_path=args.get("codex_runs_path"),
+        ctx_bindings_path=args.get("ctx_bindings_path"),
+        ontology_root=args.get("ontology_root"),
+        history_path=args.get("history_path"),
+        now=args.get("now"),
+        freshness_hours=args.get("freshness_hours"),
+        active_stale_hours=args.get("active_stale_hours"),
+        persist=args.get("persist"),
+        candidate_limit=args.get("candidate_limit"),
+        auto_repair_linear=args.get("auto_repair_linear"),
+        auto_close_resolved=args.get("auto_close_resolved"),
         task_id=kw.get("task_id"),
     ),
 )

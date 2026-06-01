@@ -147,6 +147,7 @@ from agent.prompt_builder import (
     MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE, SKILLS_GUIDANCE,
     HERMES_AGENT_HELP_GUIDANCE,
     KANBAN_GUIDANCE,
+    OPERATOR_RULES_GUIDANCE,
     build_nous_subscription_prompt,
 )
 from agent.model_metadata import (
@@ -5585,6 +5586,41 @@ class AIAgent:
         self._last_activity_ts = time.time()
         self._last_activity_desc = desc
 
+    def _start_tool_activity_heartbeat(
+        self,
+        tool_name: str,
+        *,
+        interval: float = 30.0,
+    ) -> threading.Event:
+        """Keep gateway inactivity monitors informed during synchronous tools.
+
+        Terminal and code-execution tools already report their own process
+        activity, and concurrent tool batches heartbeat from the parent loop.
+        A single synchronous Python/plugin tool has no such polling loop, so a
+        long but healthy tool could look idle until it returns.
+        """
+        stop_event = threading.Event()
+        start = time.monotonic()
+
+        def _heartbeat() -> None:
+            while not stop_event.wait(interval):
+                try:
+                    if self._current_tool != tool_name:
+                        return
+                    elapsed = int(time.monotonic() - start)
+                    self._touch_activity(
+                        f"executing tool: {tool_name} ({elapsed}s elapsed)"
+                    )
+                except Exception:
+                    return
+
+        threading.Thread(
+            target=_heartbeat,
+            daemon=True,
+            name=f"tool-heartbeat-{tool_name[:32]}",
+        ).start()
+        return stop_event
+
     def _capture_rate_limits(self, http_response: Any) -> None:
         """Parse x-ratelimit-* headers from an HTTP response and cache the state.
 
@@ -5935,6 +5971,7 @@ class AIAgent:
 
         # Pointer to the hermes-agent skill + docs for user questions about Hermes itself.
         stable_parts.append(HERMES_AGENT_HELP_GUIDANCE)
+        stable_parts.append(OPERATOR_RULES_GUIDANCE)
 
         # Tool-aware behavioral guidance: only inject when the tools are loaded
         tool_guidance = []
@@ -6951,56 +6988,148 @@ class AIAgent:
             if self._interrupt_requested:
                 raise InterruptedError("Agent interrupted before Codex stream retry")
             collected_output_items: list = []
+            def _recovered_codex_stream_response(exc: BaseException):
+                err_text = str(exc)
+                if "NoneType" not in err_text or "not iterable" not in err_text:
+                    raise exc
+                if collected_output_items:
+                    logger.debug(
+                        "Codex Responses stream parser failed after output_item.done; "
+                        "recovering %d collected output item(s). %s error=%s",
+                        len(collected_output_items),
+                        self._client_log_context(),
+                        exc,
+                    )
+                    return SimpleNamespace(
+                        model=api_kwargs.get("model"),
+                        status="completed",
+                        incomplete_details=None,
+                        output=list(collected_output_items),
+                        output_text="".join(self._codex_streamed_text_parts),
+                        usage=None,
+                    )
+                if self._codex_streamed_text_parts and not has_tool_calls:
+                    assembled = "".join(self._codex_streamed_text_parts)
+                    logger.debug(
+                        "Codex Responses stream parser failed after text deltas; "
+                        "recovering %d streamed char(s). %s error=%s",
+                        len(assembled),
+                        self._client_log_context(),
+                        exc,
+                    )
+                    return SimpleNamespace(
+                        model=api_kwargs.get("model"),
+                        status="completed",
+                        incomplete_details=None,
+                        output=[SimpleNamespace(
+                            type="message",
+                            role="assistant",
+                            status="completed",
+                            content=[SimpleNamespace(type="output_text", text=assembled)],
+                        )],
+                        output_text=assembled,
+                        usage=None,
+                    )
+                raise exc
+
+            def _codex_stream_response_from_collected_items():
+                if collected_output_items:
+                    logger.debug(
+                        "Codex Responses stream: returning %d collected output item(s) "
+                        "without SDK final parser. %s",
+                        len(collected_output_items),
+                        self._client_log_context(),
+                    )
+                    return SimpleNamespace(
+                        model=api_kwargs.get("model"),
+                        status="completed",
+                        incomplete_details=None,
+                        output=list(collected_output_items),
+                        output_text="".join(self._codex_streamed_text_parts),
+                        usage=None,
+                    )
+                if self._codex_streamed_text_parts and not has_tool_calls:
+                    assembled = "".join(self._codex_streamed_text_parts)
+                    logger.debug(
+                        "Codex Responses stream: returning %d streamed char(s) "
+                        "without SDK final parser. %s",
+                        len(assembled),
+                        self._client_log_context(),
+                    )
+                    return SimpleNamespace(
+                        model=api_kwargs.get("model"),
+                        status="completed",
+                        incomplete_details=None,
+                        output=[SimpleNamespace(
+                            type="message",
+                            role="assistant",
+                            status="completed",
+                            content=[SimpleNamespace(type="output_text", text=assembled)],
+                        )],
+                        output_text=assembled,
+                        usage=None,
+                    )
+                return None
+
             try:
                 with active_client.responses.stream(**api_kwargs) as stream:
-                    for event in stream:
-                        self._touch_activity("receiving stream response")
-                        if self._interrupt_requested:
-                            break
-                        event_type = getattr(event, "type", "")
-                        # Fire callbacks on text content deltas (suppress during tool calls)
-                        if "output_text.delta" in event_type or event_type == "response.output_text.delta":
-                            delta_text = getattr(event, "delta", "")
-                            if delta_text:
-                                self._codex_streamed_text_parts.append(delta_text)
-                            if delta_text and not has_tool_calls:
-                                if not first_delta_fired:
-                                    first_delta_fired = True
-                                    if on_first_delta:
-                                        try:
-                                            on_first_delta()
-                                        except Exception:
-                                            pass
-                                self._fire_stream_delta(delta_text)
-                        # Track tool calls to suppress text streaming
-                        elif "function_call" in event_type:
-                            has_tool_calls = True
-                        # Fire reasoning callbacks
-                        elif "reasoning" in event_type and "delta" in event_type:
-                            reasoning_text = getattr(event, "delta", "")
-                            if reasoning_text:
-                                self._fire_reasoning_delta(reasoning_text)
-                        # Collect completed output items — some backends
-                        # (chatgpt.com/backend-api/codex) stream valid items
-                        # via response.output_item.done but the SDK's
-                        # get_final_response() returns an empty output list.
-                        elif event_type == "response.output_item.done":
-                            done_item = getattr(event, "item", None)
-                            if done_item is not None:
-                                collected_output_items.append(done_item)
-                        # Log non-completed terminal events for diagnostics
-                        elif event_type in {"response.incomplete", "response.failed"}:
-                            resp_obj = getattr(event, "response", None)
-                            status = getattr(resp_obj, "status", None) if resp_obj else None
-                            incomplete_details = getattr(resp_obj, "incomplete_details", None) if resp_obj else None
-                            logger.warning(
-                                "Codex Responses stream received terminal event %s "
-                                "(status=%s, incomplete_details=%s, streamed_chars=%d). %s",
-                                event_type, status, incomplete_details,
-                                sum(len(p) for p in self._codex_streamed_text_parts),
-                                self._client_log_context(),
-                            )
-                    final_response = stream.get_final_response()
+                    try:
+                        for event in stream:
+                            self._touch_activity("receiving stream response")
+                            if self._interrupt_requested:
+                                break
+                            event_type = getattr(event, "type", "")
+                            # Fire callbacks on text content deltas (suppress during tool calls)
+                            if "output_text.delta" in event_type or event_type == "response.output_text.delta":
+                                delta_text = getattr(event, "delta", "")
+                                if delta_text:
+                                    self._codex_streamed_text_parts.append(delta_text)
+                                if delta_text and not has_tool_calls:
+                                    if not first_delta_fired:
+                                        first_delta_fired = True
+                                        if on_first_delta:
+                                            try:
+                                                on_first_delta()
+                                            except Exception:
+                                                pass
+                                    self._fire_stream_delta(delta_text)
+                            # Track tool calls to suppress text streaming
+                            elif "function_call" in event_type:
+                                has_tool_calls = True
+                            # Fire reasoning callbacks
+                            elif "reasoning" in event_type and "delta" in event_type:
+                                reasoning_text = getattr(event, "delta", "")
+                                if reasoning_text:
+                                    self._fire_reasoning_delta(reasoning_text)
+                            # Collect completed output items — some backends
+                            # (chatgpt.com/backend-api/codex) stream valid items
+                            # via response.output_item.done but the SDK's
+                            # final response parser may return empty/None output.
+                            elif event_type == "response.output_item.done":
+                                done_item = getattr(event, "item", None)
+                                if done_item is not None:
+                                    collected_output_items.append(done_item)
+                            # Log non-completed terminal events for diagnostics
+                            elif event_type in {"response.incomplete", "response.failed"}:
+                                resp_obj = getattr(event, "response", None)
+                                status = getattr(resp_obj, "status", None) if resp_obj else None
+                                incomplete_details = getattr(resp_obj, "incomplete_details", None) if resp_obj else None
+                                logger.warning(
+                                    "Codex Responses stream received terminal event %s "
+                                    "(status=%s, incomplete_details=%s, streamed_chars=%d). %s",
+                                    event_type, status, incomplete_details,
+                                    sum(len(p) for p in self._codex_streamed_text_parts),
+                                    self._client_log_context(),
+                                )
+                    except TypeError as exc:
+                        return _recovered_codex_stream_response(exc)
+                    collected_response = _codex_stream_response_from_collected_items()
+                    if collected_response is not None:
+                        return collected_response
+                    try:
+                        final_response = stream.get_final_response()
+                    except TypeError as exc:
+                        return _recovered_codex_stream_response(exc)
                     # PATCH: ChatGPT Codex backend streams valid output items
                     # but get_final_response() can return an empty output list.
                     # Backfill from collected items or synthesize from deltas.
@@ -11288,6 +11417,11 @@ class AIAgent:
                     pass  # never block tool execution
 
             tool_start_time = time.time()
+            tool_heartbeat_stop = None
+            if not _execution_blocked:
+                tool_heartbeat_stop = self._start_tool_activity_heartbeat(
+                    function_name
+                )
 
             if _block_msg is not None:
                 # Tool blocked by plugin policy — return error without executing.
@@ -11475,6 +11609,10 @@ class AIAgent:
                     function_result = f"Error executing tool '{function_name}': {tool_error}"
                     logger.error("handle_function_call raised for %s: %s", function_name, tool_error, exc_info=True)
                 tool_duration = time.time() - tool_start_time
+
+            if tool_heartbeat_stop is not None:
+                tool_heartbeat_stop.set()
+                tool_heartbeat_stop = None
 
             if isinstance(function_result, str):
                 result_preview = function_result if self.verbose_logging else (

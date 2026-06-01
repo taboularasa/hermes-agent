@@ -589,6 +589,10 @@ class TestSessionIsolation:
 
 class TestDeliveryCleanup:
 
+    def test_webhook_adapter_disables_edit_streaming(self):
+        """Webhook responses should use final delivery, not edit streaming."""
+        assert WebhookAdapter.SUPPORTS_MESSAGE_EDITING is False
+
     @pytest.mark.asyncio
     async def test_delivery_info_survives_multiple_sends(self):
         """send() must NOT pop delivery_info.
@@ -618,6 +622,63 @@ class TestDeliveryCleanup:
         result2 = await adapter.send(chat_id, "Final agent response")
         assert result2.success is True
         assert chat_id in adapter._delivery_info
+
+    @pytest.mark.asyncio
+    async def test_linear_comment_delivery_posts_to_issue(self, monkeypatch):
+        """linear_comment delivery posts the final response to Linear."""
+        adapter = _make_adapter()
+        chat_id = "webhook:linear:d-123"
+        adapter._delivery_info[chat_id] = {
+            "deliver": "linear_comment",
+            "deliver_extra": {
+                "issue_id": "issue-123",
+                "issue_identifier": "HAD-1019",
+                "marker": "<!-- hermes-native-final:v1 -->",
+            },
+            "payload": {},
+        }
+        adapter._delivery_info_created[chat_id] = time.time()
+        monkeypatch.setenv("LINEAR_API_KEY", "lin_ap_test")
+
+        captured = {}
+
+        class _Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read(self):
+                return json.dumps(
+                    {
+                        "data": {
+                            "commentCreate": {
+                                "success": True,
+                                "comment": {"id": "comment-123", "url": "https://linear/comment"},
+                            }
+                        }
+                    }
+                ).encode("utf-8")
+
+        def _urlopen(req, timeout=30):
+            captured["timeout"] = timeout
+            captured["body"] = json.loads(req.data.decode("utf-8"))
+            captured["auth"] = req.headers.get("Authorization")
+            return _Response()
+
+        monkeypatch.setattr("gateway.platforms.webhook.urllib.request.urlopen", _urlopen)
+
+        result = await adapter.send(chat_id, "Final result")
+
+        assert result.success is True
+        assert result.message_id == "comment-123"
+        assert captured["timeout"] == 30
+        assert captured["auth"] == "lin_ap_test"
+        variables = captured["body"]["variables"]
+        assert variables["input"]["issueId"] == "issue-123"
+        assert variables["input"]["body"].startswith("<!-- hermes-native-final:v1 -->")
+        assert "Final result" in variables["input"]["body"]
 
     @pytest.mark.asyncio
     async def test_delivery_info_pruned_via_ttl(self):
