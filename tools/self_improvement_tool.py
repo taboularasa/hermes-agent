@@ -32,12 +32,27 @@ DEFAULT_FRESHNESS_HOURS = 72
 DEFAULT_ACTIVE_STALE_HOURS = 12
 PROVENANCE_CONTRACT_VERSION = "v1"
 BENCHMARK_CONTRACT_VERSION = "v1"
+JOURNAL_REPORTING_CONTRACT_VERSION = "hermes_journal_self_improvement.v1"
 _BENCHMARK_HISTORY_LIMIT = 200
 _EXECUTION_LOOP_WINDOW_DAYS = 14
 _EXECUTION_LOOP_MANY_COMPLETED_THRESHOLD = 3
 _EXECUTION_LOOP_MIN_JOURNAL_FOLLOW_THROUGH_RATE = 0.5
 _THROUGHPUT_CODEX_COMPLETION_MIN = _EXECUTION_LOOP_MANY_COMPLETED_THRESHOLD
 _THROUGHPUT_JOURNAL_RATIO_MIN = _EXECUTION_LOOP_MIN_JOURNAL_FOLLOW_THROUGH_RATE
+_JOURNAL_REPORTING_FOCUS_FIELD = "selfImprovementFocus"
+_JOURNAL_REPORTING_FOCUS_REQUIRED_FIELDS = (
+    "title",
+    "activeLinearIssueIds",
+    "outcomeNote",
+)
+_JOURNAL_REPORTING_OUTCOME_FIELDS = (
+    "entryId",
+    "occurredAt",
+    "title",
+    "activeLinearIssueIds",
+    "outcomeNote",
+)
+_JOURNAL_REPORTING_OUTCOME_LIMIT = 4
 _LEADING_INDICATOR_CHECK_IDS = (
     "reliability_gate",
     "anti_make_work_check",
@@ -608,6 +623,246 @@ def _iter_journal_timestamps(payload: Any) -> Iterable[datetime]:
         )
         if parsed is not None:
             yield parsed
+
+
+def _journal_reporting_schema() -> dict[str, Any]:
+    return {
+        "schema_name": "Hermes Journal self-improvement reporting",
+        "entry_collection": "entries",
+        "entry_id_field": "id",
+        "entry_timestamp_field": "occurredAt",
+        "focus_field": _JOURNAL_REPORTING_FOCUS_FIELD,
+        "focus_item_required_fields": list(_JOURNAL_REPORTING_FOCUS_REQUIRED_FIELDS),
+        "recent_outcome_fields": list(_JOURNAL_REPORTING_OUTCOME_FIELDS),
+        "recent_outcomes_derive_from": (
+            f"entries[].{_JOURNAL_REPORTING_FOCUS_FIELD}[]"
+        ),
+    }
+
+
+def _journal_reporting_violation(path: str, issue: str, expected: str) -> dict[str, str]:
+    return {
+        "path": path,
+        "issue": issue,
+        "expected": expected,
+    }
+
+
+def _journal_reporting_string(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _journal_reporting_issue_ids(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    issue_ids: list[str] = []
+    for item in value:
+        if isinstance(item, str) and item.strip():
+            issue_ids.append(item.strip())
+    return issue_ids
+
+
+def _journal_reporting_timestamp(record: dict[str, Any]) -> Optional[datetime]:
+    return _record_timestamp(
+        record,
+        "occurredAt",
+        "occurred_at",
+        "updatedAt",
+        "updated_at",
+        "createdAt",
+        "created_at",
+        "timestamp",
+        "date",
+    )
+
+
+def _journal_reporting_entry_time_text(record: dict[str, Any]) -> str:
+    for key in (
+        "occurredAt",
+        "occurred_at",
+        "updatedAt",
+        "updated_at",
+        "createdAt",
+        "created_at",
+        "timestamp",
+        "date",
+    ):
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _build_journal_reporting_contract(
+    payload: Any,
+    *,
+    outcome_limit: int = _JOURNAL_REPORTING_OUTCOME_LIMIT,
+) -> dict[str, Any]:
+    schema = _journal_reporting_schema()
+    if payload is None:
+        return {
+            "contract_version": JOURNAL_REPORTING_CONTRACT_VERSION,
+            "status": "missing",
+            "detail": "Journal evidence is unavailable.",
+            "schema": schema,
+            "active_focus_entry_id": None,
+            "active_focus": [],
+            "recent_outcomes": [],
+            "violations": [
+                _journal_reporting_violation(
+                    "entries",
+                    "missing_journal_payload",
+                    "journal JSON with entries[]",
+                )
+            ],
+        }
+
+    entries = list(_iter_records(payload, "entries"))
+    violations: list[dict[str, str]] = []
+    focus_entries: list[dict[str, Any]] = []
+    outcomes: list[dict[str, Any]] = []
+
+    for entry_index, entry in enumerate(entries):
+        focus_value = entry.get(_JOURNAL_REPORTING_FOCUS_FIELD)
+        if focus_value is None:
+            continue
+        focus_path = f"entries[{entry_index}].{_JOURNAL_REPORTING_FOCUS_FIELD}"
+        if not isinstance(focus_value, list):
+            violations.append(
+                _journal_reporting_violation(
+                    focus_path,
+                    "invalid_focus_container",
+                    "array of focus items",
+                )
+            )
+            continue
+
+        entry_id = _journal_reporting_string(entry.get("id"))
+        occurred_at = _journal_reporting_entry_time_text(entry)
+        timestamp = _journal_reporting_timestamp(entry)
+        if not entry_id:
+            violations.append(
+                _journal_reporting_violation(
+                    f"entries[{entry_index}].id",
+                    "missing_required_field",
+                    "non-empty string",
+                )
+            )
+        if timestamp is None:
+            violations.append(
+                _journal_reporting_violation(
+                    f"entries[{entry_index}].occurredAt",
+                    "missing_or_invalid_timestamp",
+                    "ISO-8601 timestamp",
+                )
+            )
+
+        entry_focus: list[dict[str, Any]] = []
+        for focus_index, focus_item in enumerate(focus_value):
+            item_path = f"{focus_path}[{focus_index}]"
+            if not isinstance(focus_item, dict):
+                violations.append(
+                    _journal_reporting_violation(
+                        item_path,
+                        "invalid_focus_item",
+                        "object with title, activeLinearIssueIds, and outcomeNote",
+                    )
+                )
+                continue
+
+            title = _journal_reporting_string(focus_item.get("title"))
+            issue_value = focus_item.get("activeLinearIssueIds")
+            active_issue_ids = _journal_reporting_issue_ids(issue_value)
+            outcome_note = _journal_reporting_string(focus_item.get("outcomeNote"))
+            if not title:
+                violations.append(
+                    _journal_reporting_violation(
+                        f"{item_path}.title",
+                        "missing_required_field",
+                        "non-empty string",
+                    )
+                )
+            if not isinstance(issue_value, list) or len(active_issue_ids) != len(issue_value):
+                violations.append(
+                    _journal_reporting_violation(
+                        f"{item_path}.activeLinearIssueIds",
+                        "invalid_required_field",
+                        "array of non-empty strings",
+                    )
+                )
+            if not outcome_note:
+                violations.append(
+                    _journal_reporting_violation(
+                        f"{item_path}.outcomeNote",
+                        "missing_required_field",
+                        "non-empty string",
+                    )
+                )
+            if not (entry_id and occurred_at and timestamp and title and outcome_note):
+                continue
+            if not isinstance(issue_value, list) or len(active_issue_ids) != len(issue_value):
+                continue
+
+            focus_contract = {
+                "title": title,
+                "activeLinearIssueIds": active_issue_ids,
+                "outcomeNote": outcome_note,
+            }
+            entry_focus.append(focus_contract)
+            outcome = {
+                "entryId": entry_id,
+                "occurredAt": occurred_at,
+                **focus_contract,
+            }
+            outcomes.append(
+                {
+                    "_timestamp": timestamp,
+                    **outcome,
+                }
+            )
+
+        if entry_focus and timestamp is not None:
+            focus_entries.append(
+                {
+                    "entry_id": entry_id,
+                    "timestamp": timestamp,
+                    "focus": entry_focus,
+                }
+            )
+
+    focus_entries.sort(key=lambda item: item["timestamp"], reverse=True)
+    outcomes.sort(key=lambda item: item["_timestamp"], reverse=True)
+    recent_outcomes = [
+        {field: item[field] for field in _JOURNAL_REPORTING_OUTCOME_FIELDS}
+        for item in outcomes[: max(1, int(outcome_limit or 1))]
+    ]
+    active_focus_entry = focus_entries[0] if focus_entries else None
+
+    if not entries:
+        status = "missing"
+        detail = "Journal evidence does not contain entries[]."
+    elif not outcomes:
+        status = "warn"
+        detail = "Journal entries do not expose reusable self-improvement focus outcomes."
+    elif violations:
+        status = "warn"
+        detail = "Journal reporting contract is usable but has schema violations."
+    else:
+        status = "pass"
+        detail = "Journal self-improvement focus items provide reusable recent outcomes."
+
+    return {
+        "contract_version": JOURNAL_REPORTING_CONTRACT_VERSION,
+        "status": status,
+        "detail": detail,
+        "schema": schema,
+        "active_focus_entry_id": (
+            active_focus_entry.get("entry_id") if active_focus_entry else None
+        ),
+        "active_focus": active_focus_entry.get("focus") if active_focus_entry else [],
+        "recent_outcomes": recent_outcomes,
+        "violations": violations[:10],
+    }
 
 
 def _iter_codex_records(payload: Any) -> Iterable[dict[str, Any]]:
@@ -3215,6 +3470,9 @@ def evaluate_self_improvement_benchmark(
             operator_value_metrics.get("missing_operator_decision_support_examples") or []
         ),
     }
+    journal_reporting_contract = _build_journal_reporting_contract(
+        _load_json(journal_path),
+    )
 
     benchmark = {
         "contract_version": BENCHMARK_CONTRACT_VERSION,
@@ -3236,6 +3494,7 @@ def evaluate_self_improvement_benchmark(
         },
         "operator_value_score": operator_value_alignment.get("score"),
         "operator_value_checks": operator_value_checks,
+        "journal_reporting_contract": journal_reporting_contract,
         "anti_make_work": {
             "status": anti_make_work_check.get("status"),
             "score": anti_make_work_check.get("score"),
@@ -3294,6 +3553,14 @@ def _pipeline_benchmark_summary(benchmark: dict[str, Any]) -> dict[str, Any]:
             "triggered_harbingers": drift_metrics.get("triggered_harbingers") or [],
             "recommended_mitigations": drift_metrics.get("recommended_mitigations") or [],
             "execution_throughput_remediation": execution_remediation,
+        }
+    reporting_contract = benchmark.get("journal_reporting_contract") or {}
+    if reporting_contract:
+        summary["journal_reporting_contract"] = {
+            "contract_version": reporting_contract.get("contract_version"),
+            "status": reporting_contract.get("status"),
+            "active_focus_count": len(reporting_contract.get("active_focus") or []),
+            "recent_outcome_count": len(reporting_contract.get("recent_outcomes") or []),
         }
     return summary
 
@@ -3358,6 +3625,14 @@ def _format_pipeline_summary(
         f"- execution_loop={execution.get('score')} {execution.get('status')}",
         f"- leading_indicator_drift={drift.get('score')} {drift.get('status')}",
     ]
+    reporting_contract = benchmark.get("journal_reporting_contract") or {}
+    if reporting_contract:
+        lines.append(
+            "- journal_reporting_contract="
+            f"{reporting_contract.get('status')} "
+            f"focus={len(reporting_contract.get('active_focus') or [])} "
+            f"outcomes={len(reporting_contract.get('recent_outcomes') or [])}"
+        )
     drift_metrics = drift.get("metrics") or {}
     triggered_harbingers = drift_metrics.get("triggered_harbingers") or []
     if triggered_harbingers:
@@ -3435,6 +3710,7 @@ def evaluate_self_improvement_pipeline(
         "runtime_surface": "hermes-agent-core",
         "benchmark_before": _pipeline_benchmark_summary(benchmark),
         "benchmark": benchmark,
+        "reporting_contract": benchmark.get("journal_reporting_contract"),
         "linear": {
             "available": False,
             "error": (
