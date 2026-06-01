@@ -425,6 +425,11 @@ _VALUE_CATEGORY_SIGNAL_MAP = {
         "system_capability_changed",
     },
 }
+_GROWTH_RESUME_CANDIDATE_ID = "growth_resume_client_revenue_social_proof"
+_GROWTH_RESUME_LANE = "Growth"
+_GROWTH_RESUME_TITLE = "Resume Client Revenue and Social Proof"
+_GROWTH_RESUME_REFERENCES = ("HAD-683", "HAD-271")
+_GROWTH_RESUME_TARGET_SURFACE = "revenue-facing growth backlog"
 
 
 SELF_IMPROVEMENT_EVIDENCE_SCHEMA = {
@@ -2993,6 +2998,61 @@ def _build_issue_selection_summary(
     }
 
 
+def _build_growth_resume_summary(
+    checks: dict[str, dict[str, Any]],
+    issue_selection: dict[str, Any],
+    project_score: float,
+) -> dict[str, Any]:
+    blocked_checks = [
+        str(check_id)
+        for check_id in issue_selection.get("blocked_checks", [])
+        if str(check_id).strip()
+    ]
+    reliability_gate = checks.get("reliability_gate") or {}
+    reliability_passed = reliability_gate.get("status") == "pass"
+    enabled = reliability_passed and not blocked_checks
+    blocker_details = []
+    for check_id in blocked_checks:
+        check = checks.get(check_id) or {}
+        blocker_details.append(
+            {
+                "check_id": check_id,
+                "status": check.get("status"),
+                "score": check.get("score"),
+                "detail": check.get("detail"),
+            }
+        )
+
+    if enabled:
+        reason = (
+            "Benchmark guardrails cleared; revenue-facing growth work may resume."
+        )
+    elif not reliability_passed:
+        reason = "Growth work remains suppressed until the reliability gate passes."
+    else:
+        reason = "Growth work remains suppressed until benchmark guardrails clear."
+
+    return {
+        "enabled": enabled,
+        "status": "ready" if enabled else "suppressed",
+        "candidate_id": _GROWTH_RESUME_CANDIDATE_ID,
+        "lane": _GROWTH_RESUME_LANE,
+        "title": _GROWTH_RESUME_TITLE,
+        "references": list(_GROWTH_RESUME_REFERENCES),
+        "target_surface": _GROWTH_RESUME_TARGET_SURFACE,
+        "benchmark_score": project_score,
+        "reliability_gate_status": reliability_gate.get("status"),
+        "issue_selection_recommended_focus": issue_selection.get("recommended_focus"),
+        "blocked_by": blocked_checks,
+        "blocker_details": blocker_details,
+        "reason": reason,
+        "verification": (
+            "Rerun self_improvement_pipeline and confirm reliability_gate passes "
+            "with no issue_selection.blocked_checks before selecting growth work."
+        ),
+    }
+
+
 def _operator_decision_support_summary(metrics: dict[str, Any]) -> str:
     fields = [
         str(item)
@@ -3159,6 +3219,11 @@ def evaluate_self_improvement_benchmark(
         if check.get("critical") and check.get("status") == "fail"
     ]
     issue_selection = _build_issue_selection_summary(checks, gate)
+    growth_resume = _build_growth_resume_summary(
+        checks,
+        issue_selection,
+        project_score,
+    )
     operator_summary = _build_operator_summary(checks, issue_selection)
     previous_project_score = _latest_history_project_score(history)
     direction = _score_direction(project_score, previous_project_score, threshold=0.1)
@@ -3216,6 +3281,7 @@ def evaluate_self_improvement_benchmark(
             ],
         },
         "issue_selection": issue_selection,
+        "growth_resume": growth_resume,
         "summary": operator_summary,
         "history_path": str(history_path),
     }
@@ -3230,6 +3296,7 @@ def evaluate_self_improvement_benchmark(
                 "operator_value_score": benchmark["operator_value_score"],
                 "operator_value_checks": benchmark["operator_value_checks"],
                 "issue_selection": benchmark["issue_selection"],
+                "growth_resume": benchmark["growth_resume"],
                 "checks": {
                     name: _benchmark_history_check_snapshot(name, check)
                     for name, check in checks.items()
@@ -3265,6 +3332,16 @@ def _pipeline_benchmark_summary(benchmark: dict[str, Any]) -> dict[str, Any]:
             "recommended_mitigations": drift_metrics.get("recommended_mitigations") or [],
             "execution_throughput_remediation": execution_remediation,
         }
+    growth_resume = benchmark.get("growth_resume") or {}
+    if growth_resume:
+        summary["growth_resume"] = {
+            "enabled": growth_resume.get("enabled"),
+            "status": growth_resume.get("status"),
+            "candidate_id": growth_resume.get("candidate_id"),
+            "lane": growth_resume.get("lane"),
+            "references": growth_resume.get("references") or [],
+            "blocked_by": growth_resume.get("blocked_by") or [],
+        }
     return summary
 
 
@@ -3279,7 +3356,23 @@ def _pipeline_top_candidate(
         if check_id in checks
     ][: max(1, int(candidate_limit or 1))]
     if not blocked:
-        return None
+        growth_resume = benchmark.get("growth_resume") or {}
+        if not growth_resume.get("enabled"):
+            return None
+        return {
+            "candidate_source": "benchmark",
+            "candidate_id": growth_resume.get("candidate_id") or _GROWTH_RESUME_CANDIDATE_ID,
+            "benchmark_id": "growth_resume",
+            "lane": growth_resume.get("lane") or _GROWTH_RESUME_LANE,
+            "status": growth_resume.get("status") or "ready",
+            "priority": 2,
+            "title": growth_resume.get("title") or _GROWTH_RESUME_TITLE,
+            "score": growth_resume.get("benchmark_score") or benchmark.get("score"),
+            "detail": growth_resume.get("reason"),
+            "references": growth_resume.get("references") or list(_GROWTH_RESUME_REFERENCES),
+            "target_surface": growth_resume.get("target_surface") or _GROWTH_RESUME_TARGET_SURFACE,
+            "verification": growth_resume.get("verification"),
+        }
 
     check_id = blocked[0]
     check = checks.get(check_id) or {}
@@ -3360,6 +3453,20 @@ def _format_pipeline_summary(
         )
         for action in execution_remediation.get("actions") or []:
             lines.append(f"- execution_throughput_action={action}")
+    growth_resume = benchmark.get("growth_resume") or {}
+    if growth_resume:
+        if growth_resume.get("enabled"):
+            lines.append(
+                "- growth_resume=ready "
+                f"candidate={growth_resume.get('candidate_id')} "
+                f"references={', '.join(str(item) for item in growth_resume.get('references') or [])}"
+            )
+        else:
+            blocked_by = growth_resume.get("blocked_by") or []
+            lines.append(
+                "- growth_resume=suppressed "
+                f"blocked_by={', '.join(str(item) for item in blocked_by) or 'none'}"
+            )
     critical = benchmark.get("critical_failures") or []
     if critical:
         lines.append(f"- critical_failures={', '.join(str(item) for item in critical)}")

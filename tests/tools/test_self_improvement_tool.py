@@ -741,6 +741,151 @@ def test_durable_work_evidence_passes_anti_make_work_check(tmp_path):
     assert benchmark["critical_failures"] == []
 
 
+def test_growth_resume_candidate_emits_when_benchmark_guardrails_clear(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    history_path = tmp_path / "history.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "growth-ready",
+                    "occurredAt": recent,
+                    "summary": "Implemented verified benchmark closeout for HAD-683.",
+                    "operatorDecisionSupport": (
+                        "Operator can resume the Client Revenue and Social Proof lane "
+                        "after confirming no benchmark guardrails are blocked."
+                    ),
+                    "changedFiles": ["tools/self_improvement_tool.py"],
+                    "tests": ["pytest tests/tools/test_self_improvement_tool.py passed"],
+                }
+            ]
+        },
+    )
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_growth_ready": {
+                    "run_id": "codex_growth_ready",
+                    "status": "completed",
+                    "completed_at": recent,
+                    "exit_code": 0,
+                }
+            }
+        },
+    )
+    _write_json(
+        ctx_path,
+        {"sessions": {"ctx_retired": {"session_id": "ctx_retired", "active": False, "updated_at": recent}}},
+    )
+
+    pipeline = self_improvement_tool.evaluate_self_improvement_pipeline(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=history_path,
+        now=now,
+        persist=False,
+    )
+    benchmark = pipeline["benchmark"]
+    growth_resume = benchmark["growth_resume"]
+
+    assert benchmark["project_score"] == 100.0
+    assert benchmark["critical_failures"] == []
+    assert benchmark["issue_selection"]["blocked_checks"] == []
+    assert benchmark["issue_selection"]["recommended_focus"] == "normal lane selection"
+    assert growth_resume["enabled"] is True
+    assert growth_resume["status"] == "ready"
+    assert growth_resume["candidate_id"] == "growth_resume_client_revenue_social_proof"
+    assert growth_resume["lane"] == "Growth"
+    assert growth_resume["references"] == ["HAD-683", "HAD-271"]
+    assert growth_resume["blocked_by"] == []
+
+    top_candidate = pipeline["top_candidate"]
+    assert top_candidate["candidate_id"] == growth_resume["candidate_id"]
+    assert top_candidate["lane"] == "Growth"
+    assert top_candidate["title"] == "Resume Client Revenue and Social Proof"
+    assert top_candidate["references"] == ["HAD-683", "HAD-271"]
+    assert pipeline["benchmark_before"]["growth_resume"]["enabled"] is True
+    assert "- growth_resume=ready candidate=growth_resume_client_revenue_social_proof" in (
+        pipeline["summary_markdown"]
+    )
+
+
+def test_growth_resume_stays_suppressed_while_guardrails_are_blocked(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    history_path = tmp_path / "history.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "status-only-growth",
+                    "occurredAt": recent,
+                    "summary": "Status update: growth work is selected and queued.",
+                    "notes": "Next step is to resume Client Revenue and Social Proof.",
+                }
+            ]
+        },
+    )
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_status_only": {
+                    "run_id": "codex_status_only",
+                    "status": "completed",
+                    "completed_at": recent,
+                    "exit_code": 0,
+                }
+            }
+        },
+    )
+    _write_json(
+        ctx_path,
+        {"sessions": {"ctx_retired": {"session_id": "ctx_retired", "active": False, "updated_at": recent}}},
+    )
+
+    pipeline = self_improvement_tool.evaluate_self_improvement_pipeline(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=history_path,
+        now=now,
+        persist=False,
+    )
+    benchmark = pipeline["benchmark"]
+    growth_resume = benchmark["growth_resume"]
+
+    assert growth_resume["enabled"] is False
+    assert growth_resume["status"] == "suppressed"
+    assert "anti_make_work_check" in growth_resume["blocked_by"]
+    assert "operator_value_alignment" in growth_resume["blocked_by"]
+    assert "benchmark guardrails clear" in growth_resume["reason"]
+    assert pipeline["top_candidate"]["lane"] == "Maintenance"
+    assert pipeline["top_candidate"]["candidate_id"] == "anti_make_work_check"
+    assert "- growth_resume=suppressed blocked_by=anti_make_work_check" in (
+        pipeline["summary_markdown"]
+    )
+
+
 def test_raw_throughput_does_not_pass_operator_value_alignment(tmp_path):
     now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
     recent = now.isoformat()
