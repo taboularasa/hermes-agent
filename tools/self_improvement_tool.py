@@ -33,6 +33,7 @@ DEFAULT_ACTIVE_STALE_HOURS = 12
 PROVENANCE_CONTRACT_VERSION = "v1"
 BENCHMARK_CONTRACT_VERSION = "v1"
 JOURNAL_REPORTING_CONTRACT_VERSION = "hermes_journal_self_improvement.v1"
+LEADING_INDICATOR_REPORT_CONTRACT_VERSION = "leading_indicator_harbingers.v1"
 _BENCHMARK_HISTORY_LIMIT = 200
 _EXECUTION_LOOP_WINDOW_DAYS = 14
 _EXECUTION_LOOP_MANY_COMPLETED_THRESHOLD = 3
@@ -64,6 +65,11 @@ _LEADING_INDICATOR_HARBINGERS = (
     "flickering",
     "correlation_explosion",
 )
+_LEGACY_BENCHMARK_CHECK_FIELD_ALIASES = {
+    "reliability_gate": ("reliability_gate",),
+    "anti_make_work_check": ("anti_make_work_check", "anti_make_work"),
+    "operator_value_alignment": ("operator_value_alignment", "operator_value_score"),
+}
 _HARBINGER_EVIDENCE_FIELDS = {
     "critical_slowing_down": (
         "sample_count",
@@ -1739,6 +1745,9 @@ def _benchmark_history_check_snapshot(check_id: str, check: dict[str, Any]) -> d
     snapshot["detail"] = check.get("detail")
     snapshot["triggered_harbingers"] = metrics.get("triggered_harbingers") or []
     snapshot["harbinger_scorecard"] = metrics.get("harbinger_scorecard") or {}
+    snapshot["leading_indicator_report"] = check.get("report") or _build_leading_indicator_report(
+        check
+    )
     snapshot["recommended_mitigations"] = metrics.get("recommended_mitigations") or []
     snapshot["execution_throughput_remediation"] = (
         metrics.get("execution_throughput_remediation") or {}
@@ -2658,10 +2667,7 @@ def _iter_benchmark_history_entries(history: dict[str, Any]) -> Iterable[dict[st
 def _history_check_scores(history: dict[str, Any], check_id: str) -> list[float]:
     scores: list[float] = []
     for entry in _iter_benchmark_history_entries(history):
-        checks = entry.get("checks")
-        if not isinstance(checks, dict):
-            continue
-        score = _coerce_score(checks.get(check_id))
+        score = _coerce_score(_benchmark_entry_check_value(entry, check_id))
         if score is not None:
             scores.append(score)
     return scores
@@ -2793,19 +2799,31 @@ def _normalize_benchmark_check(value: Any) -> Optional[dict[str, Any]]:
     return {"score": round(score, 4), "status": _coerce_check_status(value)}
 
 
+def _benchmark_entry_check_value(entry: dict[str, Any], check_id: str) -> Any:
+    checks = entry.get("checks")
+    if isinstance(checks, dict) and check_id in checks:
+        return checks.get(check_id)
+    for field in _LEGACY_BENCHMARK_CHECK_FIELD_ALIASES.get(check_id, (check_id,)):
+        if field in entry:
+            return entry.get(field)
+    return None
+
+
 def _benchmark_indicator_series(
     history: dict[str, Any],
     current_checks: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     series: list[dict[str, Any]] = []
     for entry in _iter_benchmark_history_entries(history):
-        checks = entry.get("checks")
-        if not isinstance(checks, dict):
-            continue
         normalized_checks = {
             check_id: normalized
             for check_id in _LEADING_INDICATOR_CHECK_IDS
-            if (normalized := _normalize_benchmark_check(checks.get(check_id))) is not None
+            if (
+                normalized := _normalize_benchmark_check(
+                    _benchmark_entry_check_value(entry, check_id)
+                )
+            )
+            is not None
         }
         if not normalized_checks:
             continue
@@ -2919,6 +2937,68 @@ def _leading_indicator_mitigation_items(
             }
         )
     return items
+
+
+def _format_harbinger_reporting_detail(harbinger: str, card: dict[str, Any]) -> str:
+    state = "triggered" if card.get("triggered") else "clear"
+    evidence_summary = str(card.get("evidence_summary") or "").strip()
+    mitigation = str(card.get("mitigation") or "").strip()
+    next_action = str(card.get("next_action") or "").strip()
+    detail_parts = [f"{harbinger}: {state}"]
+    if evidence_summary:
+        detail_parts.append(f"evidence: {evidence_summary}")
+    if mitigation:
+        detail_parts.append(f"mitigation: {mitigation}")
+    if next_action:
+        detail_parts.append(f"next_action: {next_action}")
+    return "; ".join(detail_parts)
+
+
+def _build_leading_indicator_report(drift_check: dict[str, Any]) -> dict[str, Any]:
+    metrics = drift_check.get("metrics") if isinstance(drift_check, dict) else {}
+    metrics = metrics if isinstance(metrics, dict) else {}
+    scorecard = metrics.get("harbinger_scorecard") if isinstance(metrics, dict) else {}
+    scorecard = scorecard if isinstance(scorecard, dict) else {}
+    triggered_harbingers = [
+        str(item)
+        for item in metrics.get("triggered_harbingers", [])
+        if str(item).strip()
+    ]
+    harbingers: dict[str, dict[str, Any]] = {}
+    for harbinger in _LEADING_INDICATOR_HARBINGERS:
+        raw_card = scorecard.get(harbinger)
+        card = dict(raw_card) if isinstance(raw_card, dict) else {}
+        evidence = card.get("evidence") if isinstance(card.get("evidence"), dict) else {}
+        evidence_summary = str(card.get("evidence_summary") or "").strip()
+        if not evidence_summary and evidence:
+            evidence_summary = _harbinger_evidence_summary(harbinger, evidence)
+        report_card = {
+            "triggered": bool(card.get("triggered")),
+            "severity": str(
+                card.get("severity") or ("fail" if card.get("triggered") else "none")
+            ),
+            "evidence_summary": evidence_summary,
+            "mitigation": str(card.get("mitigation") or ""),
+            "next_action": str(card.get("next_action") or ""),
+            "evidence": evidence,
+        }
+        report_card["reporting_detail"] = _format_harbinger_reporting_detail(
+            harbinger,
+            report_card,
+        )
+        harbingers[harbinger] = report_card
+
+    return {
+        "contract_version": LEADING_INDICATOR_REPORT_CONTRACT_VERSION,
+        "score": drift_check.get("score"),
+        "status": drift_check.get("status"),
+        "detail": drift_check.get("detail"),
+        "triggered_harbingers": triggered_harbingers,
+        "operator_value_score_series": metrics.get("operator_value_score_series") or [],
+        "stabilization_hold": metrics.get("stabilization_hold") or {},
+        "recommended_mitigations": metrics.get("recommended_mitigations") or [],
+        "harbingers": harbingers,
+    }
 
 
 def _detect_critical_slowing_down(
@@ -3240,7 +3320,7 @@ def _evaluate_leading_indicator_drift_check(
             ),
         }
     )
-    return _build_benchmark_item(
+    drift_check = _build_benchmark_item(
         "leading_indicator_drift",
         "Leading-indicator drift",
         score=score,
@@ -3249,6 +3329,8 @@ def _evaluate_leading_indicator_drift_check(
         critical=True,
         metrics=metrics,
     )
+    drift_check["report"] = _build_leading_indicator_report(drift_check)
+    return drift_check
 
 
 def _build_issue_selection_summary(
@@ -3556,6 +3638,8 @@ def evaluate_self_improvement_benchmark(
         "operator_value_score": operator_value_alignment.get("score"),
         "operator_value_checks": operator_value_checks,
         "journal_reporting_contract": journal_reporting_contract,
+        "leading_indicators": leading_indicator_drift.get("report")
+        or _build_leading_indicator_report(leading_indicator_drift),
         "anti_make_work": {
             "status": anti_make_work_check.get("status"),
             "score": anti_make_work_check.get("score"),
@@ -3612,6 +3696,7 @@ def _pipeline_benchmark_summary(benchmark: dict[str, Any]) -> dict[str, Any]:
             "score": drift.get("score"),
             "status": drift.get("status"),
             "triggered_harbingers": drift_metrics.get("triggered_harbingers") or [],
+            "harbinger_report": drift.get("report") or _build_leading_indicator_report(drift),
             "recommended_mitigations": drift_metrics.get("recommended_mitigations") or [],
             "execution_throughput_remediation": execution_remediation,
         }
@@ -3664,6 +3749,9 @@ def _pipeline_top_candidate(
         candidate["triggered_harbingers"] = metrics.get("triggered_harbingers") or []
         candidate["recommended_mitigations"] = metrics.get("recommended_mitigations") or []
         candidate["harbinger_scorecard"] = metrics.get("harbinger_scorecard") or {}
+        candidate["leading_indicator_report"] = (
+            check.get("report") or _build_leading_indicator_report(check)
+        )
         candidate["execution_throughput_remediation"] = (
             metrics.get("execution_throughput_remediation") or {}
         )
@@ -3987,6 +4075,16 @@ def _format_pipeline_summary(
             f"outcomes={len(reporting_contract.get('recent_outcomes') or [])}"
         )
     drift_metrics = drift.get("metrics") or {}
+    leading_indicator_report = drift.get("report") or (
+        _build_leading_indicator_report(drift) if drift else {}
+    )
+    if leading_indicator_report:
+        harbinger_states = []
+        for harbinger in _LEADING_INDICATOR_HARBINGERS:
+            card = (leading_indicator_report.get("harbingers") or {}).get(harbinger) or {}
+            state = "triggered" if card.get("triggered") else "clear"
+            harbinger_states.append(f"{harbinger}:{state}")
+        lines.append("- leading_indicator_watchlist=" + ", ".join(harbinger_states))
     triggered_harbingers = drift_metrics.get("triggered_harbingers") or []
     if triggered_harbingers:
         lines.append(
@@ -4091,6 +4189,7 @@ def evaluate_self_improvement_pipeline(
         "benchmark_before": _pipeline_benchmark_summary(benchmark),
         "benchmark": benchmark,
         "reporting_contract": benchmark.get("journal_reporting_contract"),
+        "leading_indicators": benchmark.get("leading_indicators"),
         "linear": {
             "available": False,
             "error": (

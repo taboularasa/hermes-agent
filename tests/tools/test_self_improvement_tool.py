@@ -1257,6 +1257,37 @@ def test_leading_indicator_drift_fails_when_operator_value_regresses(tmp_path):
     assert benchmark["trend"] == "regressing"
 
 
+def test_leading_indicator_drift_reads_legacy_top_level_history_fields():
+    history = {
+        "version": 1,
+        "evaluations": [
+            {
+                "operator_value_score": score,
+                "operator_value_alignment": {"score": score, "status": "pass"},
+                "reliability_gate": 0.95,
+                "anti_make_work": 0.95,
+            }
+            for score in [0.98, 0.9, 0.887, 0.884]
+        ],
+    }
+    operator_value = {"score": 0.883, "status": "pass", "metrics": {}}
+
+    drift = self_improvement_tool._evaluate_leading_indicator_drift_check(
+        operator_value,
+        history,
+        {
+            "reliability_gate": {"score": 0.95, "status": "pass"},
+            "anti_make_work_check": {"score": 0.95, "status": "pass"},
+            "operator_value_alignment": operator_value,
+        },
+    )
+
+    assert drift["metrics"]["previous_operator_value_score"] == 0.884
+    assert drift["metrics"]["series_sample_count"] == 5
+    assert drift["metrics"]["triggered_harbingers"] == ["critical_slowing_down"]
+    assert drift["report"]["harbingers"]["critical_slowing_down"]["triggered"] is True
+
+
 def test_leading_indicator_drift_reports_exact_degraded_plateau_hold():
     scores = [0.878, 0.878, 0.878, 0.878, 0.878, 0.4292, 0.4292, 0.4292]
     history = {
@@ -1366,8 +1397,17 @@ def test_leading_indicator_drift_flags_critical_slowing_down(tmp_path):
 
     drift = benchmark["checks"]["leading_indicator_drift"]
     scorecard = drift["metrics"]["harbinger_scorecard"]
+    report = benchmark["leading_indicators"]
     assert drift["status"] == "fail"
     assert drift["metrics"]["triggered_harbingers"] == ["critical_slowing_down"]
+    assert report["triggered_harbingers"] == ["critical_slowing_down"]
+    assert set(report["harbingers"]) == {
+        "critical_slowing_down",
+        "variance_explosion",
+        "flickering",
+        "correlation_explosion",
+    }
+    assert report["harbingers"]["critical_slowing_down"]["reporting_detail"]
     assert scorecard["critical_slowing_down"]["triggered"] is True
     assert scorecard["critical_slowing_down"]["evidence"]["recovery_gap"] > 0.09
     assert scorecard["critical_slowing_down"]["next_action"]
@@ -1550,17 +1590,28 @@ def test_leading_indicator_scorecard_reports_evidence_and_mitigation_for_all_har
         "correlation_explosion",
     }
     scorecard = drift["metrics"]["harbinger_scorecard"]
+    report = drift["report"]
     assert set(drift["metrics"]["triggered_harbingers"]) == expected_harbingers
+    assert report["contract_version"] == (
+        self_improvement_tool.LEADING_INDICATOR_REPORT_CONTRACT_VERSION
+    )
+    assert set(report["harbingers"]) == expected_harbingers
     assert {item["harbinger"] for item in drift["metrics"]["recommended_mitigations"]} == (
         expected_harbingers
     )
     for harbinger in expected_harbingers:
         card = scorecard[harbinger]
+        report_card = report["harbingers"][harbinger]
         assert card["triggered"] is True
         assert card["evidence"]
         assert card["evidence_summary"]
         assert card["mitigation"]
         assert card["next_action"]
+        assert report_card["triggered"] is True
+        assert report_card["evidence_summary"]
+        assert report_card["mitigation"]
+        assert report_card["next_action"]
+        assert report_card["reporting_detail"]
         assert harbinger in drift["detail"]
 
 
@@ -1604,7 +1655,10 @@ def test_benchmark_history_persists_leading_indicator_scorecard_snapshot(tmp_pat
     history = json.loads(history_path.read_text(encoding="utf-8"))
     drift_snapshot = history["runs"][-1]["checks"]["leading_indicator_drift"]
     critical = drift_snapshot["harbinger_scorecard"]["critical_slowing_down"]
+    report = drift_snapshot["leading_indicator_report"]
     assert drift_snapshot["triggered_harbingers"] == ["critical_slowing_down"]
+    assert report["triggered_harbingers"] == ["critical_slowing_down"]
+    assert report["harbingers"]["critical_slowing_down"]["mitigation"]
     assert drift_snapshot["recommended_mitigations"][0]["evidence_summary"]
     assert critical["evidence_summary"]
     assert critical["mitigation"]
@@ -1647,8 +1701,12 @@ def test_pipeline_summary_surfaces_leading_indicator_harbinger_mitigation():
     compact = self_improvement_tool._pipeline_benchmark_summary(benchmark)
 
     assert "- leading_indicator_harbingers=critical_slowing_down" in summary
+    assert "- leading_indicator_watchlist=critical_slowing_down:triggered" in summary
     assert "- leading_indicator_critical_slowing_down: evidence=" in summary
     assert "mitigation=Stop expanding self-improvement scope" in summary
+    assert compact["leading_indicator_drift"]["harbinger_report"]["harbingers"][
+        "critical_slowing_down"
+    ]["reporting_detail"]
     assert compact["leading_indicator_drift"]["triggered_harbingers"] == [
         "critical_slowing_down"
     ]
@@ -1934,6 +1992,12 @@ def test_pipeline_uses_core_benchmark_contract_without_persisting(tmp_path):
     drift = benchmark["checks"]["leading_indicator_drift"]
 
     assert pipeline["runtime_surface"] == "hermes-agent-core"
+    assert set(pipeline["leading_indicators"]["harbingers"]) == {
+        "critical_slowing_down",
+        "variance_explosion",
+        "flickering",
+        "correlation_explosion",
+    }
     assert pipeline["linear"]["available"] is False
     assert "Linear writeback is not part" in pipeline["linear"]["error"]
     assert benchmark["contract_version"] == self_improvement_tool.BENCHMARK_CONTRACT_VERSION
