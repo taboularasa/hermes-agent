@@ -99,6 +99,54 @@ _HARBINGER_EVIDENCE_FIELDS = {
         "correlated_drop_threshold",
     ),
 }
+_BACKLOG_CANDIDATE_ID_KEYS = (
+    "id",
+    "identifier",
+    "key",
+    "issue_id",
+    "issueId",
+    "linear_id",
+    "linearIssueId",
+)
+_BACKLOG_CANDIDATE_REPO_KEYS = (
+    "repo",
+    "repos",
+    "repository",
+    "repositories",
+    "repository_name",
+    "repositoryName",
+    "repo_name",
+    "repoName",
+    "target_repo",
+    "targetRepo",
+)
+_BACKLOG_CANDIDATE_STATUS_KEYS = (
+    "status",
+    "state",
+    "resolution",
+    "workflow_state",
+    "workflowState",
+)
+_BACKLOG_CANDIDATE_HUMAN_OWNER_LABELS = {"owner:human", "owner=human"}
+_BACKLOG_CANDIDATE_REPO_UNRESOLVED_LABELS = {
+    "repo-unresolved",
+    "repo unresolved",
+    "repository-unresolved",
+    "repository unresolved",
+}
+_BACKLOG_CANDIDATE_IGNORED_PROJECT_LABELS = {
+    "ignored-project",
+    "ignored project",
+    "project:ignored",
+    "project=ignored",
+}
+_BACKLOG_CANDIDATE_SELECTED_KEYS = (
+    "selected",
+    "selected_for_review",
+    "selectedForReview",
+    "active_review",
+    "activeReview",
+)
 _ONTOLOGY_SCAN_SUFFIXES = {".json", ".yaml", ".yml", ".md"}
 _ONTOLOGY_SCAN_PRUNED_DIRS = {".git", "__pycache__", ".pytest_cache", "tests"}
 _ONTOLOGY_REQUIRED_ARTIFACTS = (
@@ -534,6 +582,15 @@ SELF_IMPROVEMENT_PIPELINE_SCHEMA = {
             "active_stale_hours": {"type": "integer", "minimum": 1},
             "persist": {"type": "boolean"},
             "candidate_limit": {"type": "integer", "minimum": 1},
+            "available_capacity": {"type": "integer", "minimum": 0},
+            "selected_candidate_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "backlog_candidates": {
+                "type": "array",
+                "items": {"type": "object"},
+            },
             "auto_repair_linear": {"type": "boolean"},
             "auto_close_resolved": {"type": "boolean"},
         },
@@ -3357,6 +3414,10 @@ def _build_issue_selection_summary(
         "detail": detail,
         "remediation_actions": remediation_actions,
         "execution_throughput": execution_remediation,
+        "parallel_repo_backed_selection_allowed": not reliability_blocked,
+        "parallel_repo_backed_selection_blocker": (
+            "reliability_gate" if reliability_blocked else None
+        ),
     }
 
 
@@ -3697,10 +3758,302 @@ def _pipeline_top_candidate(
     return candidate
 
 
+def _coerce_candidate_records(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _candidate_string(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _candidate_identifier(candidate: dict[str, Any]) -> str:
+    for key in _BACKLOG_CANDIDATE_ID_KEYS:
+        text = _candidate_string(candidate.get(key))
+        if text:
+            return text
+    return ""
+
+
+def _candidate_title(candidate: dict[str, Any]) -> str:
+    for key in ("title", "summary", "name"):
+        text = _candidate_string(candidate.get(key))
+        if text:
+            return text
+    return _candidate_identifier(candidate) or "Untitled backlog candidate"
+
+
+def _iter_candidate_strings(value: Any) -> Iterable[str]:
+    if value is None:
+        return
+    if isinstance(value, dict):
+        for key in ("name", "title", "value", "label", "id", "state", "status"):
+            text = _candidate_string(value.get(key))
+            if text:
+                yield text
+        return
+    if isinstance(value, list):
+        for item in value:
+            yield from _iter_candidate_strings(item)
+        return
+    text = _candidate_string(value)
+    if text:
+        yield text
+
+
+def _candidate_labels(candidate: dict[str, Any]) -> set[str]:
+    labels: set[str] = set()
+    for key in ("label", "labels", "label_names", "labelNames", "tags"):
+        labels.update(text.lower() for text in _iter_candidate_strings(candidate.get(key)))
+    return labels
+
+
+def _candidate_status_values(candidate: dict[str, Any]) -> set[str]:
+    values: set[str] = set()
+    for key in _BACKLOG_CANDIDATE_STATUS_KEYS:
+        values.update(text.lower() for text in _iter_candidate_strings(candidate.get(key)))
+    return values
+
+
+def _candidate_repo_values(candidate: dict[str, Any]) -> list[str]:
+    repos: list[str] = []
+    for key in _BACKLOG_CANDIDATE_REPO_KEYS:
+        repos.extend(_candidate_string(text) for text in _iter_candidate_strings(candidate.get(key)))
+    return [repo for repo in repos if repo]
+
+
+def _candidate_project_values(candidate: dict[str, Any]) -> set[str]:
+    values: set[str] = set()
+    for key in ("project", "project_name", "projectName", "project_status", "projectStatus"):
+        values.update(text.lower() for text in _iter_candidate_strings(candidate.get(key)))
+    return values
+
+
+def _candidate_bool(candidate: dict[str, Any], *keys: str) -> bool:
+    for key in keys:
+        value = candidate.get(key)
+        if isinstance(value, str):
+            if value.strip().lower() in {"1", "true", "yes", "y"}:
+                return True
+            continue
+        if bool(value):
+            return True
+    return False
+
+
+def _candidate_has_human_owner(candidate: dict[str, Any], labels: set[str]) -> bool:
+    if labels & _BACKLOG_CANDIDATE_HUMAN_OWNER_LABELS:
+        return True
+    owner_type = _candidate_string(
+        candidate.get("owner_type") or candidate.get("ownerType") or candidate.get("ownership")
+    ).lower()
+    if owner_type == "human":
+        return True
+    owner = candidate.get("owner")
+    if isinstance(owner, str) and owner.strip().lower() in {"human", "owner:human"}:
+        return True
+    if isinstance(owner, dict):
+        for key in ("type", "kind", "ownership"):
+            if _candidate_string(owner.get(key)).lower() == "human":
+                return True
+    return False
+
+
+def _candidate_filter_reasons(
+    candidate: dict[str, Any],
+    *,
+    selected_candidate_ids: set[str],
+) -> list[str]:
+    candidate_id = _candidate_identifier(candidate)
+    labels = _candidate_labels(candidate)
+    statuses = _candidate_status_values(candidate)
+    projects = _candidate_project_values(candidate)
+    repo_values = _candidate_repo_values(candidate)
+    reasons: list[str] = []
+
+    if candidate_id and candidate_id in selected_candidate_ids:
+        reasons.append("selected_or_active")
+    elif _candidate_bool(candidate, *_BACKLOG_CANDIDATE_SELECTED_KEYS):
+        reasons.append("selected_or_active")
+
+    if (
+        _candidate_bool(candidate, "ignored_project", "project_ignored", "ignoredProject")
+        or labels & _BACKLOG_CANDIDATE_IGNORED_PROJECT_LABELS
+        or "ignored" in projects
+    ):
+        reasons.append("ignored_project")
+
+    if _candidate_has_human_owner(candidate, labels):
+        reasons.append("owner_human")
+
+    if (
+        _candidate_bool(candidate, "duplicate", "is_duplicate", "isDuplicate")
+        or "duplicate" in labels
+        or "duplicate" in statuses
+    ):
+        reasons.append("duplicate")
+
+    if (
+        _candidate_bool(candidate, "repo_unresolved", "repoUnresolved", "repository_unresolved")
+        or labels & _BACKLOG_CANDIDATE_REPO_UNRESOLVED_LABELS
+        or not repo_values
+    ):
+        reasons.append("repo_unresolved")
+
+    return reasons
+
+
+def _candidate_sort_key(candidate: dict[str, Any]) -> tuple[int, str]:
+    priority = candidate.get("priority")
+    try:
+        priority_value = int(priority)
+    except (TypeError, ValueError):
+        priority_value = 999
+    return priority_value, _candidate_identifier(candidate) or _candidate_title(candidate)
+
+
+def _parallel_candidate_payload(candidate: dict[str, Any]) -> dict[str, Any]:
+    candidate_id = _candidate_identifier(candidate)
+    repos = _candidate_repo_values(candidate)
+    return {
+        "candidate_source": _candidate_string(candidate.get("candidate_source"))
+        or _candidate_string(candidate.get("source"))
+        or "backlog",
+        "candidate_id": candidate_id,
+        "issue_id": candidate_id,
+        "title": _candidate_title(candidate),
+        "repo": repos[0],
+        "repos": repos,
+        "lane": _candidate_string(candidate.get("lane")) or "Implementation",
+        "status": _candidate_string(candidate.get("status")) or "ready",
+        "priority": candidate.get("priority"),
+        "target_surface": "repo-backed self-improvement backlog",
+        "safety": {
+            "ignored_project": False,
+            "owner_human": False,
+            "duplicate": False,
+            "repo_unresolved": False,
+        },
+    }
+
+
+def _filter_reason_counts(filtered: Iterable[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in filtered:
+        for reason in item.get("reasons") or []:
+            counts[reason] = counts.get(reason, 0) + 1
+    return counts
+
+
+def _resolve_parallel_capacity(
+    *,
+    available_capacity: Optional[int],
+    candidate_limit: int,
+    top_candidate: Optional[dict[str, Any]],
+) -> int:
+    if available_capacity is not None:
+        return max(0, int(available_capacity))
+    selected_slots = 1 if top_candidate else 0
+    return max(0, int(candidate_limit or 1) - selected_slots)
+
+
+def _build_parallel_backlog_selection(
+    *,
+    benchmark: dict[str, Any],
+    backlog_candidates: Any,
+    selected_candidate_ids: Optional[Iterable[Any]],
+    available_capacity: Optional[int],
+    candidate_limit: int,
+    top_candidate: Optional[dict[str, Any]],
+) -> dict[str, Any]:
+    requested_candidates = _coerce_candidate_records(backlog_candidates)
+    selected_ids = {
+        _candidate_string(candidate_id)
+        for candidate_id in (selected_candidate_ids or [])
+        if _candidate_string(candidate_id)
+    }
+    capacity = _resolve_parallel_capacity(
+        available_capacity=available_capacity,
+        candidate_limit=candidate_limit,
+        top_candidate=top_candidate,
+    )
+    issue_selection = benchmark.get("issue_selection") or {}
+    reliability_blocked = (
+        issue_selection.get("parallel_repo_backed_selection_blocker") == "reliability_gate"
+    )
+
+    if reliability_blocked:
+        return {
+            "available_capacity": capacity,
+            "selected_candidate_ids": sorted(selected_ids),
+            "requested_backlog_candidate_count": len(requested_candidates),
+            "eligible_backlog_candidate_count": 0,
+            "filtered_backlog_candidate_count": 0,
+            "filtered_reasons": {},
+            "candidates": [],
+            "saturation_state": "blocked_by_reliability_gate",
+            "guardrail_scope": (
+                "Reliability repair blocks new repo-backed work; non-reliability "
+                "review guardrails remain separate from parallel lane selection."
+            ),
+        }
+
+    filtered: list[dict[str, Any]] = []
+    eligible: list[dict[str, Any]] = []
+    for candidate in requested_candidates:
+        reasons = _candidate_filter_reasons(
+            candidate,
+            selected_candidate_ids=selected_ids,
+        )
+        if reasons:
+            filtered.append(
+                {
+                    "candidate_id": _candidate_identifier(candidate),
+                    "title": _candidate_title(candidate),
+                    "reasons": sorted(set(reasons)),
+                }
+            )
+            continue
+        eligible.append(candidate)
+
+    selected = [
+        _parallel_candidate_payload(candidate)
+        for candidate in sorted(eligible, key=_candidate_sort_key)[:capacity]
+    ]
+    if capacity <= 0:
+        saturation_state = "no_spare_capacity"
+    elif selected:
+        saturation_state = "spare_capacity_filled"
+    elif requested_candidates:
+        saturation_state = "no_safe_repo_backed_candidates"
+    else:
+        saturation_state = "no_backlog_candidates"
+
+    return {
+        "available_capacity": capacity,
+        "selected_candidate_ids": sorted(selected_ids),
+        "requested_backlog_candidate_count": len(requested_candidates),
+        "eligible_backlog_candidate_count": len(eligible),
+        "filtered_backlog_candidate_count": len(filtered),
+        "filtered_reasons": _filter_reason_counts(filtered),
+        "filtered_candidates": filtered[:10],
+        "candidates": selected,
+        "saturation_state": saturation_state,
+        "guardrail_scope": (
+            "Quality guardrails suppress raw task-count selection but do not "
+            "serialize independent repo-backed candidates that pass safety filters."
+        ),
+    }
+
+
 def _format_pipeline_summary(
     *,
     benchmark: dict[str, Any],
     top_candidate: Optional[dict[str, Any]],
+    parallel_selection: Optional[dict[str, Any]] = None,
 ) -> str:
     checks = benchmark.get("checks") or {}
     reliability = checks.get("reliability_gate") or {}
@@ -3770,6 +4123,22 @@ def _format_pipeline_summary(
         lines.append(f"- top_candidate={top_candidate.get('candidate_id')}")
     else:
         lines.append("- top_candidate=None")
+    if parallel_selection and parallel_selection.get("requested_backlog_candidate_count"):
+        parallel_candidates = parallel_selection.get("candidates") or []
+        lines.append(
+            "- parallel_candidates="
+            f"{len(parallel_candidates)}/{parallel_selection.get('available_capacity')} "
+            f"state={parallel_selection.get('saturation_state')}"
+        )
+        filter_counts = parallel_selection.get("filtered_reasons") or {}
+        if filter_counts:
+            lines.append(
+                "- parallel_candidate_filters="
+                + ", ".join(
+                    f"{reason}={filter_counts[reason]}"
+                    for reason in sorted(filter_counts)
+                )
+            )
     return "\n".join(lines)
 
 
@@ -3785,6 +4154,9 @@ def evaluate_self_improvement_pipeline(
     active_stale_hours: int = DEFAULT_ACTIVE_STALE_HOURS,
     persist: bool = True,
     candidate_limit: int = 3,
+    available_capacity: Optional[int] = None,
+    selected_candidate_ids: Optional[Iterable[Any]] = None,
+    backlog_candidates: Optional[list[dict[str, Any]]] = None,
     auto_repair_linear: Optional[bool] = None,
     auto_close_resolved: Optional[bool] = None,
 ) -> dict[str, Any]:
@@ -3801,6 +4173,14 @@ def evaluate_self_improvement_pipeline(
         persist=persist,
     )
     top_candidate = _pipeline_top_candidate(benchmark, candidate_limit)
+    parallel_selection = _build_parallel_backlog_selection(
+        benchmark=benchmark,
+        backlog_candidates=backlog_candidates,
+        selected_candidate_ids=selected_candidate_ids,
+        available_capacity=available_capacity,
+        candidate_limit=candidate_limit,
+        top_candidate=top_candidate,
+    )
     linear_requested = bool(auto_repair_linear) or bool(auto_close_resolved)
     pipeline = {
         "contract_version": BENCHMARK_CONTRACT_VERSION,
@@ -3822,10 +4202,13 @@ def evaluate_self_improvement_pipeline(
             "repairs": [],
         },
         "top_candidate": top_candidate,
+        "capacity": parallel_selection,
+        "parallel_candidates": parallel_selection.get("candidates") or [],
     }
     pipeline["summary_markdown"] = _format_pipeline_summary(
         benchmark=benchmark,
         top_candidate=top_candidate,
+        parallel_selection=parallel_selection,
     )
     return pipeline
 
@@ -3889,6 +4272,9 @@ def self_improvement_pipeline(
     active_stale_hours: Optional[int] = None,
     persist: Optional[bool] = None,
     candidate_limit: Optional[int] = None,
+    available_capacity: Optional[int] = None,
+    selected_candidate_ids: Optional[list[str]] = None,
+    backlog_candidates: Optional[list[dict[str, Any]]] = None,
     auto_repair_linear: Optional[bool] = None,
     auto_close_resolved: Optional[bool] = None,
     task_id: Optional[str] = None,
@@ -3904,6 +4290,11 @@ def self_improvement_pipeline(
         active_stale_hours=int(active_stale_hours) if active_stale_hours else DEFAULT_ACTIVE_STALE_HOURS,
         persist=True if persist is None else bool(persist),
         candidate_limit=int(candidate_limit) if candidate_limit else 3,
+        available_capacity=(
+            int(available_capacity) if available_capacity is not None else None
+        ),
+        selected_candidate_ids=selected_candidate_ids,
+        backlog_candidates=backlog_candidates,
         auto_repair_linear=auto_repair_linear,
         auto_close_resolved=auto_close_resolved,
     )
@@ -3941,6 +4332,9 @@ registry.register(
         active_stale_hours=args.get("active_stale_hours"),
         persist=args.get("persist"),
         candidate_limit=args.get("candidate_limit"),
+        available_capacity=args.get("available_capacity"),
+        selected_candidate_ids=args.get("selected_candidate_ids"),
+        backlog_candidates=args.get("backlog_candidates"),
         auto_repair_linear=args.get("auto_repair_linear"),
         auto_close_resolved=args.get("auto_close_resolved"),
         task_id=kw.get("task_id"),

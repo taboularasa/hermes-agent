@@ -2010,6 +2010,139 @@ def test_pipeline_uses_core_benchmark_contract_without_persisting(tmp_path):
     assert "reliability_gate=1.0 pass" in pipeline["summary_markdown"]
 
 
+def test_pipeline_fills_spare_capacity_with_safe_repo_backed_candidates(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    history_path = tmp_path / "history.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "selected-review-evidence",
+                    "occurredAt": recent,
+                    "summary": "Implemented a repo-backed benchmark fix.",
+                    "changedFiles": ["tools/self_improvement_tool.py"],
+                    "tests": ["pytest tests/tools/test_self_improvement_tool.py passed"],
+                }
+            ]
+        },
+    )
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_selected": {
+                    "run_id": "codex_selected",
+                    "status": "completed",
+                    "completed_at": recent,
+                    "exit_code": 0,
+                    "final_message": (
+                        "CHANGED_FILES\n- tools/self_improvement_tool.py\n"
+                        "VERIFICATION\n- pytest tests/tools/test_self_improvement_tool.py passed"
+                    ),
+                }
+            }
+        },
+    )
+    _write_json(
+        ctx_path,
+        {"sessions": {"ctx_1": {"session_id": "ctx_1", "active": False, "updated_at": recent}}},
+    )
+
+    pipeline = self_improvement_tool.evaluate_self_improvement_pipeline(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=history_path,
+        now=now,
+        persist=False,
+        candidate_limit=3,
+        selected_candidate_ids=["HAD-1199"],
+        backlog_candidates=[
+            {
+                "id": "HAD-1199",
+                "title": "Already selected review item",
+                "repo": "taboularasa/hermes-agent",
+                "project": {"name": "Hermes Self-Improvement", "state": "started"},
+                "priority": 0,
+            },
+            {
+                "id": "HAD-1200",
+                "title": "Add execution-loop capacity reporting",
+                "repo": "taboularasa/hermes-agent",
+                "project": {"name": "Hermes Self-Improvement", "state": "started"},
+                "priority": 2,
+            },
+            {
+                "id": "HAD-1201",
+                "title": "Tighten workspace executor tests",
+                "repository": {"name": "hermes-agent", "owner": "taboularasa"},
+                "project": {"name": "Hermes Self-Improvement", "state": "started"},
+                "priority": 1,
+            },
+            {
+                "id": "HAD-1202",
+                "title": "Human-owned candidate stays out of automation",
+                "repo": "taboularasa/hermes-agent",
+                "labels": ["owner:human"],
+                "project": {"name": "Hermes Self-Improvement", "state": "started"},
+            },
+            {
+                "id": "HAD-1203",
+                "title": "Duplicate candidate stays out of automation",
+                "repo": "taboularasa/hermes-agent",
+                "status": "Duplicate",
+                "project": {"name": "Hermes Self-Improvement", "state": "started"},
+            },
+            {
+                "id": "HAD-1204",
+                "title": "Ignored project candidate stays out of automation",
+                "repo": "taboularasa/hermes-agent",
+                "project": {"name": "Hermes Self-Improvement", "state": "ignored"},
+            },
+            {
+                "id": "HAD-1205",
+                "title": "Repo-unresolved candidate stays out of automation",
+                "labels": ["repo-unresolved"],
+                "project": {"name": "Hermes Self-Improvement", "state": "started"},
+            },
+        ],
+    )
+
+    benchmark = pipeline["benchmark"]
+    issue_selection = benchmark["issue_selection"]
+    capacity = pipeline["capacity"]
+
+    assert pipeline["top_candidate"]["candidate_id"] == "operator_value_alignment"
+    assert issue_selection["quantity_guardrail_active"] is True
+    assert issue_selection["parallel_repo_backed_selection_allowed"] is True
+    assert issue_selection["parallel_repo_backed_selection_blocker"] is None
+    assert capacity["available_capacity"] == 2
+    assert capacity["selected_candidate_ids"] == ["HAD-1199"]
+    assert capacity["saturation_state"] == "spare_capacity_filled"
+    assert [item["candidate_id"] for item in pipeline["parallel_candidates"]] == [
+        "HAD-1201",
+        "HAD-1200",
+    ]
+    assert capacity["filtered_reasons"] == {
+        "duplicate": 1,
+        "ignored_project": 1,
+        "owner_human": 1,
+        "repo_unresolved": 1,
+        "selected_or_active": 1,
+    }
+    assert "top_candidate=operator_value_alignment" in pipeline["summary_markdown"]
+    assert "parallel_candidates=2/2 state=spare_capacity_filled" in pipeline["summary_markdown"]
+
+
 def test_benchmark_exposes_journal_reporting_contract_from_focus_schema(tmp_path):
     now = datetime(2026, 5, 3, 12, 0, 0, tzinfo=timezone.utc)
     recent = now.isoformat()
