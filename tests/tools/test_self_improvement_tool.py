@@ -885,6 +885,151 @@ def test_codex_file_link_and_npm_verification_pass_anti_make_work_check(tmp_path
     ]
 
 
+def test_codex_sidecar_final_message_hydrates_stale_aggregate(tmp_path):
+    now = datetime(2026, 5, 31, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+    sidecar_dir = tmp_path / "repo" / ".git" / "hermes-codex"
+    sidecar_record = sidecar_dir / "codex_publish.json"
+    sidecar_message = sidecar_dir / "codex_publish.last-message.txt"
+    final_message = (
+        "Created the new post: "
+        "[2026-05-31-approval-starts-before-authorization.md]"
+        f"({tmp_path}/repo/src/content/blog/"
+        "2026-05-31-approval-starts-before-authorization.md).\n\n"
+        "Verification:\n"
+        "- `npm run write:lint -- <post>`: PASS, clean.\n"
+        "- `npm run build`: PASS, 125 pages built."
+    )
+
+    _write_json(journal_path, {"entries": []})
+    _write_json(
+        sidecar_record,
+        {
+            "run_id": "codex_publish",
+            "status": "completed",
+            "completed_at": recent,
+            "final_message": final_message,
+            "last_agent_message": final_message,
+            "exit_code": 0,
+        },
+    )
+    sidecar_message.write_text(final_message, encoding="utf-8")
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_publish": {
+                    "run_id": "codex_publish",
+                    "status": "completed",
+                    "completed_at": recent,
+                    "final_message": "STATUS\nCompleted. Next steps queued.",
+                    "record_path": str(sidecar_record),
+                    "last_message_path": str(sidecar_message),
+                    "exit_code": 0,
+                }
+            }
+        },
+    )
+    _write_json(
+        ctx_path,
+        {"sessions": {"ctx_1": {"session_id": "ctx_1", "active": False, "updated_at": recent}}},
+    )
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    anti_make_work = benchmark["checks"]["anti_make_work_check"]
+    assert anti_make_work["status"] == "pass"
+    assert anti_make_work["metrics"]["assessed_work_item_count"] == 1
+    assert anti_make_work["metrics"]["shallow_codex_work_item_count"] == 0
+    durable_example = anti_make_work["metrics"]["durable_examples"][0]
+    assert durable_example["source"] == "codex_runs"
+    assert durable_example["id"] == "codex_publish"
+    assert "changed_files" in durable_example["signals"]
+    assert "verification" in durable_example["signals"]
+    assert "anti_make_work_check" not in benchmark["critical_failures"]
+
+
+def test_codex_status_only_sidecar_remains_shallow(tmp_path):
+    now = datetime(2026, 5, 31, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+    sidecar_dir = tmp_path / "repo" / ".git" / "hermes-codex"
+    sidecar_record = sidecar_dir / "codex_status.json"
+    sidecar_message = sidecar_dir / "codex_status.last-message.txt"
+    status_message = "STATUS\nCompleted triage. Summary captured; next steps queued."
+
+    _write_json(journal_path, {"entries": []})
+    _write_json(
+        sidecar_record,
+        {
+            "run_id": "codex_status",
+            "status": "completed",
+            "completed_at": recent,
+            "final_message": status_message,
+            "last_agent_message": status_message,
+            "exit_code": 0,
+        },
+    )
+    sidecar_message.write_text(status_message, encoding="utf-8")
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_status": {
+                    "run_id": "codex_status",
+                    "status": "completed",
+                    "completed_at": recent,
+                    "final_message": "STATUS\nCompleted triage.",
+                    "record_path": str(sidecar_record),
+                    "last_message_path": str(sidecar_message),
+                    "exit_code": 0,
+                }
+            }
+        },
+    )
+    _write_json(
+        ctx_path,
+        {"sessions": {"ctx_1": {"session_id": "ctx_1", "active": False, "updated_at": recent}}},
+    )
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    anti_make_work = benchmark["checks"]["anti_make_work_check"]
+    assert anti_make_work["status"] == "fail"
+    assert anti_make_work["metrics"]["shallow_codex_work_item_count"] == 1
+    shallow_example = anti_make_work["metrics"]["shallow_examples"][0]
+    assert shallow_example["source"] == "codex_runs"
+    assert shallow_example["id"] == "codex_status"
+    assert shallow_example["signals"] == []
+    assert shallow_example["issue"] == "status_language_without_value_category_evidence"
+    assert "anti_make_work_check" in benchmark["critical_failures"]
+
+
 def test_durable_work_evidence_passes_anti_make_work_check(tmp_path):
     now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
     recent = now.isoformat()
