@@ -370,6 +370,29 @@ _CODEX_BACKFILL_EVIDENCE_FIELDS = (
     "changedFiles, tests, commitShas, pullRequests, or artifactPaths",
     "controlOwnershipPreserved, incidentRiskReduced, or systemCapabilityChanged when applicable",
 )
+_CODEX_SIDECAR_MAX_BYTES = 2_000_000
+_CODEX_SIDECAR_MESSAGE_FIELDS = (
+    "final_message",
+    "last_agent_message",
+    "output_tail",
+)
+_CODEX_SIDECAR_STRUCTURED_FIELDS = (
+    "artifact_paths",
+    "changed_files",
+    "changed_paths",
+    "commit_shas",
+    "commits",
+    "control_ownership_preserved",
+    "incident_risk_reduced",
+    "operator_decision_support",
+    "pull_requests",
+    "system_capability_changed",
+    "test_results",
+    "tests",
+    "verification",
+    "verification_result",
+    "verification_targets",
+)
 _STATUS_ONLY_PATTERNS = (
     re.compile(r"\bactionable\b", re.IGNORECASE),
     re.compile(r"\bactive work\b", re.IGNORECASE),
@@ -770,6 +793,97 @@ def _iter_records(payload: Any, key: str) -> Iterable[dict[str, Any]]:
                 yield item
 
 
+def _is_codex_sidecar_path(path: Path, *, suffixes: set[str]) -> bool:
+    if path.suffix not in suffixes:
+        return False
+    parts = path.parts
+    if len(parts) < 3:
+        return False
+    return parts[-2] == "hermes-codex" and parts[-3] == ".git"
+
+
+def _read_codex_sidecar_text(value: Any, *, suffixes: set[str]) -> Optional[str]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    path = Path(value).expanduser()
+    if not _is_codex_sidecar_path(path, suffixes=suffixes):
+        return None
+    try:
+        if not path.is_file():
+            return None
+        if path.stat().st_size > _CODEX_SIDECAR_MAX_BYTES:
+            return None
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        logger.warning("Failed to read Codex sidecar evidence file %s", path, exc_info=True)
+        return None
+
+
+def _merge_codex_sidecar_fields(record: dict[str, Any], sidecar: dict[str, Any]) -> list[str]:
+    merged: list[str] = []
+    for field in _CODEX_SIDECAR_MESSAGE_FIELDS:
+        value = sidecar.get(field)
+        if not _value_has_content(value):
+            continue
+        current_value = record.get(field)
+        if not _value_has_content(current_value):
+            record[field] = value
+            merged.append(field)
+            continue
+        if (
+            isinstance(value, str)
+            and isinstance(current_value, str)
+            and value != current_value
+            and _text_durable_signals(value)
+            and not _text_durable_signals(current_value)
+        ):
+            sidecar_field = f"sidecar_{field}"
+            record[sidecar_field] = value
+            merged.append(sidecar_field)
+
+    for field in _CODEX_SIDECAR_STRUCTURED_FIELDS:
+        value = sidecar.get(field)
+        if _value_has_content(value) and not _value_has_content(record.get(field)):
+            record[field] = value
+            merged.append(field)
+    return merged
+
+
+def _hydrate_codex_sidecar_record(record: dict[str, Any]) -> dict[str, Any]:
+    hydrated = dict(record)
+    hydrated_fields: list[str] = []
+
+    record_text = "\n".join(_collect_record_text(hydrated))
+    if _structured_durable_signals(hydrated) or _text_durable_signals(record_text):
+        return hydrated
+
+    record_path_text = _read_codex_sidecar_text(
+        hydrated.get("record_path"),
+        suffixes={".json"},
+    )
+    if record_path_text:
+        try:
+            sidecar = json.loads(record_path_text)
+        except json.JSONDecodeError:
+            sidecar = None
+        if isinstance(sidecar, dict):
+            hydrated_fields.extend(_merge_codex_sidecar_fields(hydrated, sidecar))
+
+    last_message = _read_codex_sidecar_text(
+        hydrated.get("last_message_path"),
+        suffixes={".txt"},
+    )
+    if last_message and _text_durable_signals(last_message):
+        current_final = str(hydrated.get("final_message") or "")
+        if not _text_durable_signals(current_final):
+            hydrated["sidecar_last_message"] = last_message
+            hydrated_fields.append("sidecar_last_message")
+
+    if hydrated_fields:
+        hydrated["codex_sidecar_hydrated_fields"] = sorted(set(hydrated_fields))
+    return hydrated
+
+
 def _record_timestamp(record: dict[str, Any], *keys: str) -> Optional[datetime]:
     for key in keys:
         parsed = _parse_time(record.get(key))
@@ -1036,7 +1150,8 @@ def _build_journal_reporting_contract(
 
 
 def _iter_codex_records(payload: Any) -> Iterable[dict[str, Any]]:
-    yield from _iter_records(payload, "runs")
+    for record in _iter_records(payload, "runs"):
+        yield _hydrate_codex_sidecar_record(record)
 
 
 def _iter_codex_timestamps(payload: Any) -> Iterable[datetime]:
