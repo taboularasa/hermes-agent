@@ -1492,6 +1492,87 @@ def test_raw_throughput_does_not_pass_operator_value_alignment(tmp_path):
     assert "decision support" in benchmark["summary"]["operator_value_alignment"]
 
 
+def test_operator_value_alignment_uses_self_improvement_focus_for_codex_run_link(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "focus-link-operator-value",
+                    "occurredAt": recent,
+                    "selfImprovementFocus": [
+                        {
+                            "title": "Operator-decision support follow-through for codex_c5bc43777a63",
+                            "outcomeNote": (
+                                "Operator decided to accept codex_c5bc43777a63 and move "
+                                "to the next issue."
+                            ),
+                            "operatorDecisionSupport": (
+                                "Operator can compare the verified change and choose "
+                                "the next issue."
+                            ),
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_c5bc43777a63": {
+                    "run_id": "codex_c5bc43777a63",
+                    "status": "completed",
+                    "completed_at": recent,
+                    "final_message": (
+                        "CHANGED_FILES\n"
+                        "- tools/self_improvement_tool.py\n"
+                        "VERIFICATION\n"
+                        "- pytest tests/tools/test_self_improvement_tool.py passed\n"
+                        "COMMIT\n"
+                        "- abc1234\n"
+                        "PULL_REQUEST\n"
+                        "- https://github.com/taboularasa/hermes-agent/pull/1168\n"
+                    ),
+                    "exit_code": 0,
+                }
+            }
+        },
+    )
+    _write_json(ctx_path, {"sessions": {}})
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    operator_value = benchmark["checks"]["operator_value_alignment"]
+    assert operator_value["status"] in {"warn", "pass"}
+    assert operator_value["score"] >= 0.6
+    assert operator_value["metrics"]["assessed_work_item_count"] == 2
+    assert operator_value["metrics"]["aligned_work_item_count"] == 1
+    assert operator_value["metrics"]["verified_system_change_count"] == 1
+    assert operator_value["metrics"]["operator_decision_support_count"] == 2
+    assert operator_value["metrics"]["missing_operator_decision_support_examples"] == []
+    assert (
+        operator_value["metrics"]["aligned_examples"][0]["id"] == "codex_c5bc43777a63"
+    )
+
+
 def test_failed_codex_runs_with_completed_at_do_not_count_as_deliveries(tmp_path):
     now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
     recent = now.isoformat()
