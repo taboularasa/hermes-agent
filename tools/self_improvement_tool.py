@@ -2358,6 +2358,77 @@ def _collect_journal_codex_skip_remediations(journal_payload: Any) -> dict[str, 
     return remediations
 
 
+def _collect_journal_codex_operator_support(
+    journal_payload: Any,
+) -> dict[str, list[dict[str, str]]]:
+    support_by_run_id: dict[str, list[dict[str, str]]] = {}
+    for entry in _iter_records(journal_payload, "entries"):
+        focus_items = entry.get(_JOURNAL_REPORTING_FOCUS_FIELD)
+        if not isinstance(focus_items, list):
+            continue
+
+        entry_evidence = _collect_operator_decision_support_evidence(entry)
+        entry_text = " ".join(
+            value
+            for key, value in (
+                ("summary", entry.get("summary")),
+                ("notes", entry.get("notes")),
+                ("result", entry.get("result")),
+                ("details", entry.get("details")),
+                ("outcome", entry.get("outcome")),
+            )
+            if isinstance(value, str) and value.strip()
+        )
+        entry_text_evidence = (
+            _operator_decision_support_text_evidence(entry_text) if entry_text else []
+        )
+
+        for focus_item in focus_items:
+            if not isinstance(focus_item, dict):
+                continue
+
+            title = _journal_reporting_string(focus_item.get("title"))
+            outcome_note = _journal_reporting_string(focus_item.get("outcomeNote"))
+            if not title and not outcome_note:
+                continue
+
+            focus_evidence = _collect_operator_decision_support_evidence(focus_item)
+            if not focus_evidence:
+                focus_evidence = _operator_decision_support_text_evidence(
+                    " ".join(part for part in (title, outcome_note) if part)
+                )
+            if not focus_evidence:
+                focus_evidence = entry_evidence
+            if not focus_evidence:
+                focus_evidence = entry_text_evidence
+            if not focus_evidence:
+                continue
+
+            for segment in _journal_focus_note_segments(title, outcome_note):
+                run_ids = sorted(set(_CODEX_RUN_ID_PATTERN.findall(segment)))
+                if not run_ids:
+                    continue
+
+                action_labels = _matching_codex_skip_note_labels(
+                    segment,
+                    _CODEX_SKIP_NOTE_ACTION_PATTERNS,
+                )
+                rationale_labels = _matching_codex_skip_note_labels(
+                    segment,
+                    _CODEX_NON_DURABLE_RATIONALE_PATTERNS,
+                )
+                if action_labels and rationale_labels:
+                    continue
+
+                for run_id in run_ids:
+                    support_by_run_id.setdefault(run_id, []).extend(focus_evidence)
+
+    return {
+        run_id: _dedupe_operator_evidence(evidence)
+        for run_id, evidence in support_by_run_id.items()
+    }
+
+
 def _record_claimed_timestamp(record: dict[str, Any]) -> Optional[datetime]:
     return _record_timestamp(
         record,
@@ -3313,7 +3384,11 @@ def _codex_journal_skip_applies_to_assessment(
     return bool(signals) and signals.issubset(_CODEX_TEXT_DELIVERY_SIGNALS)
 
 
-def _assess_operator_value_item(item: dict[str, Any]) -> dict[str, Any]:
+def _assess_operator_value_item(
+    item: dict[str, Any],
+    *,
+    journal_operator_evidence: Optional[list[dict[str, str]]] = None,
+) -> dict[str, Any]:
     make_work = _assess_make_work_item(item)
     record = item.get("record") or {}
     text = str(item.get("text") or "")
@@ -3321,6 +3396,21 @@ def _assess_operator_value_item(item: dict[str, Any]) -> dict[str, Any]:
     decision_support_signals = durable_signals.intersection(_OPERATOR_DECISION_SUPPORT_SIGNALS)
     verified_change_signals = durable_signals.intersection(_VERIFIED_SYSTEM_CHANGE_SIGNALS)
     operator_decision_support_evidence = _collect_operator_decision_support_evidence(record)
+
+    if journal_operator_evidence:
+        operator_decision_support_evidence = _dedupe_operator_evidence(
+            operator_decision_support_evidence + list(journal_operator_evidence)
+        )
+        decision_support_signals.update(
+            signal
+            for signal in (
+                str(evidence.get("field")).strip()
+                for evidence in journal_operator_evidence
+                if isinstance(evidence, dict)
+            )
+            if signal in _OPERATOR_DECISION_SUPPORT_SIGNALS
+        )
+
     if decision_support_signals and not operator_decision_support_evidence:
         operator_decision_support_evidence = _operator_decision_support_text_evidence(text)
     operator_decision_support_evidence = _dedupe_operator_evidence(
@@ -3512,6 +3602,7 @@ def _evaluate_operator_value_alignment_check(
     journal_payload = _load_json(journal_path)
     codex_payload = _load_json(codex_runs_path)
     ctx_payload = _load_json(ctx_bindings_path)
+    journal_operator_support = _collect_journal_codex_operator_support(journal_payload)
     execution_throughput = _build_execution_throughput_signal(
         journal_payload=journal_payload,
         codex_payload=codex_payload,
@@ -3519,16 +3610,24 @@ def _evaluate_operator_value_alignment_check(
         now=now,
         freshness_hours=freshness_hours,
     )
-    assessments = [
-        _assess_operator_value_item(item)
-        for item in _iter_recent_claimed_work_items(
-            journal_payload=journal_payload,
-            codex_payload=codex_payload,
-            ctx_payload=ctx_payload,
-            now=now,
-            freshness_hours=freshness_hours,
+    assessments = []
+    for item in _iter_recent_claimed_work_items(
+        journal_payload=journal_payload,
+        codex_payload=codex_payload,
+        ctx_payload=ctx_payload,
+        now=now,
+        freshness_hours=freshness_hours,
+    ):
+        journal_support = None
+        if item.get("source") == "codex_runs":
+            run_id = str(item.get("id") or "").strip()
+            journal_support = journal_operator_support.get(run_id)
+        assessments.append(
+            _assess_operator_value_item(
+                item,
+                journal_operator_evidence=journal_support,
+            )
         )
-    ]
 
     assessed_count = len(assessments)
     durable_count = sum(1 for item in assessments if item["durable"])
