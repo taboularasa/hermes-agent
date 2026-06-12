@@ -258,6 +258,14 @@ _CLAIM_CONTAINER_KEYS = {
     "lane_links",
     "self_improvement_focus",
 }
+_CODEX_ISSUE_ID_KEYS = {
+    "active_linear_issue_ids",
+    "external_key",
+    "issue_id",
+    "issue_identifier",
+    "linear_issue_id",
+    "linear_issues",
+}
 _OPERATOR_DECISION_SUPPORT_STRUCTURED_KEYS = {
     "blocker",
     "blockers",
@@ -373,6 +381,7 @@ _CODEX_BACKFILL_EVIDENCE_FIELDS = (
     "controlOwnershipPreserved, incidentRiskReduced, or systemCapabilityChanged when applicable",
 )
 _CODEX_RUN_ID_PATTERN = re.compile(r"\bcodex_[A-Za-z0-9]+\b")
+_LINEAR_ISSUE_ID_PATTERN = re.compile(r"\b[A-Z][A-Z0-9]+-\d+\b")
 _CODEX_SKIP_NOTE_ACTION_PATTERNS = (
     ("skip", re.compile(r"\bskip(?:ped|ping)?\b", re.IGNORECASE)),
     ("exempt", re.compile(r"\bexempt(?:ed|ion)?\b", re.IGNORECASE)),
@@ -2379,10 +2388,71 @@ def _collect_codex_run_ids_from_value(value: Any, key: str = "") -> set[str]:
     return set()
 
 
+def _normalize_linear_issue_id(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if text.lower().startswith("linear:"):
+        text = text.split(":", 1)[1].strip()
+    match = _LINEAR_ISSUE_ID_PATTERN.search(text.upper())
+    return match.group(0) if match else None
+
+
+def _collect_linear_issue_ids_from_issue_fields(value: Any, key: str = "") -> set[str]:
+    normalized_key = _normalize_evidence_key(key)
+    if normalized_key in _TEXT_EVIDENCE_EXCLUDED_KEYS:
+        return set()
+    if isinstance(value, str):
+        if not key or normalized_key in _CODEX_ISSUE_ID_KEYS:
+            return {
+                match.group(0)
+                for match in _LINEAR_ISSUE_ID_PATTERN.finditer(value.upper())
+            }
+        return set()
+    if isinstance(value, dict):
+        issue_ids: set[str] = set()
+        for child_key, child_value in value.items():
+            issue_ids.update(
+                _collect_linear_issue_ids_from_issue_fields(child_value, str(child_key))
+            )
+        return issue_ids
+    if isinstance(value, list):
+        issue_ids = set()
+        for child_value in value:
+            issue_ids.update(_collect_linear_issue_ids_from_issue_fields(child_value, key))
+        return issue_ids
+    return set()
+
+
+def _codex_run_id(record: dict[str, Any]) -> Optional[str]:
+    for key in ("run_id", "id"):
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _build_codex_issue_run_id_index(codex_payload: Any) -> dict[str, set[str]]:
+    issue_run_ids: dict[str, set[str]] = {}
+    for record in _iter_codex_records(codex_payload):
+        if _codex_record_status(record) in _CODEX_FAILURE_STATUSES:
+            continue
+        run_id = _codex_run_id(record)
+        if not run_id:
+            continue
+        for issue_id in sorted(_collect_linear_issue_ids_from_issue_fields(record)):
+            issue_run_ids.setdefault(issue_id, set()).add(run_id)
+    return issue_run_ids
+
+
 def _collect_journal_codex_operator_support(
     journal_payload: Any,
+    codex_payload: Any = None,
 ) -> dict[str, list[dict[str, str]]]:
     support_by_run_id: dict[str, list[dict[str, str]]] = {}
+    codex_issue_run_ids = _build_codex_issue_run_id_index(codex_payload)
     for entry in _iter_records(journal_payload, "entries"):
         focus_items = entry.get(_JOURNAL_REPORTING_FOCUS_FIELD)
         if not isinstance(focus_items, list):
@@ -2447,6 +2517,13 @@ def _collect_journal_codex_operator_support(
             ]
 
             focus_run_ids = _collect_codex_run_ids_from_value(focus_item)
+            active_issue_ids = _journal_reporting_issue_ids(
+                focus_item.get("activeLinearIssueIds")
+            )
+            for issue_id in active_issue_ids:
+                normalized_issue_id = _normalize_linear_issue_id(issue_id)
+                if normalized_issue_id:
+                    focus_run_ids.update(codex_issue_run_ids.get(normalized_issue_id, set()))
             if not focus_run_ids and len(focus_items) == 1:
                 focus_run_ids = set(entry_context_run_ids)
             for segment in _journal_focus_note_segments(title, outcome_note):
@@ -3649,7 +3726,10 @@ def _evaluate_operator_value_alignment_check(
     journal_payload = _load_json(journal_path)
     codex_payload = _load_json(codex_runs_path)
     ctx_payload = _load_json(ctx_bindings_path)
-    journal_operator_support = _collect_journal_codex_operator_support(journal_payload)
+    journal_operator_support = _collect_journal_codex_operator_support(
+        journal_payload,
+        codex_payload,
+    )
     journal_operator_support_examples = [
         {
             "run_id": run_id,
