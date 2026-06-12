@@ -2480,7 +2480,9 @@ def _collect_journal_codex_operator_support(
         }
         entry_context_run_ids = _collect_codex_run_ids_from_value(entry_context)
 
-        for focus_item in focus_items:
+        entry_id = _journal_reporting_string(entry.get("id"))
+        occurred_at = _journal_reporting_entry_time_text(entry)
+        for focus_index, focus_item in enumerate(focus_items):
             if not isinstance(focus_item, dict):
                 continue
 
@@ -2500,6 +2502,19 @@ def _collect_journal_codex_operator_support(
                 focus_evidence = entry_text_evidence
             if not focus_evidence:
                 continue
+            focus_evidence = [
+                {
+                    **evidence,
+                    "journal_entry_id": entry_id or "unknown",
+                    "journal_occurred_at": occurred_at or "unknown",
+                    "journal_focus_path": (
+                        f"entries[{entry_id or 'unknown'}]."
+                        f"{_JOURNAL_REPORTING_FOCUS_FIELD}[{focus_index}]"
+                    ),
+                    "journal_focus_title": title or "unknown",
+                }
+                for evidence in focus_evidence
+            ]
 
             focus_run_ids = _collect_codex_run_ids_from_value(focus_item)
             active_issue_ids = _journal_reporting_issue_ids(
@@ -3715,6 +3730,13 @@ def _evaluate_operator_value_alignment_check(
         journal_payload,
         codex_payload,
     )
+    journal_operator_support_examples = [
+        {
+            "run_id": run_id,
+            "evidence": evidence[:3],
+        }
+        for run_id, evidence in sorted(journal_operator_support.items())[:10]
+    ]
     execution_throughput = _build_execution_throughput_signal(
         journal_payload=journal_payload,
         codex_payload=codex_payload,
@@ -3831,6 +3853,9 @@ def _evaluate_operator_value_alignment_check(
                 else 1.0
             ),
             "quantity_guardrail_basis": "average_evidence_quality_not_item_count",
+            "journal_operator_support_codex_run_count": len(journal_operator_support),
+            "journal_operator_support_codex_run_ids": sorted(journal_operator_support)[:50],
+            "journal_operator_support_examples": journal_operator_support_examples,
             "execution_throughput": execution_throughput,
             "issue_examples": issue_items[:5],
             "aligned_examples": [item for item in assessments if item["aligned"]][:5],
