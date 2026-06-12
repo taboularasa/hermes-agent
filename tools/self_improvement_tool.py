@@ -127,6 +127,8 @@ _JOURNAL_REPORTING_OUTCOME_FIELDS = (
     "outcomeNote",
 )
 _JOURNAL_REPORTING_OUTCOME_LIMIT = 4
+_JOURNAL_OPERATOR_SUPPORT_ID_LIMIT = 200
+_JOURNAL_OPERATOR_SUPPORT_EXAMPLE_LIMIT = 200
 _LEADING_INDICATOR_CHECK_IDS = (
     "reliability_gate",
     "anti_make_work_check",
@@ -3877,7 +3879,9 @@ def _evaluate_operator_value_alignment_check(
             "run_id": run_id,
             "evidence": evidence[:3],
         }
-        for run_id, evidence in sorted(journal_operator_support.items())[:10]
+        for run_id, evidence in sorted(journal_operator_support.items())[
+            :_JOURNAL_OPERATOR_SUPPORT_EXAMPLE_LIMIT
+        ]
     ]
     execution_throughput = _build_execution_throughput_signal(
         journal_payload=journal_payload,
@@ -4033,7 +4037,9 @@ def _evaluate_operator_value_alignment_check(
             ),
             "quantity_guardrail_basis": "average_evidence_quality_not_item_count",
             "journal_operator_support_codex_run_count": len(journal_operator_support),
-            "journal_operator_support_codex_run_ids": sorted(journal_operator_support)[:50],
+            "journal_operator_support_codex_run_ids": sorted(journal_operator_support)[
+                :_JOURNAL_OPERATOR_SUPPORT_ID_LIMIT
+            ],
             "journal_operator_support_examples": journal_operator_support_examples,
             "execution_throughput": execution_throughput,
             "issue_examples": issue_items[:5],
