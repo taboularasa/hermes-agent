@@ -3366,6 +3366,112 @@ def test_pipeline_fills_spare_capacity_with_safe_repo_backed_candidates(tmp_path
     assert "parallel_candidates=2/2 state=spare_capacity_filled" in pipeline["summary_markdown"]
 
 
+def test_pipeline_excludes_stale_hermes_delegate_on_duplicate_human_issue(tmp_path):
+    now = datetime(2026, 6, 12, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    history_path = tmp_path / "history.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "stale-ownership-regression",
+                    "occurredAt": recent,
+                    "summary": "Verified stale ownership cleanup candidate filtering.",
+                    "changedFiles": ["tools/self_improvement_tool.py"],
+                    "tests": ["pytest tests/tools/test_self_improvement_tool.py passed"],
+                }
+            ]
+        },
+    )
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_selected": {
+                    "run_id": "codex_selected",
+                    "status": "completed",
+                    "completed_at": recent,
+                    "exit_code": 0,
+                }
+            }
+        },
+    )
+    _write_json(
+        ctx_path,
+        {"sessions": {"ctx_1": {"session_id": "ctx_1", "active": False, "updated_at": recent}}},
+    )
+
+    pipeline = self_improvement_tool.evaluate_self_improvement_pipeline(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=history_path,
+        now=now,
+        persist=False,
+        available_capacity=2,
+        backlog_candidates=[
+            {
+                "id": "HAD-129",
+                "title": "Duplicate human-held issue with stale Hermes delegate",
+                "candidate_source": "delegate_codex",
+                "repo": "taboularasa/hermes-agent",
+                "state": {"name": "Duplicate", "type": "canceled"},
+                "state_type": "duplicate",
+                "labels": {"nodes": [{"name": "owner:human"}, {"name": "delegate:codex"}]},
+                "delegate": {"name": "Hermes"},
+                "priority": 0,
+            },
+            {
+                "id": "HAD-516",
+                "title": "Clean stale Hermes ownership residue",
+                "repo": "taboularasa/hermes-agent",
+                "priority": 1,
+            },
+            {
+                "id": "HAD-513",
+                "title": "Add workspace backlog verification fixture",
+                "repo": "taboularasa/hermes-agent",
+                "priority": 2,
+            },
+        ],
+    )
+
+    capacity = pipeline["capacity"]
+    assert [item["candidate_id"] for item in pipeline["parallel_candidates"]] == [
+        "HAD-516",
+        "HAD-513",
+    ]
+    assert capacity["eligible_backlog_candidate_count"] == 2
+    assert capacity["filtered_reasons"] == {
+        "duplicate": 1,
+        "not_actionable_state": 1,
+        "owner_human": 1,
+    }
+
+    filtered = {
+        item["candidate_id"]: item
+        for item in capacity["filtered_candidates"]
+    }
+    assert filtered["HAD-129"]["reasons"] == [
+        "duplicate",
+        "not_actionable_state",
+        "owner_human",
+    ]
+    assert filtered["HAD-129"]["cleanup_reason"] == "stale_hermes_ownership_residue"
+    assert "HAD-129" not in {
+        item["candidate_id"]
+        for item in pipeline["parallel_candidates"]
+    }
+
+
 def test_benchmark_exposes_journal_reporting_contract_from_focus_schema(tmp_path):
     now = datetime(2026, 5, 3, 12, 0, 0, tzinfo=timezone.utc)
     recent = now.isoformat()

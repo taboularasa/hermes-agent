@@ -198,11 +198,42 @@ _BACKLOG_CANDIDATE_REPO_KEYS = (
 _BACKLOG_CANDIDATE_STATUS_KEYS = (
     "status",
     "state",
+    "state_type",
+    "stateType",
     "resolution",
     "workflow_state",
     "workflowState",
+    "workflow_state_type",
+    "workflowStateType",
 )
 _BACKLOG_CANDIDATE_HUMAN_OWNER_LABELS = {"owner:human", "owner=human"}
+_BACKLOG_CANDIDATE_HERMES_DELEGATE_LABELS = {
+    "delegate:codex",
+    "delegate:hermes",
+    "delegate=codex",
+    "delegate=hermes",
+    "delegated:codex",
+    "delegated:hermes",
+}
+_BACKLOG_CANDIDATE_HERMES_DELEGATE_KEYS = (
+    "delegate",
+    "delegate_to",
+    "delegateTo",
+    "delegated_to",
+    "delegatedTo",
+    "delegation",
+    "delegation_owner",
+    "delegationOwner",
+)
+_BACKLOG_CANDIDATE_TERMINAL_STATES = {
+    "canceled",
+    "cancelled",
+    "closed",
+    "complete",
+    "completed",
+    "done",
+    "merged",
+}
 _BACKLOG_CANDIDATE_REPO_UNRESOLVED_LABELS = {
     "repo-unresolved",
     "repo unresolved",
@@ -2814,7 +2845,14 @@ def _capacity_candidate_repo(record: dict[str, Any]) -> Optional[str]:
 def _capacity_candidate_status_text(record: dict[str, Any]) -> str:
     values: list[str] = []
     for key, value in _iter_normalized_key_values(record):
-        if key in {"review_state", "state", "status", "workflow_state"}:
+        if key in {
+            "review_state",
+            "state",
+            "state_type",
+            "status",
+            "workflow_state",
+            "workflow_state_type",
+        }:
             values.extend(_string_leaf_values(value))
     return " ".join(values)
 
@@ -5056,10 +5094,16 @@ def _iter_candidate_strings(value: Any) -> Iterable[str]:
     if value is None:
         return
     if isinstance(value, dict):
-        for key in ("name", "title", "value", "label", "id", "state", "status"):
-            text = _candidate_string(value.get(key))
+        for key in ("name", "title", "value", "label", "id", "state", "status", "type"):
+            child = value.get(key)
+            if isinstance(child, (dict, list)):
+                yield from _iter_candidate_strings(child)
+                continue
+            text = _candidate_string(child)
             if text:
                 yield text
+        for key in ("node", "nodes", "edge", "edges"):
+            yield from _iter_candidate_strings(value.get(key))
         return
     if isinstance(value, list):
         for item in value:
@@ -5082,6 +5126,11 @@ def _candidate_status_values(candidate: dict[str, Any]) -> set[str]:
     for key in _BACKLOG_CANDIDATE_STATUS_KEYS:
         values.update(text.lower() for text in _iter_candidate_strings(candidate.get(key)))
     return values
+
+
+def _candidate_has_terminal_state(statuses: set[str]) -> bool:
+    normalized = {_normalize_evidence_key(status) for status in statuses}
+    return bool(normalized & _BACKLOG_CANDIDATE_TERMINAL_STATES)
 
 
 def _candidate_repo_values(candidate: dict[str, Any]) -> list[str]:
@@ -5113,6 +5162,9 @@ def _candidate_bool(candidate: dict[str, Any], *keys: str) -> bool:
 def _candidate_has_human_owner(candidate: dict[str, Any], labels: set[str]) -> bool:
     if labels & _BACKLOG_CANDIDATE_HUMAN_OWNER_LABELS:
         return True
+    normalized_labels = {_normalize_evidence_key(label) for label in labels}
+    if "owner_human" in normalized_labels:
+        return True
     owner_type = _candidate_string(
         candidate.get("owner_type") or candidate.get("ownerType") or candidate.get("ownership")
     ).lower()
@@ -5126,6 +5178,49 @@ def _candidate_has_human_owner(candidate: dict[str, Any], labels: set[str]) -> b
             if _candidate_string(owner.get(key)).lower() == "human":
                 return True
     return False
+
+
+def _candidate_has_hermes_delegate_residue(
+    candidate: dict[str, Any],
+    labels: set[str],
+) -> bool:
+    normalized_labels = {_normalize_evidence_key(label) for label in labels}
+    if labels & _BACKLOG_CANDIDATE_HERMES_DELEGATE_LABELS:
+        return True
+    if normalized_labels & {
+        "delegate_codex",
+        "delegate_hermes",
+        "delegated_codex",
+        "delegated_hermes",
+        "hermes_delegate",
+    }:
+        return True
+
+    for key in _BACKLOG_CANDIDATE_HERMES_DELEGATE_KEYS:
+        for text in _iter_candidate_strings(candidate.get(key)):
+            normalized = _normalize_evidence_key(text)
+            if normalized in {"codex", "delegate_codex", "hermes", "hermes_delegate"}:
+                return True
+    return False
+
+
+def _candidate_cleanup_reason(
+    candidate: dict[str, Any],
+    reasons: Iterable[str],
+) -> Optional[str]:
+    reason_set = set(reasons)
+    labels = _candidate_labels(candidate)
+    if not reason_set or not _candidate_has_hermes_delegate_residue(candidate, labels):
+        return None
+    if reason_set & {
+        "duplicate",
+        "ignored_project",
+        "not_actionable_state",
+        "owner_human",
+        "selected_or_active",
+    }:
+        return "stale_hermes_ownership_residue"
+    return None
 
 
 def _candidate_filter_reasons(
@@ -5161,6 +5256,9 @@ def _candidate_filter_reasons(
         or "duplicate" in statuses
     ):
         reasons.append("duplicate")
+
+    if _candidate_has_terminal_state(statuses):
+        reasons.append("not_actionable_state")
 
     if (
         _candidate_bool(candidate, "repo_unresolved", "repoUnresolved", "repository_unresolved")
@@ -5199,6 +5297,7 @@ def _parallel_candidate_payload(candidate: dict[str, Any]) -> dict[str, Any]:
         "target_surface": "repo-backed self-improvement backlog",
         "safety": {
             "ignored_project": False,
+            "not_actionable_state": False,
             "owner_human": False,
             "duplicate": False,
             "repo_unresolved": False,
@@ -5275,13 +5374,16 @@ def _build_parallel_backlog_selection(
             selected_candidate_ids=selected_ids,
         )
         if reasons:
-            filtered.append(
-                {
-                    "candidate_id": _candidate_identifier(candidate),
-                    "title": _candidate_title(candidate),
-                    "reasons": sorted(set(reasons)),
-                }
-            )
+            reason_list = sorted(set(reasons))
+            filtered_candidate = {
+                "candidate_id": _candidate_identifier(candidate),
+                "title": _candidate_title(candidate),
+                "reasons": reason_list,
+            }
+            cleanup_reason = _candidate_cleanup_reason(candidate, reason_list)
+            if cleanup_reason:
+                filtered_candidate["cleanup_reason"] = cleanup_reason
+            filtered.append(filtered_candidate)
             continue
         eligible.append(candidate)
 
