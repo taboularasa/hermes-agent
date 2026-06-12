@@ -71,6 +71,30 @@ _BACKLOG_CANDIDATE_KEYS = {
     "repo_backed_candidates",
     "safe_repo_backed_candidates",
 }
+_LINEAR_PLANNING_SURFACE_FIELD_ALIASES = {
+    "lane": ("lane", "work_lane", "workLane", "planning_lane", "planningLane"),
+    "verification": (
+        "verification",
+        "verification_expectation",
+        "verificationExpectation",
+        "verification_plan",
+        "verificationPlan",
+        "verification_targets",
+        "verificationTargets",
+    ),
+    "active_status_comment": (
+        "active_status_comment",
+        "activeStatusComment",
+        "latest_status_comment",
+        "latestStatusComment",
+        "status_comment",
+        "statusComment",
+        "status_comments",
+        "statusComments",
+        "comments",
+    ),
+}
+_LINEAR_PLANNING_SURFACE_SAMPLE_LIMIT = 5
 _SELECTED_WORK_KEYS = {
     "active_selected_work",
     "current_selected_work",
@@ -5243,6 +5267,76 @@ def _candidate_title(candidate: dict[str, Any]) -> str:
     return _candidate_identifier(candidate) or "Untitled backlog candidate"
 
 
+def _candidate_planning_field_present(candidate: dict[str, Any], aliases: Iterable[str]) -> bool:
+    for alias in aliases:
+        value = candidate.get(alias)
+        if isinstance(value, str) and value.strip():
+            return True
+        if isinstance(value, list) and any(
+            _candidate_planning_field_present({"value": item}, ("value",))
+            for item in value
+        ):
+            return True
+        if isinstance(value, dict) and any(
+            _candidate_string(value.get(key))
+            for key in ("body", "comment", "content", "description", "text", "title", "value")
+        ):
+            return True
+    return False
+
+
+def _build_linear_planning_surface(backlog_candidates: Any) -> dict[str, Any]:
+    candidates = _coerce_candidate_records(backlog_candidates)
+    required_fields = sorted(_LINEAR_PLANNING_SURFACE_FIELD_ALIASES)
+    missing_field_counts = {field: 0 for field in required_fields}
+    issue_samples: list[dict[str, Any]] = []
+
+    for candidate in candidates:
+        missing_fields = [
+            field
+            for field in required_fields
+            if not _candidate_planning_field_present(
+                candidate,
+                _LINEAR_PLANNING_SURFACE_FIELD_ALIASES[field],
+            )
+        ]
+        for field in missing_fields:
+            missing_field_counts[field] += 1
+        if missing_fields and len(issue_samples) < _LINEAR_PLANNING_SURFACE_SAMPLE_LIMIT:
+            issue_samples.append(
+                {
+                    "candidate_id": _candidate_identifier(candidate),
+                    "title": _candidate_title(candidate),
+                    "missing_fields": missing_fields,
+                }
+            )
+
+    expected_field_count = len(candidates) * len(required_fields)
+    missing_field_count = sum(missing_field_counts.values())
+    score = 1.0 if expected_field_count == 0 else round(
+        (expected_field_count - missing_field_count) / expected_field_count,
+        4,
+    )
+    return {
+        "surface": "linear_planning_surface",
+        "status": "pass" if missing_field_count == 0 else "partial",
+        "score": score,
+        "candidate_count": len(candidates),
+        "required_fields": required_fields,
+        "missing_field_counts": {
+            field: count for field, count in missing_field_counts.items() if count
+        },
+        "issue_samples": issue_samples,
+        "detail": (
+            "No Linear backlog candidates were provided."
+            if not candidates
+            else "Linear backlog candidates expose lane, verification, and active status-comment planning fields."
+            if missing_field_count == 0
+            else "Linear backlog candidates are missing planning fields; inspect issue_samples for exact candidates and fields."
+        ),
+    }
+
+
 def _iter_candidate_strings(value: Any) -> Iterable[str]:
     if value is None:
         return
@@ -5513,6 +5607,7 @@ def _build_parallel_backlog_selection(
             "filtered_reasons": {},
             "candidates": [],
             "saturation_state": "blocked_by_reliability_gate",
+            "linear_planning_surface": _build_linear_planning_surface(requested_candidates),
             "guardrail_scope": (
                 "Reliability repair blocks new repo-backed work; non-reliability "
                 "review guardrails remain separate from parallel lane selection."
@@ -5563,6 +5658,7 @@ def _build_parallel_backlog_selection(
         "filtered_candidates": filtered[:10],
         "candidates": selected,
         "saturation_state": saturation_state,
+        "linear_planning_surface": _build_linear_planning_surface(requested_candidates),
         "guardrail_scope": (
             "Quality guardrails suppress raw task-count selection but do not "
             "serialize independent repo-backed candidates that pass safety filters."

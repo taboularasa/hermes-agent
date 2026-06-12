@@ -3727,6 +3727,85 @@ def test_pipeline_excludes_stale_hermes_delegate_on_duplicate_human_issue(tmp_pa
     }
 
 
+def test_pipeline_capacity_surfaces_partial_linear_planning_evidence(tmp_path):
+    now = datetime(2026, 6, 12, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    history_path = tmp_path / "history.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "linear-planning-surface",
+                    "occurredAt": recent,
+                    "summary": "Verified Linear planning surface evidence.",
+                    "changedFiles": ["tools/self_improvement_tool.py"],
+                    "tests": ["pytest tests/tools/test_self_improvement_tool.py passed"],
+                    "selfImprovementFocus": [
+                        {
+                            "title": "Harden Linear planning evidence",
+                            "activeLinearIssueIds": ["HAD-273"],
+                            "outcomeNote": "Planning gaps expose exact missing fields and issue samples.",
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    _write_json(codex_path, {"runs": {}})
+    _write_json(ctx_path, {"sessions": {}})
+
+    pipeline = self_improvement_tool.evaluate_self_improvement_pipeline(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=history_path,
+        now=now,
+        persist=False,
+        available_capacity=2,
+        backlog_candidates=[
+            {
+                "id": "HAD-273",
+                "title": "Harden the Linear self-improvement planning surface",
+                "repo": "taboularasa/hermes-agent",
+                "lane": "Maintenance",
+            },
+            {
+                "id": "HAD-274",
+                "title": "Complete planning fixture",
+                "repo": "taboularasa/hermes-agent",
+                "lane": "Maintenance",
+                "verification": "Run the focused self-improvement tests.",
+                "activeStatusComment": "Branch is under native fallback implementation.",
+            },
+        ],
+    )
+
+    surface = pipeline["capacity"]["linear_planning_surface"]
+
+    assert surface["surface"] == "linear_planning_surface"
+    assert surface["status"] == "partial"
+    assert surface["score"] == 0.6667
+    assert surface["missing_field_counts"] == {
+        "active_status_comment": 1,
+        "verification": 1,
+    }
+    assert surface["issue_samples"] == [
+        {
+            "candidate_id": "HAD-273",
+            "title": "Harden the Linear self-improvement planning surface",
+            "missing_fields": ["active_status_comment", "verification"],
+        }
+    ]
+
+
 def test_benchmark_exposes_journal_reporting_contract_from_focus_schema(tmp_path):
     now = datetime(2026, 5, 3, 12, 0, 0, tzinfo=timezone.utc)
     recent = now.isoformat()
