@@ -2358,6 +2358,25 @@ def _collect_journal_codex_skip_remediations(journal_payload: Any) -> dict[str, 
     return remediations
 
 
+def _collect_codex_run_ids_from_value(value: Any, key: str = "") -> set[str]:
+    normalized_key = _normalize_evidence_key(key)
+    if normalized_key in _TEXT_EVIDENCE_EXCLUDED_KEYS:
+        return set()
+    if isinstance(value, str):
+        return set(_CODEX_RUN_ID_PATTERN.findall(value))
+    if isinstance(value, dict):
+        run_ids: set[str] = set()
+        for child_key, child_value in value.items():
+            run_ids.update(_collect_codex_run_ids_from_value(child_value, str(child_key)))
+        return run_ids
+    if isinstance(value, list):
+        run_ids = set()
+        for child_value in value:
+            run_ids.update(_collect_codex_run_ids_from_value(child_value, key))
+        return run_ids
+    return set()
+
+
 def _collect_journal_codex_operator_support(
     journal_payload: Any,
 ) -> dict[str, list[dict[str, str]]]:
@@ -2382,6 +2401,12 @@ def _collect_journal_codex_operator_support(
         entry_text_evidence = (
             _operator_decision_support_text_evidence(entry_text) if entry_text else []
         )
+        entry_context = {
+            key: value
+            for key, value in entry.items()
+            if key != _JOURNAL_REPORTING_FOCUS_FIELD
+        }
+        entry_context_run_ids = _collect_codex_run_ids_from_value(entry_context)
 
         for focus_item in focus_items:
             if not isinstance(focus_item, dict):
@@ -2404,9 +2429,14 @@ def _collect_journal_codex_operator_support(
             if not focus_evidence:
                 continue
 
+            focus_run_ids = _collect_codex_run_ids_from_value(focus_item)
+            if not focus_run_ids and len(focus_items) == 1:
+                focus_run_ids = set(entry_context_run_ids)
             for segment in _journal_focus_note_segments(title, outcome_note):
-                run_ids = sorted(set(_CODEX_RUN_ID_PATTERN.findall(segment)))
-                if not run_ids:
+                segment_run_ids = set(_CODEX_RUN_ID_PATTERN.findall(segment))
+                if not segment_run_ids and focus_run_ids:
+                    segment_run_ids = set(focus_run_ids)
+                if not segment_run_ids:
                     continue
 
                 action_labels = _matching_codex_skip_note_labels(
@@ -2420,7 +2450,7 @@ def _collect_journal_codex_operator_support(
                 if action_labels and rationale_labels:
                     continue
 
-                for run_id in run_ids:
+                for run_id in sorted(segment_run_ids):
                     support_by_run_id.setdefault(run_id, []).extend(focus_evidence)
 
     return {

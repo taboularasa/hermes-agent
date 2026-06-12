@@ -1573,6 +1573,102 @@ def test_operator_value_alignment_uses_self_improvement_focus_for_codex_run_link
     )
 
 
+def test_operator_value_alignment_links_focus_to_codex_ids_from_entry_context(tmp_path):
+    now = datetime(2026, 6, 11, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+    run_ids = [
+        "codex_c5bc43777a63",
+        "codex_e68593a634d7",
+        "codex_1017425508da",
+        "codex_90d9f3d806bc",
+        "codex_5bff4cc6fcf3",
+    ]
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": f"follow-through-{run_id}",
+                    "occurredAt": recent,
+                    "summary": f"Backfilled operator evidence for completed Codex run {run_id}.",
+                    "notes": (
+                        f"Source record: /home/david/.hermes/codex/runs.json run {run_id}. "
+                        "The merged PR evidence lets the operator decide whether to keep "
+                        "the issue closed while execution_loop remains the remaining blocker."
+                    ),
+                    "commitShas": ["abcdef1234567890abcdef1234567890abcdef12"],
+                    "laneLinks": [
+                        {
+                            "lane": "maintenance",
+                            "supportingRefs": [run_id, "PR #587 merged"],
+                        }
+                    ],
+                    "selfImprovementFocus": [
+                        {
+                            "title": "Preserve completed delivery as operator decision support",
+                            "activeLinearIssueIds": ["HAD-1168"],
+                            "outcomeNote": (
+                                "PR evidence is durable, with verification passed. "
+                                "Fresh pipeline recovery is still blocked by execution_loop health."
+                            ),
+                        }
+                    ],
+                }
+                for run_id in run_ids
+            ]
+        },
+    )
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                run_id: {
+                    "run_id": run_id,
+                    "status": "completed",
+                    "completed_at": recent,
+                    "final_message": (
+                        "CHANGED_FILES\n"
+                        "- tools/self_improvement_tool.py\n"
+                        "VERIFICATION\n"
+                        "- pytest tests/tools/test_self_improvement_tool.py passed\n"
+                        "COMMIT\n"
+                        "- abcdef1234567890abcdef1234567890abcdef12\n"
+                        "PULL_REQUEST\n"
+                        "- https://github.com/taboularasa/hermes-agent/pull/1168\n"
+                    ),
+                    "exit_code": 0,
+                }
+                for run_id in run_ids
+            }
+        },
+    )
+    _write_json(ctx_path, {"sessions": {}})
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    operator_value = benchmark["checks"]["operator_value_alignment"]
+    missing_ids = {
+        item["id"]
+        for item in operator_value["metrics"]["missing_operator_decision_support_examples"]
+    }
+    assert not missing_ids.intersection(run_ids)
+    assert operator_value["metrics"]["operator_decision_support_count"] >= len(run_ids)
+
+
 def test_failed_codex_runs_with_completed_at_do_not_count_as_deliveries(tmp_path):
     now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
     recent = now.isoformat()
