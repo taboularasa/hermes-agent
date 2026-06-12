@@ -1085,6 +1085,41 @@ def test_journal_skip_note_does_not_exempt_active_codex_run(tmp_path):
     assert "anti_make_work_check" in benchmark["critical_failures"]
 
 
+def test_failed_codex_status_is_not_treated_as_active_regression_fixture():
+    """HAD-515: stale failure/comment residue must not block fresh execution slots."""
+
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    old = (now - timedelta(hours=48)).isoformat()
+    payload = {
+        "runs": {
+            "codex_failed_without_exit": {
+                "run_id": "codex_failed_without_exit",
+                "status": "failed",
+                "started_at": old,
+                "final_message": "STATUS\nBlocked by usage limit before edits.",
+            },
+            "codex_completed_without_exit": {
+                "run_id": "codex_completed_without_exit",
+                "status": "completed",
+                "started_at": old,
+                "final_message": "STATUS\nDone.",
+            },
+        }
+    }
+
+    assert self_improvement_tool._codex_record_is_active(
+        payload["runs"]["codex_failed_without_exit"]
+    ) is False
+    assert self_improvement_tool._codex_record_is_active(
+        payload["runs"]["codex_completed_without_exit"]
+    ) is False
+    assert self_improvement_tool._find_stale_active_codex(
+        payload,
+        now,
+        active_stale_hours=12,
+    ) == []
+
+
 def test_operator_decision_support_passes_anti_make_work_value_category(tmp_path):
     now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
     recent = now.isoformat()

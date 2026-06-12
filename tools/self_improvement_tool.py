@@ -1596,6 +1596,8 @@ def _codex_record_is_completed(record: dict[str, Any]) -> bool:
 
 def _codex_record_is_active(record: dict[str, Any]) -> bool:
     status = _codex_record_status(record)
+    if status in _CODEX_FAILURE_STATUSES or status in _CODEX_SUCCESS_STATUSES:
+        return False
     if status in {"running", "queued", "in_progress", "active", "unknown"}:
         return True
     if record.get("active") is True:
