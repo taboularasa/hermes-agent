@@ -2453,6 +2453,13 @@ def test_execution_throughput_gap_prioritizes_journal_followthrough_without_ctx_
     assert pending_runs[0]["operator_decision_support_path"].startswith(
         "entries[*].selfImprovementFocus[*]"
     )
+    backfill_targets = execution_metrics["journal_backfill_targets"]
+    assert backfill_targets[0]["run_id"] == "codex_0"
+    assert backfill_targets[0].get("linear_issue_ids", []) == []
+    assert backfill_targets[0]["required_journal_reference_path"].startswith(
+        "entries[*].selfImprovementFocus[*]"
+    )
+    assert "Backfill" in backfill_targets[0]["backfill_action"]
 
     issue_selection = benchmark["issue_selection"]
     assert issue_selection["recommended_focus"] == "Codex delivery journal follow-through"
@@ -2470,6 +2477,7 @@ def test_execution_throughput_gap_prioritizes_journal_followthrough_without_ctx_
         "- execution_throughput_remediation=6 completed Codex run(s), "
         "1 journal work item(s)"
     ) in summary_markdown
+    assert "- journal_backfill_targets=unlinked/codex_0" in summary_markdown
     assert "- execution_throughput_action=backfill journal entries" in summary_markdown
     assert (
         compact["leading_indicator_drift"]["execution_throughput_remediation"]["required"]
@@ -3473,6 +3481,87 @@ def test_execution_loop_warns_on_sparse_journal_follow_through_after_codex_volum
     assert benchmark["execution_loop"]["next_throughput_action"] == metrics["next_throughput_action"]
     assert "execution_loop" in benchmark["issue_selection"]["blocked_checks"]
     assert benchmark["issue_selection"]["recommended_focus"] == "Codex delivery journal follow-through"
+
+
+def test_execution_loop_backfill_targets_prioritize_newest_pending_codex(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(journal_path, {"entries": [{"id": "journal_1", "occurredAt": recent}]})
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_old": {
+                    "run_id": "codex_old",
+                    "status": "completed",
+                    "completed_at": (now - timedelta(hours=6)).isoformat(),
+                    "exit_code": 0,
+                    "external_key": "linear:HAD-1150",
+                },
+                "codex_new": {
+                    "run_id": "codex_new",
+                    "status": "completed",
+                    "completed_at": recent,
+                    "exit_code": 0,
+                    "external_key": "linear:HAD-1168",
+                },
+                "codex_middle": {
+                    "run_id": "codex_middle",
+                    "status": "completed",
+                    "completed_at": (now - timedelta(hours=3)).isoformat(),
+                    "exit_code": 0,
+                    "external_key": "linear:HAD-1167",
+                },
+            }
+        },
+    )
+    _write_json(ctx_path, {"sessions": {}})
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    metrics = benchmark["checks"]["execution_loop"]["metrics"]
+    pending_runs = metrics["pending_journal_follow_through_codex_runs"]
+    assert [item["id"] for item in pending_runs[:3]] == [
+        "codex_new",
+        "codex_middle",
+        "codex_old",
+    ]
+    backfill_targets = metrics["journal_backfill_targets"]
+    assert backfill_targets[0]["run_id"] == "codex_new"
+    assert backfill_targets[0]["linear_issue_ids"] == ["HAD-1168"]
+    assert (
+        backfill_targets[0]["reason"]
+        == "journal_focus_reference_not_found_for_codex_run"
+    )
+    assert (
+        "operatorDecisionSupport or nextDecision"
+        in backfill_targets[0]["required_journal_fields"]
+    )
+
+    compact = self_improvement_tool._pipeline_benchmark_summary(benchmark)
+    assert (
+        compact["execution_loop_follow_through"]["journal_backfill_targets"][0]["run_id"]
+        == "codex_new"
+    )
+    summary_markdown = self_improvement_tool._format_pipeline_summary(
+        benchmark=benchmark,
+        top_candidate=None,
+    )
+    assert "- journal_backfill_targets=HAD-1168/codex_new" in summary_markdown
 
 
 def test_execution_loop_passes_when_ctx_codex_and_journal_are_in_cadence(tmp_path):
