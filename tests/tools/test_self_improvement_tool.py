@@ -2170,6 +2170,25 @@ def test_execution_throughput_gap_prioritizes_journal_followthrough_without_ctx_
                     ),
                     "changedFiles": ["tools/self_improvement_tool.py"],
                     "tests": ["pytest tests/tools/test_self_improvement_tool.py passed"],
+                    "selfImprovementFocus": [
+                        {
+                            "title": "Backfill Codex delivery codex_0 follow-through",
+                            "activeLinearIssueIds": ["HAD-1168"],
+                            "outcomeNote": (
+                                "Completed Codex run codex_0 changed "
+                                "tools/self_improvement_tool.py and passed focused tests."
+                            ),
+                            "operatorDecisionSupport": (
+                                "Operator can use PR evidence for codex_0 and backfill "
+                                "the remaining completed Codex deliveries next."
+                            ),
+                            "changedFiles": ["tools/self_improvement_tool.py"],
+                            "tests": ["pytest tests/tools/test_self_improvement_tool.py passed"],
+                            "pullRequests": [
+                                "https://github.com/taboularasa/hermes-agent/pull/11680"
+                            ],
+                        }
+                    ],
                 }
             ]
         },
@@ -2232,9 +2251,33 @@ def test_execution_throughput_gap_prioritizes_journal_followthrough_without_ctx_
     assert remediation["blocking_surface"] == "journal_follow_through"
     assert remediation["recent_completed_codex_count"] == 6
     assert remediation["recent_journal_work_item_count"] == 1
+    assert remediation["codex_delivery_journal_follow_through_gap_count"] == 5
+    missing_followthrough = remediation["completed_codex_without_journal_follow_through"]
+    assert [item["run_id"] for item in missing_followthrough[:2]] == ["codex_1", "codex_2"]
+    assert missing_followthrough[0]["codex_record_evidence"]["pull_request"] is None
+    assert "PULL_REQUEST" in missing_followthrough[0]["delivery_summary"]
+    assert "operatorDecisionSupport or nextDecision" in missing_followthrough[0]["required_journal_follow_through_fields"]
+    diagnostics = remediation["codex_delivery_journal_follow_through_diagnostics"]
+    assert diagnostics[0]["run_id"] == "codex_0"
+    assert diagnostics[0]["journal_follow_through_found"] is True
+    assert diagnostics[0]["journal_operator_support_found"] is True
+    assert diagnostics[1]["journal_follow_through_found"] is False
     assert remediation["ctx_inactivity_blocking"] is False
     assert "inactive ctx is informational" in drift["detail"]
     assert "journal entries" in remediation["actions"][0]
+
+    execution = benchmark["checks"]["execution_loop"]
+    assert execution["metrics"]["codex_delivery_journal_follow_through_gap_count"] == 5
+    assert (
+        execution["metrics"]["completed_codex_without_journal_follow_through"][0]["run_id"]
+        == "codex_1"
+    )
+    assert (
+        execution["metrics"]["codex_delivery_journal_follow_through_diagnostics"][0][
+            "journal_follow_through_found"
+        ]
+        is True
+    )
 
     issue_selection = benchmark["issue_selection"]
     assert issue_selection["recommended_focus"] == "Codex delivery journal follow-through"
