@@ -2059,6 +2059,89 @@ def test_operator_value_alignment_reports_missing_journal_reference_path(tmp_pat
     assert missing_example["journal_reference_diagnostic"] == diagnostics[0]
 
 
+def test_operator_value_alignment_diagnoses_entry_context_codex_reference_without_focus_support(tmp_path):
+    now = datetime(2026, 6, 11, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+    run_id = "codex_c5bc43777a63"
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "follow-through-had-271",
+                    "occurredAt": recent,
+                    "summary": f"Backfilled evidence for completed Codex run {run_id}.",
+                    "notes": (
+                        "Source record names the Codex run at the entry level, "
+                        "but the focus item lacks the required follow-up field."
+                    ),
+                    "selfImprovementFocus": [
+                        {
+                            "title": "Preserve HAD-271 merge evidence",
+                            "outcomeNote": "PR #587 merged and focused tests passed.",
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                run_id: {
+                    "run_id": run_id,
+                    "status": "completed",
+                    "external_key": "linear:HAD-271",
+                    "completed_at": recent,
+                    "final_message": (
+                        "CHANGED_FILES\n"
+                        "- tools/self_improvement_tool.py\n"
+                        "VERIFICATION\n"
+                        "- pytest tests/tools/test_self_improvement_tool.py passed\n"
+                        "COMMIT\n"
+                        "- abcdef1234567890abcdef1234567890abcdef12\n"
+                        "PULL_REQUEST\n"
+                        "- https://github.com/taboularasa/hermes-agent/pull/587\n"
+                    ),
+                    "exit_code": 0,
+                }
+            }
+        },
+    )
+    _write_json(ctx_path, {"sessions": {}})
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    metrics = benchmark["checks"]["operator_value_alignment"]["metrics"]
+    diagnostic = metrics["missing_operator_decision_support_journal_diagnostics"][0]
+    assert diagnostic == {
+        "run_id": run_id,
+        "codex_issue_id": "HAD-271",
+        "required_journal_reference_path": (
+            "entries[follow-through-had-271].selfImprovementFocus[0]."
+            "operatorDecisionSupport|nextDecision|decision|selectedWork|blocker|tradeoff"
+        ),
+        "matched_journal_reference_paths": [
+            "entries[follow-through-had-271].selfImprovementFocus[0]"
+        ],
+        "reason": "journal_focus_lacks_operator_decision_support_field",
+    }
+
+
 def test_failed_codex_runs_with_completed_at_do_not_count_as_deliveries(tmp_path):
     now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
     recent = now.isoformat()
