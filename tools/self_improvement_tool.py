@@ -153,6 +153,7 @@ _JOURNAL_REPORTING_OUTCOME_FIELDS = (
 _JOURNAL_REPORTING_OUTCOME_LIMIT = 4
 _JOURNAL_OPERATOR_SUPPORT_ID_LIMIT = 200
 _JOURNAL_OPERATOR_SUPPORT_EXAMPLE_LIMIT = 200
+_JOURNAL_BACKFILL_TARGET_LIMIT = 8
 _LEADING_INDICATOR_CHECK_IDS = (
     "reliability_gate",
     "anti_make_work_check",
@@ -3322,24 +3323,34 @@ def _build_execution_throughput_signal(
     now: datetime,
     freshness_hours: int,
 ) -> dict[str, Any]:
-    recent_codex_deliveries = [
-        {
-            "run_id": record.get("run_id") or record.get("id"),
-            "status": record.get("status"),
-            "timestamp": timestamp.isoformat(),
-        }
+    recent_codex_delivery_records = [
+        (record, timestamp)
         for record in _iter_codex_records(codex_payload)
         if _codex_record_is_completed_delivery(record)
         if (timestamp := _recent_record_timestamp(record, now, freshness_hours)) is not None
     ]
+    recent_codex_delivery_records.sort(key=lambda item: item[1], reverse=True)
+    recent_codex_deliveries = [
+        {
+            "run_id": _codex_run_id(record),
+            "status": record.get("status"),
+            "timestamp": timestamp.isoformat(),
+        }
+        for record, timestamp in recent_codex_delivery_records
+    ]
+    recent_journal_work_records = [
+        (record, timestamp)
+        for record in _iter_records(journal_payload, "entries")
+        if _journal_entry_claims_work(record)
+        if (timestamp := _recent_record_timestamp(record, now, freshness_hours)) is not None
+    ]
+    recent_journal_work_records.sort(key=lambda item: item[1], reverse=True)
     recent_journal_work = [
         {
             "id": record.get("id") or record.get("external_key"),
             "timestamp": timestamp.isoformat(),
         }
-        for record in _iter_records(journal_payload, "entries")
-        if _journal_entry_claims_work(record)
-        if (timestamp := _recent_record_timestamp(record, now, freshness_hours)) is not None
+        for record, timestamp in recent_journal_work_records
     ]
     capacity_saturation = _build_capacity_saturation_signal(
         journal_payload=journal_payload,
@@ -3352,12 +3363,22 @@ def _build_execution_throughput_signal(
         journal_payload,
         codex_payload,
     )
-    pending_journal_follow_through = [
-        delivery
-        for delivery in recent_codex_deliveries
-        if delivery.get("run_id")
-        and delivery.get("run_id") not in journal_operator_support
+    pending_journal_follow_through_records = [
+        (record, timestamp)
+        for record, timestamp in recent_codex_delivery_records
+        if (run_id := _codex_run_id(record)) and run_id not in journal_operator_support
     ]
+    pending_journal_follow_through = [
+        _codex_follow_through_gap_example(record, timestamp)
+        for record, timestamp in pending_journal_follow_through_records[
+            :_JOURNAL_BACKFILL_TARGET_LIMIT
+        ]
+    ]
+    journal_backfill_targets = _codex_journal_backfill_targets(
+        journal_payload=journal_payload,
+        codex_payload=codex_payload,
+        pending_records=pending_journal_follow_through_records,
+    )
     ctx_summary = _summarize_ctx_bindings(ctx_payload, freshness_hours, now)
     codex_count = len(recent_codex_deliveries)
     journal_count = len(recent_journal_work)
@@ -3402,8 +3423,9 @@ def _build_execution_throughput_signal(
         "codex_completion_threshold": _THROUGHPUT_CODEX_COMPLETION_MIN,
         "sample_codex_deliveries": recent_codex_deliveries[:5],
         "sample_journal_work_items": recent_journal_work[:5],
-        "pending_journal_follow_through_count": len(pending_journal_follow_through),
-        "pending_journal_follow_through_codex_runs": pending_journal_follow_through[:8],
+        "pending_journal_follow_through_count": len(pending_journal_follow_through_records),
+        "pending_journal_follow_through_codex_runs": pending_journal_follow_through,
+        "journal_backfill_targets": journal_backfill_targets,
         "actions": actions,
         "ctx_status": ctx_status,
         "ctx_active_count": ctx_active_count,
@@ -3438,6 +3460,77 @@ def _codex_follow_through_gap_example(
         }
     )
     return {key: value for key, value in example.items() if value not in (None, [], "")}
+
+
+def _codex_journal_backfill_targets(
+    *,
+    journal_payload: Any,
+    codex_payload: Any,
+    pending_records: Iterable[tuple[dict[str, Any], datetime]],
+    limit: int = _JOURNAL_BACKFILL_TARGET_LIMIT,
+) -> list[dict[str, Any]]:
+    target_records: list[tuple[str, dict[str, Any], datetime]] = []
+    seen_run_ids: set[str] = set()
+    max_targets = max(0, int(limit or 0))
+    for record, timestamp in pending_records:
+        if len(target_records) >= max_targets:
+            break
+        run_id = _codex_run_id(record)
+        if not run_id or run_id in seen_run_ids:
+            continue
+        seen_run_ids.add(run_id)
+        target_records.append((run_id, record, timestamp))
+
+    diagnostics_by_run_id = {
+        str(item.get("run_id")): item
+        for item in _operator_support_reference_diagnostics(
+            journal_payload,
+            codex_payload,
+            [run_id for run_id, _record, _timestamp in target_records],
+        )
+        if item.get("run_id")
+    }
+
+    targets: list[dict[str, Any]] = []
+    for run_id, record, timestamp in target_records:
+        issue_ids = sorted(_collect_linear_issue_ids_from_issue_fields(record))
+        external_key = record.get("external_key")
+        issue_label = ", ".join(issue_ids) or str(external_key or "unlinked issue")
+        diagnostic = diagnostics_by_run_id.get(run_id) or {}
+        required_path = diagnostic.get("required_journal_reference_path") or (
+            "entries[*]."
+            f"{_JOURNAL_REPORTING_FOCUS_FIELD}[*]."
+            f"{_OPERATOR_DECISION_SUPPORT_REFERENCE_FIELD_PATH}"
+        )
+        target = {
+            "run_id": run_id,
+            "completed_at": timestamp.isoformat(),
+            "status": record.get("status"),
+            "external_key": external_key,
+            "linear_issue_ids": issue_ids,
+            "title": _first_text_for_keys(record, {"issue_title", "summary", "title"}),
+            "reason": diagnostic.get("reason")
+            or "journal_focus_reference_not_found_for_codex_run",
+            "required_journal_reference_path": required_path,
+            "matched_journal_reference_paths": diagnostic.get(
+                "matched_journal_reference_paths"
+            )
+            or [],
+            "required_journal_fields": [
+                "selfImprovementFocus[].title",
+                "selfImprovementFocus[].activeLinearIssueIds",
+                "selfImprovementFocus[].outcomeNote",
+                *_CODEX_BACKFILL_EVIDENCE_FIELDS,
+            ],
+            "backfill_action": (
+                f"Backfill {issue_label} / {run_id}: add {required_path} plus "
+                "changed files, tests, PR or commit evidence."
+            ),
+        }
+        targets.append(
+            {key: value for key, value in target.items() if value not in (None, [], "")}
+        )
+    return targets
 
 
 def _timestamp_in_window(timestamp: Optional[datetime], now: datetime, window_hours: int) -> bool:
@@ -3531,6 +3624,8 @@ def _evaluate_execution_loop_check(
     recent_completed_codex = list(
         _iter_recent_completed_codex_records(codex_payload, now, window_hours)
     )
+    recent_journal.sort(key=lambda item: item[1], reverse=True)
+    recent_completed_codex.sort(key=lambda item: item[1], reverse=True)
     journal_operator_support = _collect_journal_codex_operator_support(
         journal_payload,
         codex_payload,
@@ -3541,6 +3636,11 @@ def _evaluate_execution_loop_check(
         if (run_id := _codex_run_id(record))
         and run_id not in journal_operator_support
     ]
+    journal_backfill_targets = _codex_journal_backfill_targets(
+        journal_payload=journal_payload,
+        codex_payload=codex_payload,
+        pending_records=pending_journal_follow_through,
+    )
     ctx_records = list(_iter_ctx_records(ctx_payload))
     active_ctx_records = [record for record in ctx_records if _ctx_record_is_active(record)]
     capacity_saturation = _build_capacity_saturation_signal(
@@ -3654,10 +3754,15 @@ def _evaluate_execution_loop_check(
             "next_throughput_action": next_action,
             "capacity_saturation": capacity_saturation,
             "pending_journal_follow_through_count": len(pending_journal_follow_through),
+            "pending_journal_follow_through_window_days": _EXECUTION_LOOP_WINDOW_DAYS,
+            "pending_journal_follow_through_sample_limit": _JOURNAL_BACKFILL_TARGET_LIMIT,
             "pending_journal_follow_through_codex_runs": [
                 _codex_follow_through_gap_example(record, timestamp)
-                for record, timestamp in pending_journal_follow_through[:8]
+                for record, timestamp in pending_journal_follow_through[
+                    :_JOURNAL_BACKFILL_TARGET_LIMIT
+                ]
             ],
+            "journal_backfill_targets": journal_backfill_targets,
             "journal_operator_support_codex_run_count": len(journal_operator_support),
             "completed_codex_examples": [
                 _recent_record_example(record, timestamp)
@@ -4754,6 +4859,14 @@ def _execution_throughput_remediation_payload(signal: dict[str, Any]) -> dict[st
         "recent_completed_codex_count": signal.get("recent_completed_codex_count"),
         "recent_journal_work_item_count": signal.get("recent_journal_work_item_count"),
         "journal_to_codex_ratio": signal.get("journal_to_codex_ratio"),
+        "pending_journal_follow_through_count": signal.get(
+            "pending_journal_follow_through_count"
+        ),
+        "pending_journal_follow_through_codex_runs": signal.get(
+            "pending_journal_follow_through_codex_runs"
+        )
+        or [],
+        "journal_backfill_targets": signal.get("journal_backfill_targets") or [],
         "actions": signal.get("actions") or [],
         "capacity_saturation": signal.get("capacity_saturation") or {},
         "ctx_status": signal.get("ctx_status"),
@@ -5254,9 +5367,19 @@ def _pipeline_benchmark_summary(benchmark: dict[str, Any]) -> dict[str, Any]:
             "pending_journal_follow_through_count": execution_metrics.get(
                 "pending_journal_follow_through_count"
             ),
+            "pending_journal_follow_through_window_days": execution_metrics.get(
+                "pending_journal_follow_through_window_days"
+            ),
+            "pending_journal_follow_through_sample_limit": execution_metrics.get(
+                "pending_journal_follow_through_sample_limit"
+            ),
             "pending_journal_follow_through_codex_runs": execution_metrics.get(
                 "pending_journal_follow_through_codex_runs"
             ) or [],
+            "journal_backfill_targets": execution_metrics.get(
+                "journal_backfill_targets"
+            )
+            or [],
             "journal_operator_support_codex_run_count": execution_metrics.get(
                 "journal_operator_support_codex_run_count"
             ),
@@ -5863,6 +5986,23 @@ def _format_pipeline_summary(
         if pending_runs:
             run_ids = [str(item.get("id") or item.get("run_id")) for item in pending_runs[:5]]
             lines.append("- pending_journal_follow_through_codex_runs=" + ", ".join(run_ids))
+        backfill_targets = (
+            execution_metrics.get("journal_backfill_targets")
+            or execution_remediation.get("journal_backfill_targets")
+            or []
+        )
+        if backfill_targets:
+            target_labels = []
+            for item in backfill_targets[:5]:
+                issue_label = ",".join(
+                    str(issue) for issue in item.get("linear_issue_ids") or []
+                )
+                if not issue_label:
+                    issue_label = str(item.get("external_key") or "unlinked")
+                run_id = str(item.get("run_id") or item.get("id") or "unknown")
+                reason = str(item.get("reason") or "journal_backfill_required")
+                target_labels.append(f"{issue_label}/{run_id}:{reason}")
+            lines.append("- journal_backfill_targets=" + ", ".join(target_labels))
         for action in execution_remediation.get("actions") or []:
             lines.append(f"- execution_throughput_action={action}")
     critical = benchmark.get("critical_failures") or []
