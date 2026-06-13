@@ -2655,9 +2655,14 @@ def _operator_support_reference_diagnostics(
         matched_paths: list[str] = []
         for entry in _iter_records(journal_payload, "entries"):
             entry_id = _journal_reporting_string(entry.get("id")) or "unknown"
-            for focus_index, focus_item in enumerate(
-                entry.get(_JOURNAL_REPORTING_FOCUS_FIELD) or []
-            ):
+            focus_items = entry.get(_JOURNAL_REPORTING_FOCUS_FIELD) or []
+            entry_context = {
+                key: value
+                for key, value in entry.items()
+                if key != _JOURNAL_REPORTING_FOCUS_FIELD
+            }
+            entry_context_run_ids = _collect_codex_run_ids_from_value(entry_context)
+            for focus_index, focus_item in enumerate(focus_items):
                 if not isinstance(focus_item, dict):
                     continue
                 focus_text = json.dumps(focus_item, sort_keys=True, ensure_ascii=False)
@@ -2668,7 +2673,14 @@ def _operator_support_reference_diagnostics(
                     )
                 }
                 focus_issue_ids.discard(None)
-                if run_id in focus_text or set(issue_ids).intersection(focus_issue_ids):
+                focus_matches_entry_context = (
+                    run_id in entry_context_run_ids and len(focus_items) == 1
+                )
+                if (
+                    run_id in focus_text
+                    or set(issue_ids).intersection(focus_issue_ids)
+                    or focus_matches_entry_context
+                ):
                     matched_paths.append(_journal_reference_path(entry_id, focus_index))
         matched_paths = list(dict.fromkeys(matched_paths))
         if matched_paths:
