@@ -1808,6 +1808,107 @@ def test_operator_value_alignment_surfaces_recent_supported_codex_ids_past_repor
     assert set(target_run_ids).issubset(surfaced_examples)
 
 
+def test_operator_value_alignment_links_related_focus_text_to_codex_ids(tmp_path):
+    now = datetime(2026, 6, 11, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+    run_ids = [
+        "codex_c5bc43777a63",
+        "codex_e68593a634d7",
+        "codex_1017425508da",
+        "codex_90d9f3d806bc",
+        "codex_5bff4cc6fcf3",
+    ]
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "follow-through-related-fields",
+                    "occurredAt": recent,
+                    "selfImprovementFocus": [
+                        {
+                            "title": "Preserve operator follow-through for HAD-1168",
+                            "activeLinearIssueIds": ["HAD-1168"],
+                            "outcomeNote": (
+                                "The five completed Codex runs are retained for the "
+                                "operator-value benchmark."
+                            ),
+                            "related": [
+                                {
+                                    "runId": run_id,
+                                    "outcomeNote": (
+                                        f"{run_id} gives the operator decision support to "
+                                        "keep HAD-1168 closed while execution_loop remains "
+                                        "the next benchmark blocker."
+                                    ),
+                                }
+                                for run_id in run_ids
+                            ],
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                run_id: {
+                    "run_id": run_id,
+                    "status": "completed",
+                    "completed_at": recent,
+                    "final_message": (
+                        "CHANGED_FILES\n"
+                        "- tools/self_improvement_tool.py\n"
+                        "VERIFICATION\n"
+                        "- pytest tests/tools/test_self_improvement_tool.py passed\n"
+                        "COMMIT\n"
+                        "- abcdef1234567890abcdef1234567890abcdef12\n"
+                        "PULL_REQUEST\n"
+                        "- https://github.com/taboularasa/hermes-agent/pull/160\n"
+                    ),
+                    "exit_code": 0,
+                }
+                for run_id in run_ids
+            }
+        },
+    )
+    _write_json(ctx_path, {"sessions": {}})
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    operator_value = benchmark["checks"]["operator_value_alignment"]
+    metrics = operator_value["metrics"]
+    missing_ids = {
+        item["id"] for item in metrics["missing_operator_decision_support_examples"]
+    }
+    assert missing_ids.isdisjoint(run_ids)
+    assert set(run_ids).issubset(set(metrics["journal_operator_support_codex_run_ids"]))
+    support_by_id = {
+        item["run_id"]: item for item in metrics["journal_operator_support_examples"]
+    }
+    assert set(run_ids).issubset(support_by_id)
+    assert support_by_id["codex_c5bc43777a63"]["evidence"][0][
+        "source_key"
+    ] == "outcome_note"
+
+
+
 def test_operator_value_alignment_links_focus_issue_ids_to_codex_external_keys(tmp_path):
     now = datetime(2026, 6, 11, 12, 0, 0, tzinfo=timezone.utc)
     recent = now.isoformat()

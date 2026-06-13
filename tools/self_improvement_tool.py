@@ -2270,6 +2270,47 @@ def _operator_decision_support_text_evidence(text: str) -> list[dict[str, str]]:
     return _dedupe_operator_evidence(evidence)
 
 
+def _collect_operator_decision_support_text_evidence_from_value(
+    value: Any,
+    key: str = "",
+) -> list[dict[str, str]]:
+    normalized_key = _normalize_evidence_key(key)
+    if normalized_key in _TEXT_EVIDENCE_EXCLUDED_KEYS:
+        return []
+    if isinstance(value, str):
+        evidence = _operator_decision_support_text_evidence(value)
+        if normalized_key:
+            evidence = [
+                {
+                    **item,
+                    "source_key": normalized_key,
+                }
+                for item in evidence
+            ]
+        return evidence
+    if isinstance(value, dict):
+        evidence: list[dict[str, str]] = []
+        for child_key, child_value in value.items():
+            evidence.extend(
+                _collect_operator_decision_support_text_evidence_from_value(
+                    child_value,
+                    str(child_key),
+                )
+            )
+        return _dedupe_operator_evidence(evidence)
+    if isinstance(value, list):
+        evidence = []
+        for child_value in value:
+            evidence.extend(
+                _collect_operator_decision_support_text_evidence_from_value(
+                    child_value,
+                    key,
+                )
+            )
+        return _dedupe_operator_evidence(evidence)
+    return []
+
+
 def _record_has_claim_field(value: Any, key: str = "") -> bool:
     normalized_key = _normalize_evidence_key(key)
     if normalized_key in _CLAIM_TEXT_KEYS and _value_has_content(value):
@@ -2575,6 +2616,10 @@ def _collect_journal_codex_operator_support(
             if not focus_evidence:
                 focus_evidence = _operator_decision_support_text_evidence(
                     " ".join(part for part in (title, outcome_note) if part)
+                )
+            if not focus_evidence:
+                focus_evidence = _collect_operator_decision_support_text_evidence_from_value(
+                    focus_item
                 )
             if not focus_evidence:
                 focus_evidence = entry_evidence
