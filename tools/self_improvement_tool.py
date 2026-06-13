@@ -3310,15 +3310,38 @@ def _build_execution_throughput_signal(
     now: datetime,
     freshness_hours: int,
 ) -> dict[str, Any]:
+    journal_operator_support = _collect_journal_codex_operator_support(
+        journal_payload,
+        codex_payload,
+    )
+    journal_skip_remediations = _collect_journal_codex_skip_remediations(journal_payload)
+    recent_codex_records = [
+        (record, timestamp)
+        for record in _iter_codex_records(codex_payload)
+        if _codex_record_is_completed_delivery(record)
+        if (timestamp := _recent_record_timestamp(record, now, freshness_hours)) is not None
+    ]
     recent_codex_deliveries = [
         {
             "run_id": record.get("run_id") or record.get("id"),
             "status": record.get("status"),
             "timestamp": timestamp.isoformat(),
         }
-        for record in _iter_codex_records(codex_payload)
-        if _codex_record_is_completed_delivery(record)
-        if (timestamp := _recent_record_timestamp(record, now, freshness_hours)) is not None
+        for record, timestamp in recent_codex_records
+    ]
+    codex_follow_through_diagnostics = [
+        _codex_delivery_follow_through_diagnostic(
+            record,
+            timestamp,
+            journal_operator_support=journal_operator_support,
+            journal_skip_remediations=journal_skip_remediations,
+        )
+        for record, timestamp in recent_codex_records
+    ]
+    codex_without_journal_follow_through = [
+        item
+        for item in codex_follow_through_diagnostics
+        if not item.get("journal_follow_through_found")
     ]
     recent_journal_work = [
         {
@@ -3380,6 +3403,21 @@ def _build_execution_throughput_signal(
         "codex_completion_threshold": _THROUGHPUT_CODEX_COMPLETION_MIN,
         "sample_codex_deliveries": recent_codex_deliveries[:5],
         "sample_journal_work_items": recent_journal_work[:5],
+        "codex_delivery_journal_follow_through_gap_count": len(
+            codex_without_journal_follow_through
+        ),
+        "codex_delivery_journal_follow_through_diagnostics": (
+            codex_follow_through_diagnostics[:8]
+        ),
+        "completed_codex_without_journal_follow_through": (
+            codex_without_journal_follow_through[:8]
+        ),
+        "journal_follow_through_required_fields": [
+            "selfImprovementFocus[].activeLinearIssueIds or Codex run id reference",
+            "selfImprovementFocus[].outcomeNote",
+            "operatorDecisionSupport or nextDecision",
+            "changedFiles, tests, pullRequests, commitShas, or artifactPaths",
+        ],
         "actions": actions,
         "ctx_status": ctx_status,
         "ctx_active_count": ctx_active_count,
@@ -3441,6 +3479,65 @@ def _recent_record_example(record: dict[str, Any], timestamp: datetime) -> dict[
     }
 
 
+def _codex_delivery_follow_through_diagnostic(
+    record: dict[str, Any],
+    timestamp: datetime,
+    *,
+    journal_operator_support: dict[str, list[dict[str, str]]],
+    journal_skip_remediations: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    run_id = _codex_run_id(record) or "unknown"
+    operator_support = journal_operator_support.get(run_id) or []
+    skip_remediation = journal_skip_remediations.get(run_id)
+    journal_follow_through_found = bool(operator_support or skip_remediation)
+    return {
+        "run_id": run_id,
+        "codex_issue_ids": sorted(_collect_linear_issue_ids_from_issue_fields(record)),
+        "external_key": record.get("external_key"),
+        "status": record.get("status"),
+        "timestamp": timestamp.isoformat(),
+        "delivery_summary": _compact_operator_evidence_value(
+            _first_text_for_keys(record, _CLAIM_TEXT_KEYS) or "",
+            limit=500,
+        ),
+        "journal_follow_through_found": journal_follow_through_found,
+        "journal_operator_support_found": bool(operator_support),
+        "journal_skip_or_no_action_rationale_found": bool(skip_remediation),
+        "journal_evidence": operator_support[:3],
+        "journal_skip_or_no_action_rationale": skip_remediation,
+        "codex_record_evidence": {
+            "changed_files": _first_text_for_keys(record, {"changed_files", "changed_paths", "files_changed"}),
+            "tests": _first_text_for_keys(record, {"tests", "test_results", "verification"}),
+            "pull_request": _first_text_for_keys(record, {"pr_url", "pr_urls", "pull_request", "pull_request_url", "pull_requests"}),
+            "commit": _first_text_for_keys(record, {"commit", "commit_sha", "commit_shas", "commits"}),
+            "operator_decision_support": _first_text_for_keys(
+                record,
+                {
+                    "operator_decision_support",
+                    "next_decision",
+                    "selected_work",
+                    "decision",
+                    "blocker",
+                    "tradeoff",
+                },
+            ),
+        },
+        "required_journal_follow_through_fields": [
+            "selfImprovementFocus[].activeLinearIssueIds or Codex run id reference",
+            "selfImprovementFocus[].outcomeNote",
+            "operatorDecisionSupport or nextDecision",
+            "changedFiles, tests, pullRequests, commitShas, or artifactPaths",
+        ],
+        "remediation": (
+            "Backfill a journal selfImprovementFocus item for this completed Codex "
+            "delivery with changed files, verification, PR or commit, and operator "
+            "decision support."
+        )
+        if not journal_follow_through_found
+        else None,
+    }
+
+
 def _execution_loop_next_action(
     *,
     completed_codex_count: int,
@@ -3480,6 +3577,25 @@ def _evaluate_execution_loop_check(
     recent_completed_codex = list(
         _iter_recent_completed_codex_records(codex_payload, now, window_hours)
     )
+    journal_operator_support = _collect_journal_codex_operator_support(
+        journal_payload,
+        codex_payload,
+    )
+    journal_skip_remediations = _collect_journal_codex_skip_remediations(journal_payload)
+    codex_follow_through_diagnostics = [
+        _codex_delivery_follow_through_diagnostic(
+            record,
+            timestamp,
+            journal_operator_support=journal_operator_support,
+            journal_skip_remediations=journal_skip_remediations,
+        )
+        for record, timestamp in recent_completed_codex
+    ]
+    codex_without_journal_follow_through = [
+        item
+        for item in codex_follow_through_diagnostics
+        if not item.get("journal_follow_through_found")
+    ]
     ctx_records = list(_iter_ctx_records(ctx_payload))
     active_ctx_records = [record for record in ctx_records if _ctx_record_is_active(record)]
     capacity_saturation = _build_capacity_saturation_signal(
@@ -3595,6 +3711,21 @@ def _evaluate_execution_loop_check(
             "completed_codex_examples": [
                 _recent_record_example(record, timestamp)
                 for record, timestamp in recent_completed_codex[:5]
+            ],
+            "codex_delivery_journal_follow_through_gap_count": len(
+                codex_without_journal_follow_through
+            ),
+            "codex_delivery_journal_follow_through_diagnostics": (
+                codex_follow_through_diagnostics[:8]
+            ),
+            "completed_codex_without_journal_follow_through": (
+                codex_without_journal_follow_through[:8]
+            ),
+            "journal_follow_through_required_fields": [
+                "selfImprovementFocus[].activeLinearIssueIds or Codex run id reference",
+                "selfImprovementFocus[].outcomeNote",
+                "operatorDecisionSupport or nextDecision",
+                "changedFiles, tests, pullRequests, commitShas, or artifactPaths",
             ],
             "journal_examples": [
                 _recent_record_example(record, timestamp)
@@ -4687,6 +4818,21 @@ def _execution_throughput_remediation_payload(signal: dict[str, Any]) -> dict[st
         "recent_completed_codex_count": signal.get("recent_completed_codex_count"),
         "recent_journal_work_item_count": signal.get("recent_journal_work_item_count"),
         "journal_to_codex_ratio": signal.get("journal_to_codex_ratio"),
+        "codex_delivery_journal_follow_through_gap_count": signal.get(
+            "codex_delivery_journal_follow_through_gap_count"
+        ),
+        "completed_codex_without_journal_follow_through": signal.get(
+            "completed_codex_without_journal_follow_through"
+        )
+        or [],
+        "codex_delivery_journal_follow_through_diagnostics": signal.get(
+            "codex_delivery_journal_follow_through_diagnostics"
+        )
+        or [],
+        "journal_follow_through_required_fields": signal.get(
+            "journal_follow_through_required_fields"
+        )
+        or [],
         "actions": signal.get("actions") or [],
         "capacity_saturation": signal.get("capacity_saturation") or {},
         "ctx_status": signal.get("ctx_status"),
