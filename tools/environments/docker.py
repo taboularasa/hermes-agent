@@ -508,7 +508,7 @@ class DockerEnvironment(BaseEnvironment):
             "-w", cwd,
             *all_run_args,
             image,
-            "sleep", "2h",
+            "tail", "-f", "/dev/null",
         ]
         logger.debug(f"Starting container: {' '.join(run_cmd)}")
         result = subprocess.run(
