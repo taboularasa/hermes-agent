@@ -3548,9 +3548,15 @@ class HermesCLI:
             current_model = slug
             changed = True
 
-        # 2. Replace untouched default with a Codex model
+        # 2. Replace untouched default with a Codex model.
+        # Seed with gpt-5.5 — the supported ChatGPT-auth frontier default.
+        # When live discovery is available it wins (available[0] is 5.5);
+        # when it isn't (offline / cron / transient API failure) we must not
+        # fall back to a model the ChatGPT-auth Codex backend rejects with a
+        # non-retryable HTTP 400. gpt-5.3-codex was deprecated for ChatGPT
+        # sign-in on 2026-04-14 (API-key only now).
         if self._model_is_default:
-            fallback_model = "gpt-5.3-codex"
+            fallback_model = "gpt-5.5"
             try:
                 from hermes_cli.codex_models import get_codex_model_ids
 
