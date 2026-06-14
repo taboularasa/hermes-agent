@@ -105,6 +105,19 @@ def _codex_curated_models() -> list[str]:
     return _add_forward_compat_models(list(DEFAULT_CODEX_MODELS))
 
 
+# Codex models that are no longer ChatGPT-auth defaults (deprecated for the
+# ChatGPT-account sign-in path on 2026-04-14, API-key only now) but are still
+# real Codex models a user may have explicitly selected. They are intentionally
+# kept OUT of _codex_curated_models()/DEFAULT_CODEX_MODELS so they never seed the
+# /model picker or the ChatGPT-auth fallback chain, but provider detection must
+# still recognize them so an explicit selection on openai-codex isn't silently
+# rerouted. See https://developers.openai.com/codex/models.
+_CODEX_RECOGNIZED_LEGACY_MODELS: frozenset[str] = frozenset({
+    "gpt-5.3-codex",
+    "gpt-5.2-codex",
+})
+
+
 # Static fallback for xAI when the models.dev disk cache is empty (fresh
 # install, offline first run, etc.). Mirrors the xAI-direct model IDs from
 # $HERMES_HOME/models_dev_cache.json as of 2026-04-28. Whenever xAI renames
@@ -1824,6 +1837,11 @@ def detect_static_provider_for_model(
     # Aggregators list other providers' models — never auto-switch TO them
     # If the model belongs to the current provider's catalog, don't suggest switching
     if _model_in_provider_catalog(name_lower, current_keys):
+        return None
+    # Deprecated-but-still-real Codex slugs: pruned from the openai-codex
+    # curated picker/fallback list, but an explicit selection on openai-codex
+    # must not be rerouted to the API-key "openai" catalog below.
+    if "openai-codex" in current_keys and name_lower in _CODEX_RECOGNIZED_LEGACY_MODELS:
         return None
 
     # --- Step 1: check static provider catalogs for a direct match ---

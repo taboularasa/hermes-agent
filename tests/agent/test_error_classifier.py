@@ -354,6 +354,40 @@ class TestClassifyApiError:
         result = classify_api_error(e)
         assert result.reason == FailoverReason.provider_policy_blocked
 
+    # ── ChatGPT-account Codex 400: deprecated model not supported ──
+
+    def test_400_codex_chatgpt_auth_model_not_supported_detail_body(self):
+        # ChatGPT-account Codex returns 400 with the reason under the
+        # FastAPI-style "detail" key (not "message"). It must classify as a
+        # non-retryable model_not_found — never rate_limit — so the fallback
+        # chain advances to a supported model instead of looping.
+        e = MockAPIError(
+            "Bad Request",
+            status_code=400,
+            body={
+                "detail": "The 'gpt-5.3-codex' model is not supported when "
+                "using Codex with a ChatGPT account."
+            },
+        )
+        result = classify_api_error(e, provider="openai-codex", model="gpt-5.3-codex")
+        assert result.reason == FailoverReason.model_not_found
+        assert result.retryable is False
+        assert result.should_fallback is True
+        assert result.reason != FailoverReason.rate_limit
+
+    def test_400_codex_model_not_supported_str_only(self):
+        # Same message surfaced only via str(error) (no structured body) still
+        # classifies as model_not_found.
+        e = MockAPIError(
+            "The 'gpt-5.3-codex' model is not supported when using Codex "
+            "with a ChatGPT account.",
+            status_code=400,
+        )
+        result = classify_api_error(e, provider="openai-codex", model="gpt-5.3-codex")
+        assert result.reason == FailoverReason.model_not_found
+        assert result.retryable is False
+        assert result.reason != FailoverReason.rate_limit
+
     def test_404_model_not_found_still_works(self):
         # Regression guard: the new policy-block check must not swallow
         # genuine model_not_found 404s.
