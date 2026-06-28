@@ -764,6 +764,362 @@ def test_codex_completed_value_claim_without_evidence_fails_anti_make_work_check
     assert "anti_make_work_check" in benchmark["critical_failures"]
 
 
+def test_journal_skip_notes_exempt_named_inactive_codex_runs_only(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    skipped_run_ids = [
+        "codex_5e2abf1b3617",
+        "codex_c3614c2aea99",
+        "codex_7c4bb00421e8",
+    ]
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "had-271-explicit-skip-note",
+                    "occurredAt": recent,
+                    "summary": "Recorded explicit non-durable Codex skip evidence.",
+                    "operatorDecisionSupport": (
+                        "Operator can see which shallow Codex traces were skipped and why."
+                    ),
+                    "changedFiles": ["src/data/journal.json"],
+                    "tests": ["self_improvement_benchmark persist=False"],
+                    "selfImprovementFocus": [
+                        {
+                            "title": "Skip shallow blog records without durable delivery proof",
+                            "activeLinearIssueIds": ["HAD-271"],
+                            "outcomeNote": (
+                                "Skipped benchmark-listed codex_5e2abf1b3617, "
+                                "codex_c3614c2aea99, and codex_7c4bb00421e8 for "
+                                "delivery backfill because their final messages describe "
+                                "untracked hadto.co blog files with no commit, push, PR, "
+                                "or publish evidence; codex_7c4bb00421e8 also records a "
+                                "strict provenance gate failure. They are useful writing "
+                                "traces but not durable operator-delivery evidence for "
+                                "this journal batch."
+                            ),
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                **{
+                    run_id: {
+                        "run_id": run_id,
+                        "status": "completed",
+                        "completed_at": recent,
+                        "exit_code": 0,
+                        "final_message": "STATUS\nCompleted a writing update for review.",
+                    }
+                    for run_id in skipped_run_ids
+                },
+                "codex_unrelated": {
+                    "run_id": "codex_unrelated",
+                    "status": "completed",
+                    "completed_at": recent,
+                    "exit_code": 0,
+                    "final_message": "STATUS\nCompleted a writing update for review.",
+                },
+            }
+        },
+    )
+    _write_json(ctx_path, {"sessions": {"ctx_1": {"active": False, "updated_at": recent}}})
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    anti_make_work = benchmark["checks"]["anti_make_work_check"]
+    assert anti_make_work["status"] == "fail"
+    assert anti_make_work["metrics"]["raw_claimed_work_item_count"] == 5
+    assert anti_make_work["metrics"]["assessed_work_item_count"] == 2
+    assert anti_make_work["metrics"]["shallow_codex_work_item_count"] == 1
+    assert anti_make_work["metrics"]["journal_remediated_codex_work_item_count"] == 3
+    assert {
+        item["id"]
+        for item in anti_make_work["metrics"]["journal_remediated_codex_examples"]
+    } == set(skipped_run_ids)
+    assert [item["id"] for item in anti_make_work["metrics"]["shallow_examples"]] == [
+        "codex_unrelated"
+    ]
+    assert "anti_make_work_check" in benchmark["critical_failures"]
+
+
+def test_codex_untracked_file_text_is_not_durable_delivery_evidence(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(journal_path, {"entries": []})
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_untrackedblog": {
+                    "run_id": "codex_untrackedblog",
+                    "status": "completed",
+                    "completed_at": recent,
+                    "exit_code": 0,
+                    "final_message": (
+                        "Drafted the new post at "
+                        "[2026-06-04-zero-dollar-rows.md]"
+                        "(/home/david/stacks/hadto.co/src/content/blog/"
+                        "2026-06-04-zero-dollar-rows.md:1).\n\n"
+                        "Verification: `npm run write:lint -- src/content/blog/"
+                        "2026-06-04-zero-dollar-rows.md` passed clean.\n\n"
+                        "Only the new blog file is untracked. I did not push, "
+                        "open a PR, commit, or publish it."
+                    ),
+                }
+            }
+        },
+    )
+    _write_json(ctx_path, {"sessions": {"ctx_1": {"active": False, "updated_at": recent}}})
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    anti_make_work = benchmark["checks"]["anti_make_work_check"]
+    assert anti_make_work["status"] == "fail"
+    assert anti_make_work["metrics"]["assessed_work_item_count"] == 1
+    assert anti_make_work["metrics"]["durable_evidence_count"] == 0
+    assert anti_make_work["metrics"]["shallow_codex_work_item_count"] == 1
+    shallow_example = anti_make_work["metrics"]["shallow_examples"][0]
+    assert shallow_example["id"] == "codex_untrackedblog"
+    assert shallow_example["signals"] == []
+    assert shallow_example["backfill_fields"] == [
+        "operatorDecisionSupport or nextDecision",
+        "changedFiles, tests, commitShas, pullRequests, or artifactPaths",
+        "controlOwnershipPreserved, incidentRiskReduced, or systemCapabilityChanged when applicable",
+    ]
+    assert "anti_make_work_check" in benchmark["critical_failures"]
+
+
+def test_journal_skip_note_exempts_text_only_untracked_codex_delivery(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "journal-skip-untracked-blog",
+                    "occurredAt": recent,
+                    "summary": "Recorded explicit non-durable Codex skip evidence.",
+                    "operatorDecisionSupport": (
+                        "Operator can see that the inactive blog trace should not "
+                        "count as durable delivery evidence."
+                    ),
+                    "changedFiles": ["src/data/journal.json"],
+                    "tests": ["self_improvement_benchmark persist=False"],
+                    "selfImprovementFocus": [
+                        {
+                            "title": "Skip shallow blog record without durable delivery proof",
+                            "outcomeNote": (
+                                "Skipped benchmark-listed codex_untrackedblog for "
+                                "delivery backfill because its final message describes "
+                                "an untracked blog file with no commit, push, PR, or "
+                                "publish evidence."
+                            ),
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_untrackedblog": {
+                    "run_id": "codex_untrackedblog",
+                    "status": "completed",
+                    "completed_at": recent,
+                    "exit_code": 0,
+                    "final_message": (
+                        "Created the new post: "
+                        "[2026-06-04-zero-dollar-rows.md]"
+                        "(/home/david/stacks/hadto.co/src/content/blog/"
+                        "2026-06-04-zero-dollar-rows.md).\n\n"
+                        "Verification:\n"
+                        "- `npm run write:lint -- src/content/blog/"
+                        "2026-06-04-zero-dollar-rows.md`: PASS, clean.\n\n"
+                        "Only the new blog file is untracked. I did not push, "
+                        "open a PR, commit, or publish it."
+                    ),
+                }
+            }
+        },
+    )
+    _write_json(ctx_path, {"sessions": {"ctx_1": {"active": False, "updated_at": recent}}})
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    anti_make_work = benchmark["checks"]["anti_make_work_check"]
+    assert anti_make_work["status"] == "pass"
+    assert anti_make_work["metrics"]["raw_claimed_work_item_count"] == 2
+    assert anti_make_work["metrics"]["assessed_work_item_count"] == 1
+    assert anti_make_work["metrics"]["durable_evidence_count"] == 1
+    assert anti_make_work["metrics"]["shallow_codex_work_item_count"] == 0
+    assert anti_make_work["metrics"]["journal_remediated_codex_work_item_count"] == 1
+    remediated = anti_make_work["metrics"]["journal_remediated_codex_examples"][0]
+    assert remediated["id"] == "codex_untrackedblog"
+    assert remediated["journal_remediation"]["entry_id"] == "journal-skip-untracked-blog"
+    assert anti_make_work["metrics"]["shallow_examples"] == []
+    assert "anti_make_work_check" not in benchmark["critical_failures"]
+
+
+def test_journal_skip_note_does_not_exempt_active_codex_run(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "had-271-active-skip-note",
+                    "occurredAt": recent,
+                    "summary": "Recorded explicit active Codex skip boundary.",
+                    "operatorDecisionSupport": (
+                        "Operator can see that active Codex traces are not exempted."
+                    ),
+                    "changedFiles": ["src/data/journal.json"],
+                    "tests": ["self_improvement_benchmark persist=False"],
+                    "selfImprovementFocus": [
+                        {
+                            "title": "Skip shallow active trace without durable proof",
+                            "activeLinearIssueIds": ["HAD-271"],
+                            "outcomeNote": (
+                                "Skipped benchmark-listed codex_994a122df450 because "
+                                "its final_message lacks delivery details and has no "
+                                "commit or PR evidence."
+                            ),
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_994a122df450": {
+                    "run_id": "codex_994a122df450",
+                    "status": "running",
+                    "started_at": recent,
+                    "final_message": "STATUS\nCompleted a draft update for review.",
+                }
+            }
+        },
+    )
+    _write_json(ctx_path, {"sessions": {"ctx_1": {"active": False, "updated_at": recent}}})
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    anti_make_work = benchmark["checks"]["anti_make_work_check"]
+    assert anti_make_work["status"] == "fail"
+    assert anti_make_work["metrics"]["journal_remediated_codex_work_item_count"] == 0
+    assert anti_make_work["metrics"]["journal_remediation_ignored_codex_count"] == 1
+    assert anti_make_work["metrics"]["shallow_codex_work_item_count"] == 1
+    shallow_example = anti_make_work["metrics"]["shallow_examples"][0]
+    assert shallow_example["id"] == "codex_994a122df450"
+    assert shallow_example["journal_remediation_ignored_reason"] == "codex_run_active"
+    assert "anti_make_work_check" in benchmark["critical_failures"]
+
+
+def test_failed_codex_status_is_not_treated_as_active_regression_fixture():
+    """HAD-515: stale failure/comment residue must not block fresh execution slots."""
+
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    old = (now - timedelta(hours=48)).isoformat()
+    payload = {
+        "runs": {
+            "codex_failed_without_exit": {
+                "run_id": "codex_failed_without_exit",
+                "status": "failed",
+                "started_at": old,
+                "final_message": "STATUS\nBlocked by usage limit before edits.",
+            },
+            "codex_completed_without_exit": {
+                "run_id": "codex_completed_without_exit",
+                "status": "completed",
+                "started_at": old,
+                "final_message": "STATUS\nDone.",
+            },
+        }
+    }
+
+    assert self_improvement_tool._codex_record_is_active(
+        payload["runs"]["codex_failed_without_exit"]
+    ) is False
+    assert self_improvement_tool._codex_record_is_active(
+        payload["runs"]["codex_completed_without_exit"]
+    ) is False
+    assert self_improvement_tool._find_stale_active_codex(
+        payload,
+        now,
+        active_stale_hours=12,
+    ) == []
+
+
 def test_operator_decision_support_passes_anti_make_work_value_category(tmp_path):
     now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
     recent = now.isoformat()
@@ -1171,6 +1527,1045 @@ def test_raw_throughput_does_not_pass_operator_value_alignment(tmp_path):
     assert "decision support" in benchmark["summary"]["operator_value_alignment"]
 
 
+def test_operator_value_alignment_uses_self_improvement_focus_for_codex_run_link(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "focus-link-operator-value",
+                    "occurredAt": recent,
+                    "selfImprovementFocus": [
+                        {
+                            "title": "Operator-decision support follow-through for codex_c5bc43777a63",
+                            "outcomeNote": (
+                                "Operator decided to accept codex_c5bc43777a63 and move "
+                                "to the next issue."
+                            ),
+                            "operatorDecisionSupport": (
+                                "Operator can compare the verified change and choose "
+                                "the next issue."
+                            ),
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_c5bc43777a63": {
+                    "run_id": "codex_c5bc43777a63",
+                    "status": "completed",
+                    "completed_at": recent,
+                    "final_message": (
+                        "CHANGED_FILES\n"
+                        "- tools/self_improvement_tool.py\n"
+                        "VERIFICATION\n"
+                        "- pytest tests/tools/test_self_improvement_tool.py passed\n"
+                        "COMMIT\n"
+                        "- abc1234\n"
+                        "PULL_REQUEST\n"
+                        "- https://github.com/taboularasa/hermes-agent/pull/1168\n"
+                    ),
+                    "exit_code": 0,
+                }
+            }
+        },
+    )
+    _write_json(ctx_path, {"sessions": {}})
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    operator_value = benchmark["checks"]["operator_value_alignment"]
+    assert operator_value["status"] in {"warn", "pass"}
+    assert operator_value["score"] >= 0.6
+    assert operator_value["metrics"]["assessed_work_item_count"] == 2
+    assert operator_value["metrics"]["aligned_work_item_count"] == 1
+    assert operator_value["metrics"]["verified_system_change_count"] == 1
+    assert operator_value["metrics"]["operator_decision_support_count"] == 2
+    assert operator_value["metrics"]["missing_operator_decision_support_examples"] == []
+    assert (
+        operator_value["metrics"]["aligned_examples"][0]["id"] == "codex_c5bc43777a63"
+    )
+
+
+def test_operator_value_alignment_links_focus_to_codex_ids_from_entry_context(tmp_path):
+    now = datetime(2026, 6, 11, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+    run_ids = [
+        "codex_c5bc43777a63",
+        "codex_e68593a634d7",
+        "codex_1017425508da",
+        "codex_90d9f3d806bc",
+        "codex_5bff4cc6fcf3",
+    ]
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": f"follow-through-{run_id}",
+                    "occurredAt": recent,
+                    "summary": f"Backfilled operator evidence for completed Codex run {run_id}.",
+                    "notes": (
+                        f"Source record: /home/david/.hermes/codex/runs.json run {run_id}. "
+                        "The merged PR evidence lets the operator decide whether to keep "
+                        "the issue closed while execution_loop remains the remaining blocker."
+                    ),
+                    "commitShas": ["abcdef1234567890abcdef1234567890abcdef12"],
+                    "laneLinks": [
+                        {
+                            "lane": "maintenance",
+                            "supportingRefs": [run_id, "PR #587 merged"],
+                        }
+                    ],
+                    "selfImprovementFocus": [
+                        {
+                            "title": "Preserve completed delivery as operator decision support",
+                            "activeLinearIssueIds": ["HAD-1168"],
+                            "outcomeNote": (
+                                "PR evidence is durable, with verification passed. "
+                                "Fresh pipeline recovery is still blocked by execution_loop health."
+                            ),
+                        }
+                    ],
+                }
+                for run_id in run_ids
+            ]
+        },
+    )
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                run_id: {
+                    "run_id": run_id,
+                    "status": "completed",
+                    "completed_at": recent,
+                    "final_message": (
+                        "CHANGED_FILES\n"
+                        "- tools/self_improvement_tool.py\n"
+                        "VERIFICATION\n"
+                        "- pytest tests/tools/test_self_improvement_tool.py passed\n"
+                        "COMMIT\n"
+                        "- abcdef1234567890abcdef1234567890abcdef12\n"
+                        "PULL_REQUEST\n"
+                        "- https://github.com/taboularasa/hermes-agent/pull/1168\n"
+                    ),
+                    "exit_code": 0,
+                }
+                for run_id in run_ids
+            }
+        },
+    )
+    _write_json(ctx_path, {"sessions": {}})
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    operator_value = benchmark["checks"]["operator_value_alignment"]
+    missing_ids = {
+        item["id"]
+        for item in operator_value["metrics"]["missing_operator_decision_support_examples"]
+    }
+    assert not missing_ids.intersection(run_ids)
+    assert operator_value["metrics"]["operator_decision_support_count"] >= len(run_ids)
+    assert set(run_ids).issubset(
+        set(operator_value["metrics"]["journal_operator_support_codex_run_ids"])
+    )
+    support_examples = operator_value["metrics"]["journal_operator_support_examples"]
+    first_evidence = support_examples[0]["evidence"][0]
+    assert first_evidence["journal_entry_id"].startswith("follow-through-codex_")
+    assert first_evidence["journal_focus_path"].endswith("selfImprovementFocus[0]")
+    support_by_id = {item["run_id"]: item for item in support_examples}
+    assert support_by_id["codex_c5bc43777a63"]["evidence"][0][
+        "journal_focus_title"
+    ] == "Preserve completed delivery as operator decision support"
+
+
+def test_operator_value_alignment_surfaces_recent_supported_codex_ids_past_reporting_cap(tmp_path):
+    now = datetime(2026, 6, 11, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+    target_run_ids = [
+        "codex_c5bc43777a63",
+        "codex_e68593a634d7",
+        "codex_1017425508da",
+        "codex_90d9f3d806bc",
+        "codex_5bff4cc6fcf3",
+    ]
+    filler_run_ids = [f"codex_0000000000{i:02d}" for i in range(60)]
+    run_ids = [*filler_run_ids, *target_run_ids]
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": f"follow-through-{run_id}",
+                    "occurredAt": recent,
+                    "summary": f"Backfilled operator evidence for completed Codex run {run_id}.",
+                    "notes": (
+                        f"Source record: /home/david/.hermes/codex/runs.json run {run_id}. "
+                        "The merged PR evidence lets the operator decide whether to keep "
+                        "the issue closed while execution_loop remains the remaining blocker."
+                    ),
+                    "selfImprovementFocus": [
+                        {
+                            "title": "Preserve completed delivery as operator decision support",
+                            "activeLinearIssueIds": ["HAD-1168"],
+                            "outcomeNote": (
+                                "PR evidence is durable, with verification passed. "
+                                "Operator can keep the issue closed while the execution_loop "
+                                "rate remains the remaining benchmark blocker."
+                            ),
+                        }
+                    ],
+                }
+                for run_id in run_ids
+            ]
+        },
+    )
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                run_id: {
+                    "run_id": run_id,
+                    "status": "completed",
+                    "external_key": "linear:HAD-1168",
+                    "completed_at": recent,
+                    "final_message": (
+                        "CHANGED_FILES\n"
+                        "- tools/self_improvement_tool.py\n"
+                        "VERIFICATION\n"
+                        "- pytest tests/tools/test_self_improvement_tool.py passed\n"
+                        "COMMIT\n"
+                        "- abcdef1234567890abcdef1234567890abcdef12\n"
+                        "PULL_REQUEST\n"
+                        "- https://github.com/taboularasa/hermes-agent/pull/1168\n"
+                    ),
+                    "exit_code": 0,
+                }
+                for run_id in run_ids
+            }
+        },
+    )
+    _write_json(ctx_path, {"sessions": {}})
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    operator_value = benchmark["checks"]["operator_value_alignment"]
+    surfaced_ids = set(operator_value["metrics"]["journal_operator_support_codex_run_ids"])
+    surfaced_examples = {
+        item["run_id"] for item in operator_value["metrics"]["journal_operator_support_examples"]
+    }
+    assert set(target_run_ids).issubset(surfaced_ids)
+    assert set(target_run_ids).issubset(surfaced_examples)
+
+
+def test_operator_value_alignment_links_top_level_journal_context_run_ids_when_focus_issue_is_broad(tmp_path):
+    now = datetime(2026, 6, 13, 8, 2, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+    target_run_ids = [
+        "codex_c5bc43777a63",
+        "codex_e68593a634d7",
+        "codex_1017425508da",
+        "codex_90d9f3d806bc",
+        "codex_5bff4cc6fcf3",
+    ]
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        [
+            {
+                "id": "2026-06-12-had-1168-follow-through-live-shape",
+                "occurredAt": recent,
+                "summary": "Backfilled operator decision-support evidence for five completed Codex runs.",
+                "notes": (
+                    "Source records: "
+                    + ", ".join(target_run_ids)
+                    + ". Operator decision: count these merged PR outcomes as durable "
+                    "follow-through while execution_loop remains the closure blocker."
+                ),
+                "laneLinks": [
+                    {
+                        "lane": "maintenance",
+                        "supportingRefs": [
+                            *target_run_ids,
+                            "operator decision: keep HAD-1168 open",
+                        ],
+                    }
+                ],
+                "selfImprovementFocus": [
+                    {
+                        "title": "Count HAD-1168 follow-through as operator decision support",
+                        "activeLinearIssueIds": ["HAD-1168"],
+                        "outcomeNote": (
+                            "Merged PR evidence is durable for the referenced runs. "
+                            "The operator can keep the individual source issues closed while "
+                            "execution_loop remains the remaining benchmark blocker."
+                        ),
+                        "operatorDecisionSupport": (
+                            "Operator decision: use these run IDs as completed follow-through "
+                            "evidence, but do not close HAD-1168 until a fresh pipeline pass "
+                            "clears execution_loop."
+                        ),
+                    }
+                ],
+            }
+        ],
+    )
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_broad_had_1168": {
+                    "run_id": "codex_broad_had_1168",
+                    "status": "completed",
+                    "external_key": "linear:HAD-1168",
+                    "completed_at": recent,
+                    "final_message": (
+                        "CHANGED_FILES\n- tools/self_improvement_tool.py\n"
+                        "VERIFICATION\n- pytest tests/tools/test_self_improvement_tool.py passed\n"
+                        "COMMIT\n- abcdef1234567890abcdef1234567890abcdef12\n"
+                    ),
+                    "exit_code": 0,
+                },
+                **{
+                    run_id: {
+                        "run_id": run_id,
+                        "status": "completed",
+                        "external_key": f"linear:HAD-{index}",
+                        "completed_at": recent,
+                        "final_message": (
+                            "CHANGED_FILES\n"
+                            "- tools/self_improvement_tool.py\n"
+                            "VERIFICATION\n"
+                            "- pytest tests/tools/test_self_improvement_tool.py passed\n"
+                            "COMMIT\n"
+                            "- abcdef1234567890abcdef1234567890abcdef12\n"
+                            "PULL_REQUEST\n"
+                            "- https://github.com/taboularasa/hermes-agent/pull/1168\n"
+                        ),
+                        "exit_code": 0,
+                    }
+                    for index, run_id in enumerate(target_run_ids, start=1300)
+                },
+            }
+        },
+    )
+    _write_json(ctx_path, {"sessions": {}})
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    operator_value = benchmark["checks"]["operator_value_alignment"]
+    missing_ids = {
+        item["id"]
+        for item in operator_value["metrics"]["missing_operator_decision_support_examples"]
+    }
+    assert missing_ids.isdisjoint(target_run_ids)
+    assert set(target_run_ids).issubset(
+        set(operator_value["metrics"]["journal_operator_support_codex_run_ids"])
+    )
+    support_by_id = {
+        item["run_id"]: item
+        for item in operator_value["metrics"]["journal_operator_support_examples"]
+    }
+    for run_id in target_run_ids:
+        assert support_by_id[run_id]["evidence"][0]["journal_entry_id"] == (
+            "2026-06-12-had-1168-follow-through-live-shape"
+        )
+
+
+def test_pipeline_recognizes_live_had_1168_followthrough_issue_links(tmp_path):
+    now = datetime(2026, 6, 13, 10, 30, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+    run_issue_pairs = [
+        ("codex_c5bc43777a63", "HAD-271"),
+        ("codex_e68593a634d7", "HAD-1319"),
+        ("codex_1017425508da", "HAD-1322"),
+        ("codex_90d9f3d806bc", "HAD-1326"),
+        ("codex_5bff4cc6fcf3", "HAD-1327"),
+    ]
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    history_path = tmp_path / "history.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        [
+            {
+                "id": f"2026-06-10-had-1168-follow-through-{issue_id.lower()}",
+                "occurredAt": recent,
+                "summary": (
+                    f"Backfilled operator decision-support evidence for completed "
+                    f"Codex run {run_id} ({issue_id})."
+                ),
+                "notes": (
+                    f"Source record: /home/david/.hermes/codex/runs.json run {run_id} "
+                    f"with external_key linear:{issue_id}, status completed, and "
+                    "merged PR verification. Boundary for this row: keep HAD-1168 "
+                    "open until a fresh pipeline pass clears execution_loop."
+                ),
+                "selfImprovementFocus": [
+                    {
+                        "title": f"Preserve {issue_id} delivery as operator decision support",
+                        "activeLinearIssueIds": [issue_id],
+                        "outcomeNote": (
+                            "Merged PR evidence is durable and focused verification "
+                            "passed; execution_loop health remains the aggregate blocker."
+                        ),
+                        "operatorDecisionSupport": (
+                            "Operator decision: count this completed Codex delivery as "
+                            "journal follow-through while keeping HAD-1168 closure gated "
+                            "on a fresh execution_loop pass."
+                        ),
+                    }
+                ],
+            }
+            for run_id, issue_id in run_issue_pairs
+        ],
+    )
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                run_id: {
+                    "run_id": run_id,
+                    "status": "completed",
+                    "external_key": f"linear:{issue_id}",
+                    "completed_at": recent,
+                    "final_message": (
+                        "CHANGED_FILES\n"
+                        "- tools/self_improvement_tool.py\n"
+                        "VERIFICATION\n"
+                        "- pytest tests/tools/test_self_improvement_tool.py passed\n"
+                        "COMMIT\n"
+                        "- abcdef1234567890abcdef1234567890abcdef12\n"
+                        "PULL_REQUEST\n"
+                        "- https://github.com/taboularasa/hermes-agent/pull/1168\n"
+                    ),
+                    "exit_code": 0,
+                }
+                for run_id, issue_id in run_issue_pairs
+            }
+        },
+    )
+    _write_json(ctx_path, {"sessions": {}})
+
+    pipeline = self_improvement_tool.evaluate_self_improvement_pipeline(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=history_path,
+        now=now,
+        persist=False,
+        candidate_limit=5,
+        available_capacity=0,
+    )
+
+    metrics = pipeline["benchmark"]["checks"]["operator_value_alignment"]["metrics"]
+    target_run_ids = {run_id for run_id, _issue_id in run_issue_pairs}
+    missing_ids = {
+        item["id"] for item in metrics["missing_operator_decision_support_examples"]
+    }
+    assert missing_ids.isdisjoint(target_run_ids)
+    assert target_run_ids.issubset(
+        set(metrics["journal_operator_support_codex_run_ids"])
+    )
+    assert all(
+        item["id"] not in target_run_ids
+        for item in pipeline["benchmark"]["operator_value_checks"][
+            "missing_operator_decision_support"
+        ]
+    )
+    assert pipeline["runtime"]["module"] == "tools.self_improvement_tool"
+    assert pipeline["runtime"]["file"].endswith("tools/self_improvement_tool.py")
+
+
+def test_operator_value_alignment_links_entry_context_run_id_to_single_supported_focus(tmp_path):
+    now = datetime(2026, 6, 13, 9, 45, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+    run_id = "codex_abcd1234ef56"
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "entry-context-single-supported-focus",
+                    "occurredAt": recent,
+                    "summary": "Backfilled follow-through for a completed Codex delivery.",
+                    "notes": (
+                        f"Source record: /home/david/.hermes/codex/runs.json run {run_id}. "
+                        "The run is complete, but the journal entry also carries an unrelated "
+                        "focus item."
+                    ),
+                    "laneLinks": [
+                        {
+                            "lane": "maintenance",
+                            "supportingRefs": [
+                                run_id,
+                                "operator decision boundary: keep aggregate gate open",
+                            ],
+                        }
+                    ],
+                    "selfImprovementFocus": [
+                        {
+                            "title": "Keep unrelated planning note visible",
+                            "outcomeNote": "Recorded only backlog context for a later pass.",
+                        },
+                        {
+                            "title": "Preserve completed delivery for operator review",
+                            "activeLinearIssueIds": ["HAD-1168"],
+                            "outcomeNote": (
+                                "Merged PR evidence is durable, but broader throughput "
+                                "recovery still needs a fresh benchmark pass."
+                            ),
+                            "operatorDecisionSupport": (
+                                "Operator can count the referenced Codex delivery as "
+                                "journal follow-through while keeping the aggregate "
+                                "execution-loop gate open."
+                            ),
+                        },
+                    ],
+                }
+            ]
+        },
+    )
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                run_id: {
+                    "run_id": run_id,
+                    "status": "completed",
+                    "external_key": "linear:HAD-271",
+                    "completed_at": recent,
+                    "final_message": (
+                        "CHANGED_FILES\n"
+                        "- tools/self_improvement_tool.py\n"
+                        "VERIFICATION\n"
+                        "- pytest tests/tools/test_self_improvement_tool.py passed\n"
+                        "COMMIT\n"
+                        "- abcdef1234567890abcdef1234567890abcdef12\n"
+                        "PULL_REQUEST\n"
+                        "- https://github.com/taboularasa/hermes-agent/pull/1168\n"
+                    ),
+                    "exit_code": 0,
+                }
+            }
+        },
+    )
+    _write_json(ctx_path, {"sessions": {}})
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    operator_value = benchmark["checks"]["operator_value_alignment"]
+    metrics = operator_value["metrics"]
+    missing_ids = {
+        item["id"] for item in metrics["missing_operator_decision_support_examples"]
+    }
+    assert run_id not in missing_ids
+    assert run_id in metrics["journal_operator_support_codex_run_ids"]
+    support_by_id = {
+        item["run_id"]: item for item in metrics["journal_operator_support_examples"]
+    }
+    assert support_by_id[run_id]["evidence"][0]["journal_focus_path"].endswith(
+        "selfImprovementFocus[1]"
+    )
+    assert any(item["id"] == run_id for item in metrics["aligned_examples"])
+
+
+def test_operator_value_alignment_keeps_ambiguous_entry_context_runs_missing(tmp_path):
+    now = datetime(2026, 6, 13, 9, 50, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+    run_id = "codex_feed1234abcd"
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "entry-context-ambiguous-supported-focuses",
+                    "occurredAt": recent,
+                    "summary": "Backfilled follow-through for a completed Codex delivery.",
+                    "notes": f"Source record names completed Codex run {run_id}.",
+                    "selfImprovementFocus": [
+                        {
+                            "title": "Preserve first operator decision",
+                            "operatorDecisionSupport": (
+                                "Operator can count a different completed delivery after "
+                                "checking its merge evidence."
+                            ),
+                        },
+                        {
+                            "title": "Preserve second operator decision",
+                            "operatorDecisionSupport": (
+                                "Operator can count another completed delivery after "
+                                "checking its verification evidence."
+                            ),
+                        },
+                    ],
+                }
+            ]
+        },
+    )
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                run_id: {
+                    "run_id": run_id,
+                    "status": "completed",
+                    "external_key": "linear:HAD-271",
+                    "completed_at": recent,
+                    "final_message": (
+                        "CHANGED_FILES\n"
+                        "- tools/self_improvement_tool.py\n"
+                        "VERIFICATION\n"
+                        "- pytest tests/tools/test_self_improvement_tool.py passed\n"
+                        "COMMIT\n"
+                        "- abcdef1234567890abcdef1234567890abcdef12\n"
+                    ),
+                    "exit_code": 0,
+                }
+            }
+        },
+    )
+    _write_json(ctx_path, {"sessions": {}})
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    metrics = benchmark["checks"]["operator_value_alignment"]["metrics"]
+    assert run_id not in metrics["journal_operator_support_codex_run_ids"]
+    assert run_id in {
+        item["id"] for item in metrics["missing_operator_decision_support_examples"]
+    }
+
+
+def test_operator_value_alignment_links_focus_issue_ids_to_codex_external_keys(tmp_path):
+    now = datetime(2026, 6, 11, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+    run_issue_pairs = [
+        ("codex_c5bc43777a63", "HAD-271"),
+        ("codex_e68593a634d7", "HAD-1319"),
+        ("codex_1017425508da", "HAD-1322"),
+        ("codex_90d9f3d806bc", "HAD-1326"),
+        ("codex_5bff4cc6fcf3", "HAD-1327"),
+    ]
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": f"follow-through-{issue_id.lower()}",
+                    "occurredAt": recent,
+                    "selfImprovementFocus": [
+                        {
+                            "title": f"Preserve {issue_id} as operator decision support",
+                            "activeLinearIssueIds": [issue_id],
+                            "outcomeNote": (
+                                "Merged PR evidence and focused verification are durable. "
+                                "Operator can keep the issue closed while the execution_loop "
+                                "rate remains the remaining benchmark blocker."
+                            ),
+                        }
+                    ],
+                }
+                for _run_id, issue_id in run_issue_pairs
+            ]
+        },
+    )
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                run_id: {
+                    "run_id": run_id,
+                    "status": "completed",
+                    "external_key": f"linear:{issue_id}",
+                    "completed_at": recent,
+                    "final_message": (
+                        "CHANGED_FILES\n"
+                        "- tools/self_improvement_tool.py\n"
+                        "VERIFICATION\n"
+                        "- pytest tests/tools/test_self_improvement_tool.py passed\n"
+                        "COMMIT\n"
+                        "- abcdef1234567890abcdef1234567890abcdef12\n"
+                        "PULL_REQUEST\n"
+                        "- https://github.com/taboularasa/hermes-agent/pull/1168\n"
+                    ),
+                    "exit_code": 0,
+                }
+                for run_id, issue_id in run_issue_pairs
+            }
+        },
+    )
+    _write_json(ctx_path, {"sessions": {}})
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    operator_value = benchmark["checks"]["operator_value_alignment"]
+    missing_ids = {
+        item["id"]
+        for item in operator_value["metrics"]["missing_operator_decision_support_examples"]
+    }
+    assert missing_ids.isdisjoint({run_id for run_id, _issue_id in run_issue_pairs})
+    assert operator_value["metrics"]["operator_decision_support_count"] >= len(
+        run_issue_pairs
+    )
+    assert operator_value["metrics"]["aligned_work_item_count"] >= len(run_issue_pairs)
+
+
+
+def test_operator_value_alignment_reports_missing_decision_support_fields(tmp_path):
+    now = datetime(2026, 6, 11, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    history_path = tmp_path / "history.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(journal_path, {"entries": []})
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_verified_without_operator_support": {
+                    "run_id": "codex_verified_without_operator_support",
+                    "status": "completed",
+                    "completed_at": recent,
+                    "final_message": (
+                        "CHANGED_FILES\n"
+                        "- tools/self_improvement_tool.py\n"
+                        "VERIFICATION\n"
+                        "- pytest tests/tools/test_self_improvement_tool.py passed\n"
+                        "COMMIT\n"
+                        "- abcdef1234567890abcdef1234567890abcdef12\n"
+                        "PULL_REQUEST\n"
+                        "- https://github.com/taboularasa/hermes-agent/pull/273\n"
+                    ),
+                    "exit_code": 0,
+                }
+            }
+        },
+    )
+    _write_json(ctx_path, {"sessions": {}})
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=history_path,
+        now=now,
+        persist=True,
+    )
+
+    operator_value = benchmark["checks"]["operator_value_alignment"]
+    metrics = operator_value["metrics"]
+    assert metrics["missing_operator_decision_support_fields"] == [
+        "blocker",
+        "decision",
+        "nextDecision",
+        "operatorDecisionSupport",
+        "selectedWork",
+        "tradeoff",
+    ]
+    missing_example = metrics["missing_operator_decision_support_examples"][0]
+    assert missing_example["id"] == "codex_verified_without_operator_support"
+    assert missing_example["missing_operator_decision_support_fields"] == metrics[
+        "missing_operator_decision_support_fields"
+    ]
+    assert "operatorDecisionSupport or nextDecision" in missing_example["remediation"]
+    assert "Missing operator decision-support fields" in operator_value["detail"]
+    assert benchmark["operator_value_checks"]["missing_operator_decision_support_fields"] == metrics[
+        "missing_operator_decision_support_fields"
+    ]
+
+    history = json.loads(history_path.read_text())
+    persisted_run = history["runs"][-1]
+    assert persisted_run["operator_value_checks"]["missing_operator_decision_support_fields"] == metrics[
+        "missing_operator_decision_support_fields"
+    ]
+    assert persisted_run["checks"]["operator_value_alignment"]["metrics"][
+        "missing_operator_decision_support_examples"
+    ][0]["missing_operator_decision_support_fields"] == metrics[
+        "missing_operator_decision_support_fields"
+    ]
+
+
+def test_operator_value_alignment_reports_missing_journal_reference_path(tmp_path):
+    now = datetime(2026, 6, 11, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "follow-through-had-999",
+                    "occurredAt": recent,
+                    "selfImprovementFocus": [
+                        {
+                            "title": "Preserve HAD-999 merge evidence",
+                            "activeLinearIssueIds": ["HAD-999"],
+                            "outcomeNote": "PR #999 merged and focused tests passed.",
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_missing_operator_reference": {
+                    "run_id": "codex_missing_operator_reference",
+                    "status": "completed",
+                    "external_key": "linear:HAD-999",
+                    "completed_at": recent,
+                    "final_message": (
+                        "CHANGED_FILES\n"
+                        "- tools/self_improvement_tool.py\n"
+                        "VERIFICATION\n"
+                        "- pytest tests/tools/test_self_improvement_tool.py passed\n"
+                        "COMMIT\n"
+                        "- abcdef1234567890abcdef1234567890abcdef12\n"
+                    ),
+                    "exit_code": 0,
+                }
+            }
+        },
+    )
+    _write_json(ctx_path, {"sessions": {}})
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    metrics = benchmark["checks"]["operator_value_alignment"]["metrics"]
+    diagnostics = metrics["missing_operator_decision_support_journal_diagnostics"]
+    assert diagnostics == [
+        {
+            "run_id": "codex_missing_operator_reference",
+            "codex_issue_id": "HAD-999",
+            "required_journal_reference_path": (
+                "entries[follow-through-had-999].selfImprovementFocus[0]."
+                "operatorDecisionSupport|nextDecision|decision|selectedWork|blocker|tradeoff"
+            ),
+            "matched_journal_reference_paths": [
+                "entries[follow-through-had-999].selfImprovementFocus[0]"
+            ],
+            "reason": "journal_focus_lacks_operator_decision_support_field",
+        }
+    ]
+    missing_example = next(
+        item
+        for item in metrics["missing_operator_decision_support_examples"]
+        if item["id"] == "codex_missing_operator_reference"
+    )
+    assert missing_example["journal_reference_diagnostic"] == diagnostics[0]
+
+
+def test_operator_value_alignment_diagnoses_entry_context_codex_reference_without_focus_support(tmp_path):
+    now = datetime(2026, 6, 11, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+    run_id = "codex_c5bc43777a63"
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "follow-through-had-271",
+                    "occurredAt": recent,
+                    "summary": f"Backfilled evidence for completed Codex run {run_id}.",
+                    "notes": (
+                        "Source record names the Codex run at the entry level, "
+                        "but the focus item lacks the required follow-up field."
+                    ),
+                    "selfImprovementFocus": [
+                        {
+                            "title": "Preserve HAD-271 merge evidence",
+                            "outcomeNote": "PR #587 merged and focused tests passed.",
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                run_id: {
+                    "run_id": run_id,
+                    "status": "completed",
+                    "external_key": "linear:HAD-271",
+                    "completed_at": recent,
+                    "final_message": (
+                        "CHANGED_FILES\n"
+                        "- tools/self_improvement_tool.py\n"
+                        "VERIFICATION\n"
+                        "- pytest tests/tools/test_self_improvement_tool.py passed\n"
+                        "COMMIT\n"
+                        "- abcdef1234567890abcdef1234567890abcdef12\n"
+                        "PULL_REQUEST\n"
+                        "- https://github.com/taboularasa/hermes-agent/pull/587\n"
+                    ),
+                    "exit_code": 0,
+                }
+            }
+        },
+    )
+    _write_json(ctx_path, {"sessions": {}})
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    metrics = benchmark["checks"]["operator_value_alignment"]["metrics"]
+    diagnostic = metrics["missing_operator_decision_support_journal_diagnostics"][0]
+    assert diagnostic == {
+        "run_id": run_id,
+        "codex_issue_id": "HAD-271",
+        "required_journal_reference_path": (
+            "entries[follow-through-had-271].selfImprovementFocus[0]."
+            "operatorDecisionSupport|nextDecision|decision|selectedWork|blocker|tradeoff"
+        ),
+        "matched_journal_reference_paths": [
+            "entries[follow-through-had-271].selfImprovementFocus[0]"
+        ],
+        "reason": "journal_focus_lacks_operator_decision_support_field",
+    }
+
+
 def test_failed_codex_runs_with_completed_at_do_not_count_as_deliveries(tmp_path):
     now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
     recent = now.isoformat()
@@ -1347,6 +2742,21 @@ def test_execution_throughput_gap_prioritizes_journal_followthrough_without_ctx_
     assert remediation["ctx_inactivity_blocking"] is False
     assert "inactive ctx is informational" in drift["detail"]
     assert "journal entries" in remediation["actions"][0]
+    execution_metrics = benchmark["checks"]["execution_loop"]["metrics"]
+    assert execution_metrics["pending_journal_follow_through_count"] == 6
+    pending_runs = execution_metrics["pending_journal_follow_through_codex_runs"]
+    assert pending_runs[0]["id"] == "codex_0"
+    assert "operatorDecisionSupport or nextDecision" in pending_runs[0]["required_journal_fields"]
+    assert pending_runs[0]["operator_decision_support_path"].startswith(
+        "entries[*].selfImprovementFocus[*]"
+    )
+    backfill_targets = execution_metrics["journal_backfill_targets"]
+    assert backfill_targets[0]["run_id"] == "codex_0"
+    assert backfill_targets[0].get("linear_issue_ids", []) == []
+    assert backfill_targets[0]["required_journal_reference_path"].startswith(
+        "entries[*].selfImprovementFocus[*]"
+    )
+    assert "Backfill" in backfill_targets[0]["backfill_action"]
 
     issue_selection = benchmark["issue_selection"]
     assert issue_selection["recommended_focus"] == "Codex delivery journal follow-through"
@@ -1364,6 +2774,7 @@ def test_execution_throughput_gap_prioritizes_journal_followthrough_without_ctx_
         "- execution_throughput_remediation=6 completed Codex run(s), "
         "1 journal work item(s)"
     ) in summary_markdown
+    assert "- journal_backfill_targets=unlinked/codex_0" in summary_markdown
     assert "- execution_throughput_action=backfill journal entries" in summary_markdown
     assert (
         compact["leading_indicator_drift"]["execution_throughput_remediation"]["required"]
@@ -2369,6 +3780,87 @@ def test_execution_loop_warns_on_sparse_journal_follow_through_after_codex_volum
     assert benchmark["issue_selection"]["recommended_focus"] == "Codex delivery journal follow-through"
 
 
+def test_execution_loop_backfill_targets_prioritize_newest_pending_codex(tmp_path):
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(journal_path, {"entries": [{"id": "journal_1", "occurredAt": recent}]})
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_old": {
+                    "run_id": "codex_old",
+                    "status": "completed",
+                    "completed_at": (now - timedelta(hours=6)).isoformat(),
+                    "exit_code": 0,
+                    "external_key": "linear:HAD-1150",
+                },
+                "codex_new": {
+                    "run_id": "codex_new",
+                    "status": "completed",
+                    "completed_at": recent,
+                    "exit_code": 0,
+                    "external_key": "linear:HAD-1168",
+                },
+                "codex_middle": {
+                    "run_id": "codex_middle",
+                    "status": "completed",
+                    "completed_at": (now - timedelta(hours=3)).isoformat(),
+                    "exit_code": 0,
+                    "external_key": "linear:HAD-1167",
+                },
+            }
+        },
+    )
+    _write_json(ctx_path, {"sessions": {}})
+
+    benchmark = self_improvement_tool.evaluate_self_improvement_benchmark(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=tmp_path / "history.json",
+        now=now,
+        persist=False,
+    )
+
+    metrics = benchmark["checks"]["execution_loop"]["metrics"]
+    pending_runs = metrics["pending_journal_follow_through_codex_runs"]
+    assert [item["id"] for item in pending_runs[:3]] == [
+        "codex_new",
+        "codex_middle",
+        "codex_old",
+    ]
+    backfill_targets = metrics["journal_backfill_targets"]
+    assert backfill_targets[0]["run_id"] == "codex_new"
+    assert backfill_targets[0]["linear_issue_ids"] == ["HAD-1168"]
+    assert (
+        backfill_targets[0]["reason"]
+        == "journal_focus_reference_not_found_for_codex_run"
+    )
+    assert (
+        "operatorDecisionSupport or nextDecision"
+        in backfill_targets[0]["required_journal_fields"]
+    )
+
+    compact = self_improvement_tool._pipeline_benchmark_summary(benchmark)
+    assert (
+        compact["execution_loop_follow_through"]["journal_backfill_targets"][0]["run_id"]
+        == "codex_new"
+    )
+    summary_markdown = self_improvement_tool._format_pipeline_summary(
+        benchmark=benchmark,
+        top_candidate=None,
+    )
+    assert "- journal_backfill_targets=HAD-1168/codex_new" in summary_markdown
+
+
 def test_execution_loop_passes_when_ctx_codex_and_journal_are_in_cadence(tmp_path):
     now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
     recent = now.isoformat()
@@ -2731,6 +4223,294 @@ def test_pipeline_fills_spare_capacity_with_safe_repo_backed_candidates(tmp_path
     }
     assert "top_candidate=operator_value_alignment" in pipeline["summary_markdown"]
     assert "parallel_candidates=2/2 state=spare_capacity_filled" in pipeline["summary_markdown"]
+
+
+def test_pipeline_excludes_stale_hermes_delegate_on_duplicate_human_issue(tmp_path):
+    now = datetime(2026, 6, 12, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    history_path = tmp_path / "history.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "stale-ownership-regression",
+                    "occurredAt": recent,
+                    "summary": "Verified stale ownership cleanup candidate filtering.",
+                    "changedFiles": ["tools/self_improvement_tool.py"],
+                    "tests": ["pytest tests/tools/test_self_improvement_tool.py passed"],
+                }
+            ]
+        },
+    )
+    _write_json(
+        codex_path,
+        {
+            "runs": {
+                "codex_selected": {
+                    "run_id": "codex_selected",
+                    "status": "completed",
+                    "completed_at": recent,
+                    "exit_code": 0,
+                }
+            }
+        },
+    )
+    _write_json(
+        ctx_path,
+        {"sessions": {"ctx_1": {"session_id": "ctx_1", "active": False, "updated_at": recent}}},
+    )
+
+    pipeline = self_improvement_tool.evaluate_self_improvement_pipeline(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=history_path,
+        now=now,
+        persist=False,
+        available_capacity=2,
+        backlog_candidates=[
+            {
+                "id": "HAD-129",
+                "title": "Duplicate human-held issue with stale Hermes delegate",
+                "candidate_source": "delegate_codex",
+                "repo": "taboularasa/hermes-agent",
+                "state": {"name": "Duplicate", "type": "canceled"},
+                "state_type": "duplicate",
+                "labels": {"nodes": [{"name": "owner:human"}, {"name": "delegate:codex"}]},
+                "delegate": {"name": "Hermes"},
+                "priority": 0,
+            },
+            {
+                "id": "HAD-516",
+                "title": "Clean stale Hermes ownership residue",
+                "repo": "taboularasa/hermes-agent",
+                "priority": 1,
+            },
+            {
+                "id": "HAD-513",
+                "title": "Add workspace backlog verification fixture",
+                "repo": "taboularasa/hermes-agent",
+                "priority": 2,
+            },
+        ],
+    )
+
+    capacity = pipeline["capacity"]
+    assert [item["candidate_id"] for item in pipeline["parallel_candidates"]] == [
+        "HAD-516",
+        "HAD-513",
+    ]
+    assert capacity["eligible_backlog_candidate_count"] == 2
+    assert capacity["filtered_reasons"] == {
+        "duplicate": 1,
+        "not_actionable_state": 1,
+        "owner_human": 1,
+    }
+
+    filtered = {
+        item["candidate_id"]: item
+        for item in capacity["filtered_candidates"]
+    }
+    assert filtered["HAD-129"]["reasons"] == [
+        "duplicate",
+        "not_actionable_state",
+        "owner_human",
+    ]
+    assert filtered["HAD-129"]["cleanup_reason"] == "stale_hermes_ownership_residue"
+    assert "HAD-129" not in {
+        item["candidate_id"]
+        for item in pipeline["parallel_candidates"]
+    }
+
+
+def test_pipeline_capacity_surfaces_partial_linear_planning_evidence(tmp_path):
+    now = datetime(2026, 6, 12, 12, 0, 0, tzinfo=timezone.utc)
+    recent = now.isoformat()
+
+    journal_path = tmp_path / "journal.json"
+    codex_path = tmp_path / "runs.json"
+    ctx_path = tmp_path / "session_bindings.json"
+    history_path = tmp_path / "history.json"
+    ontology_root = _seed_ontology_repo(tmp_path, generated_at=recent)
+
+    _write_json(
+        journal_path,
+        {
+            "entries": [
+                {
+                    "id": "linear-planning-surface",
+                    "occurredAt": recent,
+                    "summary": "Verified Linear planning surface evidence.",
+                    "changedFiles": ["tools/self_improvement_tool.py"],
+                    "tests": ["pytest tests/tools/test_self_improvement_tool.py passed"],
+                    "selfImprovementFocus": [
+                        {
+                            "title": "Harden Linear planning evidence",
+                            "activeLinearIssueIds": ["HAD-273"],
+                            "outcomeNote": "Planning gaps expose exact missing fields and issue samples.",
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    _write_json(codex_path, {"runs": {}})
+    _write_json(ctx_path, {"sessions": {}})
+
+    pipeline = self_improvement_tool.evaluate_self_improvement_pipeline(
+        journal_path=journal_path,
+        codex_runs_path=codex_path,
+        ctx_bindings_path=ctx_path,
+        ontology_root=ontology_root,
+        history_path=history_path,
+        now=now,
+        persist=False,
+        available_capacity=2,
+        backlog_candidates=[
+            {
+                "id": "HAD-273",
+                "title": "Harden the Linear self-improvement planning surface",
+                "repo": "taboularasa/hermes-agent",
+                "lane": "Maintenance",
+            },
+            {
+                "id": "HAD-274",
+                "title": "Complete planning fixture",
+                "repo": "taboularasa/hermes-agent",
+                "lane": "Maintenance",
+                "verification": "Run the focused self-improvement tests.",
+                "activeStatusComment": "Branch is under native fallback implementation.",
+            },
+        ],
+    )
+
+    surface = pipeline["capacity"]["linear_planning_surface"]
+
+    assert surface["surface"] == "linear_planning_surface"
+    assert surface["status"] == "partial"
+    assert surface["score"] == 0.6667
+    assert surface["missing_field_counts"] == {
+        "active_status_comment": 1,
+        "verification": 1,
+    }
+    assert surface["issue_samples"] == [
+        {
+            "candidate_id": "HAD-273",
+            "title": "Harden the Linear self-improvement planning surface",
+            "missing_fields": ["active_status_comment", "verification"],
+            "expected_aliases": {
+                "active_status_comment": [
+                    "active_status_comment",
+                    "activeStatusComment",
+                    "latest_status_comment",
+                    "latestStatusComment",
+                    "status_comment",
+                    "statusComment",
+                    "status_comments",
+                    "statusComments",
+                    "comments",
+                ],
+                "verification": [
+                    "verification",
+                    "verification_expectation",
+                    "verificationExpectation",
+                    "verification_plan",
+                    "verificationPlan",
+                    "verification_targets",
+                    "verificationTargets",
+                ],
+            },
+        }
+    ]
+    assert surface["missing_field_details"] == [
+        {
+            "field": "active_status_comment",
+            "expected_aliases": [
+                "active_status_comment",
+                "activeStatusComment",
+                "latest_status_comment",
+                "latestStatusComment",
+                "status_comment",
+                "statusComment",
+                "status_comments",
+                "statusComments",
+                "comments",
+            ],
+            "missing_count": 1,
+            "sample_candidates": [
+                {
+                    "candidate_id": "HAD-273",
+                    "title": "Harden the Linear self-improvement planning surface",
+                }
+            ],
+        },
+        {
+            "field": "verification",
+            "expected_aliases": [
+                "verification",
+                "verification_expectation",
+                "verificationExpectation",
+                "verification_plan",
+                "verificationPlan",
+                "verification_targets",
+                "verificationTargets",
+            ],
+            "missing_count": 1,
+            "sample_candidates": [
+                {
+                    "candidate_id": "HAD-273",
+                    "title": "Harden the Linear self-improvement planning surface",
+                }
+            ],
+        },
+    ]
+    assert surface["issue_sample_limit"] == 5
+    assert (
+        "- linear_planning_surface_missing=active_status_comment=1, verification=1"
+        in pipeline["summary_markdown"]
+    )
+
+
+def test_linear_planning_surface_bounds_missing_field_diagnostics():
+    candidates = [
+        {
+            "id": f"HAD-27{idx}",
+            "title": f"Planning candidate {idx}",
+            "lane": "Maintenance",
+        }
+        for idx in range(6)
+    ]
+
+    surface = self_improvement_tool._build_linear_planning_surface(candidates)
+
+    assert surface["status"] == "partial"
+    assert surface["missing_field_counts"] == {
+        "active_status_comment": 6,
+        "verification": 6,
+    }
+    assert surface["issue_sample_limit"] == 5
+    assert len(surface["issue_samples"]) == 5
+    details = {
+        detail["field"]: detail for detail in surface["missing_field_details"]
+    }
+    assert details["verification"]["missing_count"] == 6
+    assert len(details["verification"]["sample_candidates"]) == 5
+    assert details["verification"]["sample_candidates"][0] == {
+        "candidate_id": "HAD-270",
+        "title": "Planning candidate 0",
+    }
+    assert "verification_plan" in details["verification"]["expected_aliases"]
+    assert details["active_status_comment"]["missing_count"] == 6
+    assert len(details["active_status_comment"]["sample_candidates"]) == 5
+    assert "statusComment" in details["active_status_comment"]["expected_aliases"]
 
 
 def test_benchmark_exposes_journal_reporting_contract_from_focus_schema(tmp_path):

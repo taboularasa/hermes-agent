@@ -37,6 +37,50 @@ def test_get_codex_model_ids_prioritizes_default_and_cache(tmp_path, monkeypatch
     assert "gpt-5-hidden-codex" not in models
 
 
+_DEPRECATED_CHATGPT_AUTH_SLUGS = {
+    "gpt-5.3-codex",
+    "gpt-5.2",
+    "gpt-5.2-codex",
+    "gpt-5.1-codex",
+    "gpt-5.1-codex-max",
+    "gpt-5.1-codex-mini",
+    "gpt-5.1",
+    "gpt-5",
+}
+_SUPPORTED_CHATGPT_AUTH_SLUGS = {
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex-spark",
+}
+
+
+def test_default_codex_models_are_chatgpt_auth_safe():
+    """Primary is gpt-5.5 and no deprecated ChatGPT-auth slug is seeded.
+
+    OpenAI deprecated gpt-5.3-codex / gpt-5.2 / gpt-5.1-* for ChatGPT-account
+    Codex sign-in (2026-04-14). Seeding them as offline/cron defaults caused a
+    non-retryable HTTP 400 from the ChatGPT-auth Codex backend.
+    """
+    assert DEFAULT_CODEX_MODELS[0] == "gpt-5.5"
+    assert _DEPRECATED_CHATGPT_AUTH_SLUGS.isdisjoint(DEFAULT_CODEX_MODELS)
+    assert set(DEFAULT_CODEX_MODELS) <= _SUPPORTED_CHATGPT_AUTH_SLUGS
+
+
+def test_get_codex_model_ids_offline_chain_has_no_deprecated_slugs(tmp_path, monkeypatch):
+    """Offline (no token, empty codex home) the resolved chain contains only
+    ChatGPT-auth-supported models — never a deprecated slug."""
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    models = get_codex_model_ids(access_token=None)
+
+    assert models[0] == "gpt-5.5"
+    assert _DEPRECATED_CHATGPT_AUTH_SLUGS.isdisjoint(models)
+    assert set(models) <= _SUPPORTED_CHATGPT_AUTH_SLUGS
+
+
 def test_setup_wizard_codex_import_resolves():
     """Regression test for #712: setup.py must import the correct function name."""
     # This mirrors the exact import used in hermes_cli/setup.py line 873.
@@ -58,18 +102,21 @@ def test_get_codex_model_ids_falls_back_to_curated_defaults(tmp_path, monkeypatc
 
 
 def test_get_codex_model_ids_adds_forward_compat_models_from_templates(monkeypatch):
+    # Live discovery returns only gpt-5.4. The forward-compat templates should
+    # synthesize gpt-5.4-mini (template references gpt-5.4) and
+    # gpt-5.3-codex-spark (template references gpt-5.4). gpt-5.5's template
+    # references gpt-5.4/gpt-5.4-mini, so it is also surfaced.
     monkeypatch.setattr(
         "hermes_cli.codex_models._fetch_models_from_api",
-        lambda access_token: ["gpt-5.2-codex"],
+        lambda access_token: ["gpt-5.4"],
     )
 
     models = get_codex_model_ids(access_token="codex-access-token")
 
     assert models == [
-        "gpt-5.2-codex",
-        "gpt-5.4-mini",
         "gpt-5.4",
-        "gpt-5.3-codex",
+        "gpt-5.5",
+        "gpt-5.4-mini",
         "gpt-5.3-codex-spark",
     ]
 
@@ -362,7 +409,8 @@ class TestNormalizeModelForProvider:
         assert cli.model == "gpt-5.3-codex"
 
     def test_default_fallback_when_api_fails(self):
-        """No model configured falls back to gpt-5.3-codex when API unreachable."""
+        """No model configured falls back to gpt-5.5 (the supported ChatGPT-auth
+        default) when live discovery is unreachable — never a deprecated slug."""
         import cli as _cli_mod
         _clean_config = {
             "model": {
@@ -388,4 +436,4 @@ class TestNormalizeModelForProvider:
         ):
             changed = cli._normalize_model_for_provider("openai-codex")
         assert changed is True
-        assert cli.model == "gpt-5.3-codex"
+        assert cli.model == "gpt-5.5"

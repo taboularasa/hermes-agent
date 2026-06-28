@@ -71,6 +71,30 @@ _BACKLOG_CANDIDATE_KEYS = {
     "repo_backed_candidates",
     "safe_repo_backed_candidates",
 }
+_LINEAR_PLANNING_SURFACE_FIELD_ALIASES = {
+    "lane": ("lane", "work_lane", "workLane", "planning_lane", "planningLane"),
+    "verification": (
+        "verification",
+        "verification_expectation",
+        "verificationExpectation",
+        "verification_plan",
+        "verificationPlan",
+        "verification_targets",
+        "verificationTargets",
+    ),
+    "active_status_comment": (
+        "active_status_comment",
+        "activeStatusComment",
+        "latest_status_comment",
+        "latestStatusComment",
+        "status_comment",
+        "statusComment",
+        "status_comments",
+        "statusComments",
+        "comments",
+    ),
+}
+_LINEAR_PLANNING_SURFACE_SAMPLE_LIMIT = 5
 _SELECTED_WORK_KEYS = {
     "active_selected_work",
     "current_selected_work",
@@ -127,6 +151,9 @@ _JOURNAL_REPORTING_OUTCOME_FIELDS = (
     "outcomeNote",
 )
 _JOURNAL_REPORTING_OUTCOME_LIMIT = 4
+_JOURNAL_OPERATOR_SUPPORT_ID_LIMIT = 200
+_JOURNAL_OPERATOR_SUPPORT_EXAMPLE_LIMIT = 200
+_JOURNAL_BACKFILL_TARGET_LIMIT = 8
 _LEADING_INDICATOR_CHECK_IDS = (
     "reliability_gate",
     "anti_make_work_check",
@@ -198,11 +225,42 @@ _BACKLOG_CANDIDATE_REPO_KEYS = (
 _BACKLOG_CANDIDATE_STATUS_KEYS = (
     "status",
     "state",
+    "state_type",
+    "stateType",
     "resolution",
     "workflow_state",
     "workflowState",
+    "workflow_state_type",
+    "workflowStateType",
 )
 _BACKLOG_CANDIDATE_HUMAN_OWNER_LABELS = {"owner:human", "owner=human"}
+_BACKLOG_CANDIDATE_HERMES_DELEGATE_LABELS = {
+    "delegate:codex",
+    "delegate:hermes",
+    "delegate=codex",
+    "delegate=hermes",
+    "delegated:codex",
+    "delegated:hermes",
+}
+_BACKLOG_CANDIDATE_HERMES_DELEGATE_KEYS = (
+    "delegate",
+    "delegate_to",
+    "delegateTo",
+    "delegated_to",
+    "delegatedTo",
+    "delegation",
+    "delegation_owner",
+    "delegationOwner",
+)
+_BACKLOG_CANDIDATE_TERMINAL_STATES = {
+    "canceled",
+    "cancelled",
+    "closed",
+    "complete",
+    "completed",
+    "done",
+    "merged",
+}
 _BACKLOG_CANDIDATE_REPO_UNRESOLVED_LABELS = {
     "repo-unresolved",
     "repo unresolved",
@@ -257,6 +315,14 @@ _CLAIM_CONTAINER_KEYS = {
     "current_strategy",
     "lane_links",
     "self_improvement_focus",
+}
+_CODEX_ISSUE_ID_KEYS = {
+    "active_linear_issue_ids",
+    "external_key",
+    "issue_id",
+    "issue_identifier",
+    "linear_issue_id",
+    "linear_issues",
 }
 _OPERATOR_DECISION_SUPPORT_STRUCTURED_KEYS = {
     "blocker",
@@ -372,6 +438,53 @@ _CODEX_BACKFILL_EVIDENCE_FIELDS = (
     "changedFiles, tests, commitShas, pullRequests, or artifactPaths",
     "controlOwnershipPreserved, incidentRiskReduced, or systemCapabilityChanged when applicable",
 )
+_CODEX_RUN_ID_PATTERN = re.compile(r"\bcodex_[A-Za-z0-9]+\b")
+_LINEAR_ISSUE_ID_PATTERN = re.compile(r"\b[A-Z][A-Z0-9]+-\d+\b")
+_CODEX_SKIP_NOTE_ACTION_PATTERNS = (
+    ("skip", re.compile(r"\bskip(?:ped|ping)?\b", re.IGNORECASE)),
+    ("exempt", re.compile(r"\bexempt(?:ed|ion)?\b", re.IGNORECASE)),
+    ("remediation", re.compile(r"\bremediat(?:e|ed|ion)\b", re.IGNORECASE)),
+)
+_CODEX_NON_DURABLE_RATIONALE_PATTERNS = (
+    ("non_durable", re.compile(r"\bnon[- ]durable\b", re.IGNORECASE)),
+    ("not_durable", re.compile(r"\bnot\s+durable\b", re.IGNORECASE)),
+    (
+        "without_durable_proof",
+        re.compile(r"\bwithout\s+durable\s+(?:delivery\s+)?proof\b", re.IGNORECASE),
+    ),
+    (
+        "no_delivery_evidence",
+        re.compile(
+            r"\bno\s+[^.\n]{0,160}\b(?:commit|push|pr|pull request|publish|published|publication)\b"
+            r"[^.\n]{0,80}\bevidence\b",
+            re.IGNORECASE,
+        ),
+    ),
+    ("untracked", re.compile(r"\buntracked\b", re.IGNORECASE)),
+    (
+        "provenance_gate_failure",
+        re.compile(r"\bprovenance\s+gate\s+failure\b", re.IGNORECASE),
+    ),
+    (
+        "empty_final_message",
+        re.compile(r"\bfinal[_ ]message\b[^.\n]{0,140}\bempty\b", re.IGNORECASE),
+    ),
+    (
+        "lacks_delivery_details",
+        re.compile(
+            r"\black(?:s|ed|ing)?\s+(?:enough\s+)?(?:delivery\s+)?details\b",
+            re.IGNORECASE,
+        ),
+    ),
+)
+_CODEX_TEXT_DELIVERY_SIGNALS = {
+    "artifact",
+    "capability_change",
+    "changed_files",
+    "durable_asset_created",
+    "state_transition",
+    "verification",
+}
 _CODEX_SIDECAR_MAX_BYTES = 2_000_000
 _CODEX_SIDECAR_MESSAGE_FIELDS = (
     "final_message",
@@ -1550,6 +1663,8 @@ def _codex_record_is_completed(record: dict[str, Any]) -> bool:
 
 def _codex_record_is_active(record: dict[str, Any]) -> bool:
     status = _codex_record_status(record)
+    if status in _CODEX_FAILURE_STATUSES or status in _CODEX_SUCCESS_STATUSES:
+        return False
     if status in {"running", "queued", "in_progress", "active", "unknown"}:
         return True
     if record.get("active") is True:
@@ -1962,6 +2077,17 @@ def _benchmark_history_check_snapshot(check_id: str, check: dict[str, Any]) -> d
         "score": check.get("score"),
         "status": check.get("status"),
     }
+    if check_id == "operator_value_alignment":
+        metrics = check.get("metrics") or {}
+        snapshot["detail"] = check.get("detail")
+        snapshot["metrics"] = {
+            "missing_operator_decision_support_fields": metrics.get("missing_operator_decision_support_fields") or [],
+            "missing_operator_decision_support_examples": metrics.get("missing_operator_decision_support_examples") or [],
+            "operator_decision_support_fields": metrics.get("operator_decision_support_fields") or [],
+            "operator_decision_support_examples": metrics.get("operator_decision_support_examples") or [],
+        }
+        return snapshot
+
     if check_id != "leading_indicator_drift":
         return snapshot
 
@@ -2240,6 +2366,363 @@ def _make_work_remediation(
     return remediation
 
 
+def _matching_codex_skip_note_labels(
+    text: str,
+    patterns: Iterable[tuple[str, re.Pattern[str]]],
+) -> list[str]:
+    return sorted({label for label, pattern in patterns if pattern.search(text)})
+
+
+def _codex_non_durable_rationale_labels(text: str) -> list[str]:
+    return _matching_codex_skip_note_labels(text, _CODEX_NON_DURABLE_RATIONALE_PATTERNS)
+
+
+def _journal_focus_note_segments(title: str, outcome_note: str) -> list[str]:
+    outcome_segments = [
+        segment.strip()
+        for segment in re.split(r"(?<=[.!?])\s+", outcome_note)
+        if segment.strip()
+    ]
+    if outcome_segments:
+        return [
+            " ".join(part for part in (title, segment) if part).strip()
+            for segment in outcome_segments
+        ]
+    return [title] if title else []
+
+
+def _collect_journal_codex_skip_remediations(journal_payload: Any) -> dict[str, dict[str, Any]]:
+    remediations: dict[str, dict[str, Any]] = {}
+    for entry in _iter_records(journal_payload, "entries"):
+        focus_items = entry.get(_JOURNAL_REPORTING_FOCUS_FIELD)
+        if not isinstance(focus_items, list):
+            continue
+        entry_id = _journal_reporting_string(entry.get("id"))
+        occurred_at = _journal_reporting_entry_time_text(entry)
+        for focus_index, focus_item in enumerate(focus_items):
+            if not isinstance(focus_item, dict):
+                continue
+            title = _journal_reporting_string(focus_item.get("title"))
+            outcome_note = _journal_reporting_string(focus_item.get("outcomeNote"))
+            if not title and not outcome_note:
+                continue
+            for segment in _journal_focus_note_segments(title, outcome_note):
+                run_ids = sorted(set(_CODEX_RUN_ID_PATTERN.findall(segment)))
+                if not run_ids:
+                    continue
+                action_labels = _matching_codex_skip_note_labels(
+                    segment,
+                    _CODEX_SKIP_NOTE_ACTION_PATTERNS,
+                )
+                rationale_labels = _matching_codex_skip_note_labels(
+                    segment,
+                    _CODEX_NON_DURABLE_RATIONALE_PATTERNS,
+                )
+                if not action_labels or not rationale_labels:
+                    continue
+                evidence = {
+                    "entry_id": entry_id or None,
+                    "occurredAt": occurred_at or None,
+                    "focus_index": focus_index,
+                    "title": title,
+                    "outcomeNote": _compact_operator_evidence_value(
+                        outcome_note,
+                        limit=500,
+                    ),
+                    "matched_note": _compact_operator_evidence_value(segment, limit=500),
+                    "action_markers": action_labels,
+                    "rationale_markers": rationale_labels,
+                }
+                for run_id in run_ids:
+                    remediations.setdefault(run_id, {**evidence, "run_id": run_id})
+    return remediations
+
+
+def _collect_codex_run_ids_from_value(value: Any, key: str = "") -> set[str]:
+    normalized_key = _normalize_evidence_key(key)
+    if normalized_key in _TEXT_EVIDENCE_EXCLUDED_KEYS:
+        return set()
+    if isinstance(value, str):
+        return set(_CODEX_RUN_ID_PATTERN.findall(value))
+    if isinstance(value, dict):
+        run_ids: set[str] = set()
+        for child_key, child_value in value.items():
+            run_ids.update(_collect_codex_run_ids_from_value(child_value, str(child_key)))
+        return run_ids
+    if isinstance(value, list):
+        run_ids = set()
+        for child_value in value:
+            run_ids.update(_collect_codex_run_ids_from_value(child_value, key))
+        return run_ids
+    return set()
+
+
+def _normalize_linear_issue_id(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if text.lower().startswith("linear:"):
+        text = text.split(":", 1)[1].strip()
+    match = _LINEAR_ISSUE_ID_PATTERN.search(text.upper())
+    return match.group(0) if match else None
+
+
+def _collect_linear_issue_ids_from_issue_fields(value: Any, key: str = "") -> set[str]:
+    normalized_key = _normalize_evidence_key(key)
+    if normalized_key in _TEXT_EVIDENCE_EXCLUDED_KEYS:
+        return set()
+    if isinstance(value, str):
+        if not key or normalized_key in _CODEX_ISSUE_ID_KEYS:
+            return {
+                match.group(0)
+                for match in _LINEAR_ISSUE_ID_PATTERN.finditer(value.upper())
+            }
+        return set()
+    if isinstance(value, dict):
+        issue_ids: set[str] = set()
+        for child_key, child_value in value.items():
+            issue_ids.update(
+                _collect_linear_issue_ids_from_issue_fields(child_value, str(child_key))
+            )
+        return issue_ids
+    if isinstance(value, list):
+        issue_ids = set()
+        for child_value in value:
+            issue_ids.update(_collect_linear_issue_ids_from_issue_fields(child_value, key))
+        return issue_ids
+    return set()
+
+
+def _codex_run_id(record: dict[str, Any]) -> Optional[str]:
+    for key in ("run_id", "id"):
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _build_codex_issue_run_id_index(codex_payload: Any) -> dict[str, set[str]]:
+    issue_run_ids: dict[str, set[str]] = {}
+    for record in _iter_codex_records(codex_payload):
+        if _codex_record_status(record) in _CODEX_FAILURE_STATUSES:
+            continue
+        run_id = _codex_run_id(record)
+        if not run_id:
+            continue
+        for issue_id in sorted(_collect_linear_issue_ids_from_issue_fields(record)):
+            issue_run_ids.setdefault(issue_id, set()).add(run_id)
+    return issue_run_ids
+
+
+_OPERATOR_DECISION_SUPPORT_REFERENCE_FIELD_PATH = (
+    "operatorDecisionSupport|nextDecision|decision|selectedWork|blocker|tradeoff"
+)
+
+
+def _journal_reference_path(entry_id: str, focus_index: int) -> str:
+    return (
+        f"entries[{entry_id or 'unknown'}]."
+        f"{_JOURNAL_REPORTING_FOCUS_FIELD}[{focus_index}]"
+    )
+
+
+def _collect_journal_codex_operator_support(
+    journal_payload: Any,
+    codex_payload: Any = None,
+) -> dict[str, list[dict[str, str]]]:
+    support_by_run_id: dict[str, list[dict[str, str]]] = {}
+    codex_issue_run_ids = _build_codex_issue_run_id_index(codex_payload)
+    for entry in _iter_records(journal_payload, "entries"):
+        focus_items = entry.get(_JOURNAL_REPORTING_FOCUS_FIELD)
+        if not isinstance(focus_items, list):
+            continue
+
+        entry_evidence = _collect_operator_decision_support_evidence(entry)
+        entry_text = " ".join(
+            value
+            for key, value in (
+                ("summary", entry.get("summary")),
+                ("notes", entry.get("notes")),
+                ("result", entry.get("result")),
+                ("details", entry.get("details")),
+                ("outcome", entry.get("outcome")),
+            )
+            if isinstance(value, str) and value.strip()
+        )
+        entry_text_evidence = (
+            _operator_decision_support_text_evidence(entry_text) if entry_text else []
+        )
+        entry_context = {
+            key: value
+            for key, value in entry.items()
+            if key != _JOURNAL_REPORTING_FOCUS_FIELD
+        }
+        entry_context_run_ids = _collect_codex_run_ids_from_value(entry_context)
+        direct_focus_evidence_by_index: dict[int, list[dict[str, str]]] = {}
+        for focus_index, focus_item in enumerate(focus_items):
+            if not isinstance(focus_item, dict):
+                continue
+            title = _journal_reporting_string(focus_item.get("title"))
+            outcome_note = _journal_reporting_string(focus_item.get("outcomeNote"))
+            focus_evidence = _collect_operator_decision_support_evidence(focus_item)
+            if not focus_evidence:
+                focus_evidence = _operator_decision_support_text_evidence(
+                    " ".join(part for part in (title, outcome_note) if part)
+                )
+            if focus_evidence:
+                direct_focus_evidence_by_index[focus_index] = focus_evidence
+        entry_context_support_focus_index = (
+            next(iter(direct_focus_evidence_by_index))
+            if len(direct_focus_evidence_by_index) == 1
+            else None
+        )
+
+        entry_id = _journal_reporting_string(entry.get("id"))
+        occurred_at = _journal_reporting_entry_time_text(entry)
+        for focus_index, focus_item in enumerate(focus_items):
+            if not isinstance(focus_item, dict):
+                continue
+
+            title = _journal_reporting_string(focus_item.get("title"))
+            outcome_note = _journal_reporting_string(focus_item.get("outcomeNote"))
+            if not title and not outcome_note:
+                continue
+
+            focus_evidence = list(direct_focus_evidence_by_index.get(focus_index) or [])
+            if not focus_evidence:
+                focus_evidence = entry_evidence
+            if not focus_evidence:
+                focus_evidence = entry_text_evidence
+            if not focus_evidence:
+                continue
+            focus_evidence = [
+                {
+                    **evidence,
+                    "journal_entry_id": entry_id or "unknown",
+                    "journal_occurred_at": occurred_at or "unknown",
+                    "journal_focus_path": _journal_reference_path(
+                        entry_id or "unknown",
+                        focus_index,
+                    ),
+                    "journal_focus_title": title or "unknown",
+                }
+                for evidence in focus_evidence
+            ]
+
+            focus_run_ids = _collect_codex_run_ids_from_value(focus_item)
+            active_issue_ids = _journal_reporting_issue_ids(
+                focus_item.get("activeLinearIssueIds")
+            )
+            for issue_id in active_issue_ids:
+                normalized_issue_id = _normalize_linear_issue_id(issue_id)
+                if normalized_issue_id:
+                    focus_run_ids.update(codex_issue_run_ids.get(normalized_issue_id, set()))
+            if (
+                len(focus_items) == 1
+                or focus_index == entry_context_support_focus_index
+            ):
+                focus_run_ids.update(entry_context_run_ids)
+            for segment in _journal_focus_note_segments(title, outcome_note):
+                segment_run_ids = set(_CODEX_RUN_ID_PATTERN.findall(segment))
+                if not segment_run_ids and focus_run_ids:
+                    segment_run_ids = set(focus_run_ids)
+                if not segment_run_ids:
+                    continue
+
+                action_labels = _matching_codex_skip_note_labels(
+                    segment,
+                    _CODEX_SKIP_NOTE_ACTION_PATTERNS,
+                )
+                rationale_labels = _matching_codex_skip_note_labels(
+                    segment,
+                    _CODEX_NON_DURABLE_RATIONALE_PATTERNS,
+                )
+                if action_labels and rationale_labels:
+                    continue
+
+                for run_id in sorted(segment_run_ids):
+                    support_by_run_id.setdefault(run_id, []).extend(focus_evidence)
+
+    return {
+        run_id: _dedupe_operator_evidence(evidence)
+        for run_id, evidence in support_by_run_id.items()
+    }
+
+
+def _codex_record_by_run_id(codex_payload: Any) -> dict[str, dict[str, Any]]:
+    records: dict[str, dict[str, Any]] = {}
+    for record in _iter_codex_records(codex_payload):
+        run_id = _codex_run_id(record)
+        if run_id:
+            records.setdefault(run_id, record)
+    return records
+
+
+def _operator_support_reference_diagnostics(
+    journal_payload: Any,
+    codex_payload: Any,
+    run_ids: Iterable[str],
+) -> list[dict[str, Any]]:
+    codex_records = _codex_record_by_run_id(codex_payload)
+    diagnostics: list[dict[str, Any]] = []
+    for run_id in sorted({str(value).strip() for value in run_ids if str(value).strip()}):
+        record = codex_records.get(run_id, {})
+        issue_ids = sorted(_collect_linear_issue_ids_from_issue_fields(record))
+        matched_paths: list[str] = []
+        for entry in _iter_records(journal_payload, "entries"):
+            entry_id = _journal_reporting_string(entry.get("id")) or "unknown"
+            focus_items = entry.get(_JOURNAL_REPORTING_FOCUS_FIELD) or []
+            entry_context = {
+                key: value
+                for key, value in entry.items()
+                if key != _JOURNAL_REPORTING_FOCUS_FIELD
+            }
+            entry_context_run_ids = _collect_codex_run_ids_from_value(entry_context)
+            for focus_index, focus_item in enumerate(focus_items):
+                if not isinstance(focus_item, dict):
+                    continue
+                focus_text = json.dumps(focus_item, sort_keys=True, ensure_ascii=False)
+                focus_issue_ids = {
+                    _normalize_linear_issue_id(issue_id)
+                    for issue_id in _journal_reporting_issue_ids(
+                        focus_item.get("activeLinearIssueIds")
+                    )
+                }
+                focus_issue_ids.discard(None)
+                focus_matches_entry_context = (
+                    run_id in entry_context_run_ids and len(focus_items) == 1
+                )
+                if (
+                    run_id in focus_text
+                    or set(issue_ids).intersection(focus_issue_ids)
+                    or focus_matches_entry_context
+                ):
+                    matched_paths.append(_journal_reference_path(entry_id, focus_index))
+        matched_paths = list(dict.fromkeys(matched_paths))
+        if matched_paths:
+            required_path = f"{matched_paths[0]}.{_OPERATOR_DECISION_SUPPORT_REFERENCE_FIELD_PATH}"
+            reason = "journal_focus_lacks_operator_decision_support_field"
+        else:
+            required_path = (
+                "entries[*]."
+                f"{_JOURNAL_REPORTING_FOCUS_FIELD}[*]."
+                f"{_OPERATOR_DECISION_SUPPORT_REFERENCE_FIELD_PATH}"
+            )
+            reason = "journal_focus_reference_not_found_for_codex_run"
+        diagnostics.append(
+            {
+                "run_id": run_id,
+                "codex_issue_id": issue_ids[0] if issue_ids else None,
+                "required_journal_reference_path": required_path,
+                "matched_journal_reference_paths": matched_paths,
+                "reason": reason,
+            }
+        )
+    return diagnostics
+
+
 def _record_claimed_timestamp(record: dict[str, Any]) -> Optional[datetime]:
     return _record_timestamp(
         record,
@@ -2275,6 +2758,14 @@ def _codex_record_claims_work(record: dict[str, Any], text: str) -> bool:
     if not claim_text.strip():
         return False
     return bool(_codex_completed_value_claim_markers(claim_text))
+
+
+def _codex_durable_signals(record: dict[str, Any], text: str) -> set[str]:
+    structured_signals = _structured_durable_signals(record)
+    text_signals = _text_durable_signals(text)
+    if _codex_non_durable_rationale_labels(text):
+        text_signals.difference_update(_CODEX_TEXT_DELIVERY_SIGNALS)
+    return structured_signals | text_signals
 
 
 def _iter_recent_claimed_work_items(
@@ -2493,7 +2984,14 @@ def _capacity_candidate_repo(record: dict[str, Any]) -> Optional[str]:
 def _capacity_candidate_status_text(record: dict[str, Any]) -> str:
     values: list[str] = []
     for key, value in _iter_normalized_key_values(record):
-        if key in {"review_state", "state", "status", "workflow_state"}:
+        if key in {
+            "review_state",
+            "state",
+            "state_type",
+            "status",
+            "workflow_state",
+            "workflow_state_type",
+        }:
             values.extend(_string_leaf_values(value))
     return " ".join(values)
 
@@ -2842,24 +3340,34 @@ def _build_execution_throughput_signal(
     now: datetime,
     freshness_hours: int,
 ) -> dict[str, Any]:
-    recent_codex_deliveries = [
-        {
-            "run_id": record.get("run_id") or record.get("id"),
-            "status": record.get("status"),
-            "timestamp": timestamp.isoformat(),
-        }
+    recent_codex_delivery_records = [
+        (record, timestamp)
         for record in _iter_codex_records(codex_payload)
         if _codex_record_is_completed_delivery(record)
         if (timestamp := _recent_record_timestamp(record, now, freshness_hours)) is not None
     ]
+    recent_codex_delivery_records.sort(key=lambda item: item[1], reverse=True)
+    recent_codex_deliveries = [
+        {
+            "run_id": _codex_run_id(record),
+            "status": record.get("status"),
+            "timestamp": timestamp.isoformat(),
+        }
+        for record, timestamp in recent_codex_delivery_records
+    ]
+    recent_journal_work_records = [
+        (record, timestamp)
+        for record in _iter_records(journal_payload, "entries")
+        if _journal_entry_claims_work(record)
+        if (timestamp := _recent_record_timestamp(record, now, freshness_hours)) is not None
+    ]
+    recent_journal_work_records.sort(key=lambda item: item[1], reverse=True)
     recent_journal_work = [
         {
             "id": record.get("id") or record.get("external_key"),
             "timestamp": timestamp.isoformat(),
         }
-        for record in _iter_records(journal_payload, "entries")
-        if _journal_entry_claims_work(record)
-        if (timestamp := _recent_record_timestamp(record, now, freshness_hours)) is not None
+        for record, timestamp in recent_journal_work_records
     ]
     capacity_saturation = _build_capacity_saturation_signal(
         journal_payload=journal_payload,
@@ -2867,6 +3375,26 @@ def _build_execution_throughput_signal(
         ctx_payload=ctx_payload,
         now=now,
         freshness_hours=freshness_hours,
+    )
+    journal_operator_support = _collect_journal_codex_operator_support(
+        journal_payload,
+        codex_payload,
+    )
+    pending_journal_follow_through_records = [
+        (record, timestamp)
+        for record, timestamp in recent_codex_delivery_records
+        if (run_id := _codex_run_id(record)) and run_id not in journal_operator_support
+    ]
+    pending_journal_follow_through = [
+        _codex_follow_through_gap_example(record, timestamp)
+        for record, timestamp in pending_journal_follow_through_records[
+            :_JOURNAL_BACKFILL_TARGET_LIMIT
+        ]
+    ]
+    journal_backfill_targets = _codex_journal_backfill_targets(
+        journal_payload=journal_payload,
+        codex_payload=codex_payload,
+        pending_records=pending_journal_follow_through_records,
     )
     ctx_summary = _summarize_ctx_bindings(ctx_payload, freshness_hours, now)
     codex_count = len(recent_codex_deliveries)
@@ -2912,6 +3440,9 @@ def _build_execution_throughput_signal(
         "codex_completion_threshold": _THROUGHPUT_CODEX_COMPLETION_MIN,
         "sample_codex_deliveries": recent_codex_deliveries[:5],
         "sample_journal_work_items": recent_journal_work[:5],
+        "pending_journal_follow_through_count": len(pending_journal_follow_through_records),
+        "pending_journal_follow_through_codex_runs": pending_journal_follow_through,
+        "journal_backfill_targets": journal_backfill_targets,
         "actions": actions,
         "ctx_status": ctx_status,
         "ctx_active_count": ctx_active_count,
@@ -2919,6 +3450,104 @@ def _build_execution_throughput_signal(
         "ctx_inactivity_blocking": False,
         "capacity_saturation": capacity_saturation,
     }
+
+
+def _codex_follow_through_gap_example(
+    record: dict[str, Any],
+    timestamp: datetime,
+) -> dict[str, Any]:
+    issue_ids = sorted(_collect_linear_issue_ids_from_issue_fields(record))
+    example = _recent_record_example(record, timestamp)
+    example.update(
+        {
+            "external_key": record.get("external_key"),
+            "linear_issue_ids": issue_ids,
+            "required_journal_fields": [
+                "selfImprovementFocus[].title",
+                "selfImprovementFocus[].activeLinearIssueIds",
+                "selfImprovementFocus[].outcomeNote",
+                "changedFiles or commitShas",
+                "tests or verification",
+                "operatorDecisionSupport or nextDecision",
+            ],
+            "operator_decision_support_path": (
+                "entries[*].selfImprovementFocus[*]."
+                f"{_OPERATOR_DECISION_SUPPORT_REFERENCE_FIELD_PATH}"
+            ),
+        }
+    )
+    return {key: value for key, value in example.items() if value not in (None, [], "")}
+
+
+def _codex_journal_backfill_targets(
+    *,
+    journal_payload: Any,
+    codex_payload: Any,
+    pending_records: Iterable[tuple[dict[str, Any], datetime]],
+    limit: int = _JOURNAL_BACKFILL_TARGET_LIMIT,
+) -> list[dict[str, Any]]:
+    target_records: list[tuple[str, dict[str, Any], datetime]] = []
+    seen_run_ids: set[str] = set()
+    max_targets = max(0, int(limit or 0))
+    for record, timestamp in pending_records:
+        if len(target_records) >= max_targets:
+            break
+        run_id = _codex_run_id(record)
+        if not run_id or run_id in seen_run_ids:
+            continue
+        seen_run_ids.add(run_id)
+        target_records.append((run_id, record, timestamp))
+
+    diagnostics_by_run_id = {
+        str(item.get("run_id")): item
+        for item in _operator_support_reference_diagnostics(
+            journal_payload,
+            codex_payload,
+            [run_id for run_id, _record, _timestamp in target_records],
+        )
+        if item.get("run_id")
+    }
+
+    targets: list[dict[str, Any]] = []
+    for run_id, record, timestamp in target_records:
+        issue_ids = sorted(_collect_linear_issue_ids_from_issue_fields(record))
+        external_key = record.get("external_key")
+        issue_label = ", ".join(issue_ids) or str(external_key or "unlinked issue")
+        diagnostic = diagnostics_by_run_id.get(run_id) or {}
+        required_path = diagnostic.get("required_journal_reference_path") or (
+            "entries[*]."
+            f"{_JOURNAL_REPORTING_FOCUS_FIELD}[*]."
+            f"{_OPERATOR_DECISION_SUPPORT_REFERENCE_FIELD_PATH}"
+        )
+        target = {
+            "run_id": run_id,
+            "completed_at": timestamp.isoformat(),
+            "status": record.get("status"),
+            "external_key": external_key,
+            "linear_issue_ids": issue_ids,
+            "title": _first_text_for_keys(record, {"issue_title", "summary", "title"}),
+            "reason": diagnostic.get("reason")
+            or "journal_focus_reference_not_found_for_codex_run",
+            "required_journal_reference_path": required_path,
+            "matched_journal_reference_paths": diagnostic.get(
+                "matched_journal_reference_paths"
+            )
+            or [],
+            "required_journal_fields": [
+                "selfImprovementFocus[].title",
+                "selfImprovementFocus[].activeLinearIssueIds",
+                "selfImprovementFocus[].outcomeNote",
+                *_CODEX_BACKFILL_EVIDENCE_FIELDS,
+            ],
+            "backfill_action": (
+                f"Backfill {issue_label} / {run_id}: add {required_path} plus "
+                "changed files, tests, PR or commit evidence."
+            ),
+        }
+        targets.append(
+            {key: value for key, value in target.items() if value not in (None, [], "")}
+        )
+    return targets
 
 
 def _timestamp_in_window(timestamp: Optional[datetime], now: datetime, window_hours: int) -> bool:
@@ -3011,6 +3640,23 @@ def _evaluate_execution_loop_check(
     recent_journal = list(_iter_recent_journal_records(journal_payload, now, window_hours))
     recent_completed_codex = list(
         _iter_recent_completed_codex_records(codex_payload, now, window_hours)
+    )
+    recent_journal.sort(key=lambda item: item[1], reverse=True)
+    recent_completed_codex.sort(key=lambda item: item[1], reverse=True)
+    journal_operator_support = _collect_journal_codex_operator_support(
+        journal_payload,
+        codex_payload,
+    )
+    pending_journal_follow_through = [
+        (record, timestamp)
+        for record, timestamp in recent_completed_codex
+        if (run_id := _codex_run_id(record))
+        and run_id not in journal_operator_support
+    ]
+    journal_backfill_targets = _codex_journal_backfill_targets(
+        journal_payload=journal_payload,
+        codex_payload=codex_payload,
+        pending_records=pending_journal_follow_through,
     )
     ctx_records = list(_iter_ctx_records(ctx_payload))
     active_ctx_records = [record for record in ctx_records if _ctx_record_is_active(record)]
@@ -3124,6 +3770,17 @@ def _evaluate_execution_loop_check(
             "sparse_journal_follow_through": sparse_journal_follow_through,
             "next_throughput_action": next_action,
             "capacity_saturation": capacity_saturation,
+            "pending_journal_follow_through_count": len(pending_journal_follow_through),
+            "pending_journal_follow_through_window_days": _EXECUTION_LOOP_WINDOW_DAYS,
+            "pending_journal_follow_through_sample_limit": _JOURNAL_BACKFILL_TARGET_LIMIT,
+            "pending_journal_follow_through_codex_runs": [
+                _codex_follow_through_gap_example(record, timestamp)
+                for record, timestamp in pending_journal_follow_through[
+                    :_JOURNAL_BACKFILL_TARGET_LIMIT
+                ]
+            ],
+            "journal_backfill_targets": journal_backfill_targets,
+            "journal_operator_support_codex_run_count": len(journal_operator_support),
             "completed_codex_examples": [
                 _recent_record_example(record, timestamp)
                 for record, timestamp in recent_completed_codex[:5]
@@ -3139,8 +3796,11 @@ def _evaluate_execution_loop_check(
 def _assess_make_work_item(item: dict[str, Any]) -> dict[str, Any]:
     record = item.get("record") or {}
     text = str(item.get("text") or "")
-    durable_signals = _structured_durable_signals(record)
-    durable_signals.update(_text_durable_signals(text))
+    if item.get("source") == "codex_runs":
+        durable_signals = _codex_durable_signals(record, text)
+    else:
+        durable_signals = _structured_durable_signals(record)
+        durable_signals.update(_text_durable_signals(text))
     status_markers = _status_only_markers(text)
     value_categories = _value_categories_from_signals(durable_signals)
     category_labels = _value_category_labels(value_categories)
@@ -3172,7 +3832,23 @@ def _assess_make_work_item(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _assess_operator_value_item(item: dict[str, Any]) -> dict[str, Any]:
+def _codex_journal_skip_applies_to_assessment(
+    record: dict[str, Any],
+    assessment: dict[str, Any],
+) -> bool:
+    if not assessment.get("durable"):
+        return True
+    if _structured_durable_signals(record):
+        return False
+    signals = set(assessment.get("signals") or [])
+    return bool(signals) and signals.issubset(_CODEX_TEXT_DELIVERY_SIGNALS)
+
+
+def _assess_operator_value_item(
+    item: dict[str, Any],
+    *,
+    journal_operator_evidence: Optional[list[dict[str, str]]] = None,
+) -> dict[str, Any]:
     make_work = _assess_make_work_item(item)
     record = item.get("record") or {}
     text = str(item.get("text") or "")
@@ -3180,6 +3856,21 @@ def _assess_operator_value_item(item: dict[str, Any]) -> dict[str, Any]:
     decision_support_signals = durable_signals.intersection(_OPERATOR_DECISION_SUPPORT_SIGNALS)
     verified_change_signals = durable_signals.intersection(_VERIFIED_SYSTEM_CHANGE_SIGNALS)
     operator_decision_support_evidence = _collect_operator_decision_support_evidence(record)
+
+    if journal_operator_evidence:
+        operator_decision_support_evidence = _dedupe_operator_evidence(
+            operator_decision_support_evidence + list(journal_operator_evidence)
+        )
+        decision_support_signals.update(
+            signal
+            for signal in (
+                str(evidence.get("field")).strip()
+                for evidence in journal_operator_evidence
+                if isinstance(evidence, dict)
+            )
+            if signal in _OPERATOR_DECISION_SUPPORT_SIGNALS
+        )
+
     if decision_support_signals and not operator_decision_support_evidence:
         operator_decision_support_evidence = _operator_decision_support_text_evidence(text)
     operator_decision_support_evidence = _dedupe_operator_evidence(
@@ -3201,6 +3892,23 @@ def _assess_operator_value_item(item: dict[str, Any]) -> dict[str, Any]:
             item_score = 0.25
             issue = "durable_evidence_without_operator_value_signal"
 
+    missing_operator_decision_support_fields: list[str] = []
+    operator_value_remediation = None
+    if verified_change_signals and not decision_support_signals:
+        missing_operator_decision_support_fields = sorted([
+            "operatorDecisionSupport",
+            "nextDecision",
+            "selectedWork",
+            "decision",
+            "blocker",
+            "tradeoff",
+        ])
+        operator_value_remediation = (
+            "Backfill operator decision-support evidence on the claimed work item: "
+            "operatorDecisionSupport or nextDecision, plus selectedWork, decision, "
+            "blocker, or tradeoff when applicable."
+        )
+
     return {
         "source": make_work.get("source"),
         "id": make_work.get("id"),
@@ -3211,6 +3919,8 @@ def _assess_operator_value_item(item: dict[str, Any]) -> dict[str, Any]:
         "operator_decision_support": bool(decision_support_signals),
         "operator_decision_support_signals": sorted(decision_support_signals),
         "operator_decision_support_evidence": operator_decision_support_evidence,
+        "missing_operator_decision_support_fields": missing_operator_decision_support_fields,
+        "operator_value_remediation": operator_value_remediation,
         "verified_system_change": bool(verified_change_signals),
         "verified_system_change_signals": sorted(verified_change_signals),
         "aligned": bool(decision_support_signals and verified_change_signals),
@@ -3229,16 +3939,39 @@ def _evaluate_anti_make_work_check(
     journal_payload = _load_json(journal_path)
     codex_payload = _load_json(codex_runs_path)
     ctx_payload = _load_json(ctx_bindings_path)
-    assessments = [
-        _assess_make_work_item(item)
-        for item in _iter_recent_claimed_work_items(
-            journal_payload=journal_payload,
-            codex_payload=codex_payload,
-            ctx_payload=ctx_payload,
-            now=now,
-            freshness_hours=freshness_hours,
-        )
-    ]
+    journal_skip_remediations = _collect_journal_codex_skip_remediations(journal_payload)
+    assessments: list[dict[str, Any]] = []
+    journal_remediated_codex_items: list[dict[str, Any]] = []
+    ignored_journal_remediations: list[dict[str, Any]] = []
+    for item in _iter_recent_claimed_work_items(
+        journal_payload=journal_payload,
+        codex_payload=codex_payload,
+        ctx_payload=ctx_payload,
+        now=now,
+        freshness_hours=freshness_hours,
+    ):
+        assessment = _assess_make_work_item(item)
+        run_id = str(assessment.get("id") or "").strip()
+        journal_remediation = journal_skip_remediations.get(run_id)
+        if (
+            assessment.get("source") == "codex_runs"
+            and journal_remediation
+            and _codex_journal_skip_applies_to_assessment(
+                item.get("record") or {},
+                assessment,
+            )
+        ):
+            if _codex_record_is_active(item.get("record") or {}):
+                assessment["journal_remediation_ignored"] = journal_remediation
+                assessment["journal_remediation_ignored_reason"] = "codex_run_active"
+                ignored_journal_remediations.append(assessment)
+            else:
+                journal_remediated_codex_items.append(
+                    {**assessment, "journal_remediation": journal_remediation}
+                )
+                continue
+        assessments.append(assessment)
+    raw_claimed_count = len(assessments) + len(journal_remediated_codex_items)
     assessed_count = len(assessments)
     durable_count = sum(1 for item in assessments if item["durable"])
     shallow_items = [item for item in assessments if not item["durable"]]
@@ -3255,7 +3988,10 @@ def _evaluate_anti_make_work_check(
 
     if assessed_count == 0:
         score = 1.0
-        detail = "No claimed work items required anti-make-work evidence."
+        if journal_remediated_codex_items:
+            detail = "No unremediated claimed work items required anti-make-work evidence."
+        else:
+            detail = "No claimed work items required anti-make-work evidence."
     elif not shallow_items:
         score = 1.0
         passing_labels = [
@@ -3287,6 +4023,11 @@ def _evaluate_anti_make_work_check(
                 + "; ".join(_CODEX_BACKFILL_EVIDENCE_FIELDS)
                 + "."
             )
+    if journal_remediated_codex_items:
+        detail += (
+            f" Explicit journal skip/remediation notes exempted "
+            f"{len(journal_remediated_codex_items)} inactive shallow Codex run(s)."
+        )
 
     return _build_benchmark_item(
         "anti_make_work_check",
@@ -3296,11 +4037,16 @@ def _evaluate_anti_make_work_check(
         detail=detail,
         critical=True,
         metrics={
+            "raw_claimed_work_item_count": raw_claimed_count,
             "assessed_work_item_count": assessed_count,
             "durable_evidence_count": durable_count,
             "shallow_work_item_count": len(shallow_items),
             "shallow_codex_work_item_count": shallow_codex_count,
             "status_language_only_count": status_only_count,
+            "journal_remediated_codex_work_item_count": len(journal_remediated_codex_items),
+            "journal_remediated_codex_examples": journal_remediated_codex_items[:5],
+            "journal_remediation_ignored_codex_count": len(ignored_journal_remediations),
+            "journal_remediation_ignored_codex_examples": ignored_journal_remediations[:5],
             "allowed_value_categories": _allowed_value_category_guidance(),
             "value_category_counts": value_category_counts,
             "durable_examples": [item for item in assessments if item["durable"]][:5],
@@ -3320,6 +4066,8 @@ def _operator_value_example(item: dict[str, Any]) -> dict[str, Any]:
         "verified_system_change": item.get("verified_system_change"),
         "verified_system_change_signals": item.get("verified_system_change_signals") or [],
         "operator_decision_support_signals": item.get("operator_decision_support_signals") or [],
+        "missing_operator_decision_support_fields": item.get("missing_operator_decision_support_fields") or [],
+        "remediation": item.get("operator_value_remediation"),
         "evidence": item.get("operator_decision_support_evidence") or [],
     }
 
@@ -3335,6 +4083,19 @@ def _evaluate_operator_value_alignment_check(
     journal_payload = _load_json(journal_path)
     codex_payload = _load_json(codex_runs_path)
     ctx_payload = _load_json(ctx_bindings_path)
+    journal_operator_support = _collect_journal_codex_operator_support(
+        journal_payload,
+        codex_payload,
+    )
+    journal_operator_support_examples = [
+        {
+            "run_id": run_id,
+            "evidence": evidence[:3],
+        }
+        for run_id, evidence in sorted(journal_operator_support.items())[
+            :_JOURNAL_OPERATOR_SUPPORT_EXAMPLE_LIMIT
+        ]
+    ]
     execution_throughput = _build_execution_throughput_signal(
         journal_payload=journal_payload,
         codex_payload=codex_payload,
@@ -3342,16 +4103,24 @@ def _evaluate_operator_value_alignment_check(
         now=now,
         freshness_hours=freshness_hours,
     )
-    assessments = [
-        _assess_operator_value_item(item)
-        for item in _iter_recent_claimed_work_items(
-            journal_payload=journal_payload,
-            codex_payload=codex_payload,
-            ctx_payload=ctx_payload,
-            now=now,
-            freshness_hours=freshness_hours,
+    assessments = []
+    for item in _iter_recent_claimed_work_items(
+        journal_payload=journal_payload,
+        codex_payload=codex_payload,
+        ctx_payload=ctx_payload,
+        now=now,
+        freshness_hours=freshness_hours,
+    ):
+        journal_support = None
+        if item.get("source") == "codex_runs":
+            run_id = str(item.get("id") or "").strip()
+            journal_support = journal_operator_support.get(run_id)
+        assessments.append(
+            _assess_operator_value_item(
+                item,
+                journal_operator_evidence=journal_support,
+            )
         )
-    ]
 
     assessed_count = len(assessments)
     durable_count = sum(1 for item in assessments if item["durable"])
@@ -3369,6 +4138,36 @@ def _evaluate_operator_value_alignment_check(
         for item in assessments
         if item["verified_system_change"] and not item["operator_decision_support"]
     ][:5]
+    missing_decision_support_diagnostics = {
+        item["run_id"]: item
+        for item in _operator_support_reference_diagnostics(
+            journal_payload,
+            codex_payload,
+            [
+                str(item.get("id") or "").strip()
+                for item in missing_decision_support_examples
+                if item.get("source") == "codex_runs"
+                if str(item.get("id") or "").strip()
+            ],
+        )
+    }
+    for item in missing_decision_support_examples:
+        run_id = str(item.get("id") or "").strip()
+        diagnostic = missing_decision_support_diagnostics.get(run_id)
+        if diagnostic:
+            item["journal_reference_diagnostic"] = diagnostic
+    missing_decision_support_journal_diagnostics = [
+        missing_decision_support_diagnostics[run_id]
+        for run_id in sorted(missing_decision_support_diagnostics)
+    ]
+    missing_decision_support_fields = sorted(
+        {
+            field
+            for item in missing_decision_support_examples
+            for field in item.get("missing_operator_decision_support_fields", [])
+            if str(field).strip()
+        }
+    )
     decision_support_fields = sorted(
         {
             evidence.get("field")
@@ -3411,6 +4210,12 @@ def _evaluate_operator_value_alignment_check(
                 + ", ".join(decision_support_fields)
                 + "."
             )
+        if missing_decision_support_fields:
+            detail += (
+                " Missing operator decision-support fields for verified changes: "
+                + ", ".join(missing_decision_support_fields)
+                + "."
+            )
 
     return _build_benchmark_item(
         "operator_value_alignment",
@@ -3425,6 +4230,7 @@ def _evaluate_operator_value_alignment_check(
             "operator_decision_support_count": decision_support_count,
             "operator_decision_support_evidence_count": decision_support_evidence_count,
             "operator_decision_support_fields": decision_support_fields,
+            "missing_operator_decision_support_fields": missing_decision_support_fields,
             "verified_system_change_count": verified_change_count,
             "aligned_work_item_count": aligned_count,
             "operator_decision_support_rate": (
@@ -3443,11 +4249,19 @@ def _evaluate_operator_value_alignment_check(
                 else 1.0
             ),
             "quantity_guardrail_basis": "average_evidence_quality_not_item_count",
+            "journal_operator_support_codex_run_count": len(journal_operator_support),
+            "journal_operator_support_codex_run_ids": sorted(journal_operator_support)[
+                :_JOURNAL_OPERATOR_SUPPORT_ID_LIMIT
+            ],
+            "journal_operator_support_examples": journal_operator_support_examples,
             "execution_throughput": execution_throughput,
             "issue_examples": issue_items[:5],
             "aligned_examples": [item for item in assessments if item["aligned"]][:5],
             "operator_decision_support_examples": decision_support_examples,
             "missing_operator_decision_support_examples": missing_decision_support_examples,
+            "missing_operator_decision_support_journal_diagnostics": (
+                missing_decision_support_journal_diagnostics
+            ),
         },
     )
 
@@ -4062,6 +4876,14 @@ def _execution_throughput_remediation_payload(signal: dict[str, Any]) -> dict[st
         "recent_completed_codex_count": signal.get("recent_completed_codex_count"),
         "recent_journal_work_item_count": signal.get("recent_journal_work_item_count"),
         "journal_to_codex_ratio": signal.get("journal_to_codex_ratio"),
+        "pending_journal_follow_through_count": signal.get(
+            "pending_journal_follow_through_count"
+        ),
+        "pending_journal_follow_through_codex_runs": signal.get(
+            "pending_journal_follow_through_codex_runs"
+        )
+        or [],
+        "journal_backfill_targets": signal.get("journal_backfill_targets") or [],
         "actions": signal.get("actions") or [],
         "capacity_saturation": signal.get("capacity_saturation") or {},
         "ctx_status": signal.get("ctx_status"),
@@ -4462,6 +5284,9 @@ def evaluate_self_improvement_benchmark(
         "operator_decision_support_evidence": (
             operator_value_metrics.get("operator_decision_support_examples") or []
         ),
+        "missing_operator_decision_support_fields": (
+            operator_value_metrics.get("missing_operator_decision_support_fields") or []
+        ),
         "missing_operator_decision_support": (
             operator_value_metrics.get("missing_operator_decision_support_examples") or []
         ),
@@ -4533,6 +5358,13 @@ def _coerce_path(value: Optional[Path | str], default: Path) -> Path:
     return Path(value).expanduser() if value else default
 
 
+def _self_improvement_runtime_metadata() -> dict[str, str]:
+    return {
+        "module": __name__,
+        "file": str(Path(__file__).resolve()),
+    }
+
+
 def _pipeline_benchmark_summary(benchmark: dict[str, Any]) -> dict[str, Any]:
     summary = {
         "score": benchmark.get("score"),
@@ -4552,6 +5384,29 @@ def _pipeline_benchmark_summary(benchmark: dict[str, Any]) -> dict[str, Any]:
             "harbinger_report": drift.get("report") or _build_leading_indicator_report(drift),
             "recommended_mitigations": drift_metrics.get("recommended_mitigations") or [],
             "execution_throughput_remediation": execution_remediation,
+        }
+    execution_metrics = ((benchmark.get("checks") or {}).get("execution_loop") or {}).get("metrics") or {}
+    if execution_metrics:
+        summary["execution_loop_follow_through"] = {
+            "pending_journal_follow_through_count": execution_metrics.get(
+                "pending_journal_follow_through_count"
+            ),
+            "pending_journal_follow_through_window_days": execution_metrics.get(
+                "pending_journal_follow_through_window_days"
+            ),
+            "pending_journal_follow_through_sample_limit": execution_metrics.get(
+                "pending_journal_follow_through_sample_limit"
+            ),
+            "pending_journal_follow_through_codex_runs": execution_metrics.get(
+                "pending_journal_follow_through_codex_runs"
+            ) or [],
+            "journal_backfill_targets": execution_metrics.get(
+                "journal_backfill_targets"
+            )
+            or [],
+            "journal_operator_support_codex_run_count": execution_metrics.get(
+                "journal_operator_support_codex_run_count"
+            ),
         }
     reporting_contract = benchmark.get("journal_reporting_contract") or {}
     if reporting_contract:
@@ -4639,14 +5494,134 @@ def _candidate_title(candidate: dict[str, Any]) -> str:
     return _candidate_identifier(candidate) or "Untitled backlog candidate"
 
 
+def _candidate_planning_field_present(candidate: dict[str, Any], aliases: Iterable[str]) -> bool:
+    for alias in aliases:
+        value = candidate.get(alias)
+        if isinstance(value, str) and value.strip():
+            return True
+        if isinstance(value, list) and any(
+            _candidate_planning_field_present({"value": item}, ("value",))
+            for item in value
+        ):
+            return True
+        if isinstance(value, dict) and any(
+            _candidate_string(value.get(key))
+            for key in ("body", "comment", "content", "description", "text", "title", "value")
+        ):
+            return True
+    return False
+
+
+def _linear_planning_missing_field_detail(
+    field: str,
+    missing_candidates: list[dict[str, Any]],
+    missing_count: int,
+) -> dict[str, Any]:
+    return {
+        "field": field,
+        "expected_aliases": list(_LINEAR_PLANNING_SURFACE_FIELD_ALIASES[field]),
+        "missing_count": missing_count,
+        "sample_candidates": [
+            {
+                "candidate_id": _candidate_identifier(candidate),
+                "title": _candidate_title(candidate),
+            }
+            for candidate in missing_candidates[:_LINEAR_PLANNING_SURFACE_SAMPLE_LIMIT]
+        ],
+    }
+
+
+def _build_linear_planning_surface(backlog_candidates: Any) -> dict[str, Any]:
+    candidates = _coerce_candidate_records(backlog_candidates)
+    required_fields = sorted(_LINEAR_PLANNING_SURFACE_FIELD_ALIASES)
+    missing_field_counts = {field: 0 for field in required_fields}
+    missing_candidates_by_field: dict[str, list[dict[str, Any]]] = {
+        field: [] for field in required_fields
+    }
+    issue_samples: list[dict[str, Any]] = []
+
+    for candidate in candidates:
+        missing_fields = [
+            field
+            for field in required_fields
+            if not _candidate_planning_field_present(
+                candidate,
+                _LINEAR_PLANNING_SURFACE_FIELD_ALIASES[field],
+            )
+        ]
+        for field in missing_fields:
+            missing_field_counts[field] += 1
+            missing_candidates_by_field[field].append(candidate)
+        if missing_fields and len(issue_samples) < _LINEAR_PLANNING_SURFACE_SAMPLE_LIMIT:
+            issue_samples.append(
+                {
+                    "candidate_id": _candidate_identifier(candidate),
+                    "title": _candidate_title(candidate),
+                    "missing_fields": missing_fields,
+                    "expected_aliases": {
+                        field: list(_LINEAR_PLANNING_SURFACE_FIELD_ALIASES[field])
+                        for field in missing_fields
+                    },
+                }
+            )
+
+    expected_field_count = len(candidates) * len(required_fields)
+    missing_field_count = sum(missing_field_counts.values())
+    score = 1.0 if expected_field_count == 0 else round(
+        (expected_field_count - missing_field_count) / expected_field_count,
+        4,
+    )
+    return {
+        "surface": "linear_planning_surface",
+        "status": "pass" if missing_field_count == 0 else "partial",
+        "score": score,
+        "candidate_count": len(candidates),
+        "required_fields": required_fields,
+        "missing_field_counts": {
+            field: count for field, count in missing_field_counts.items() if count
+        },
+        "missing_field_details": [
+            _linear_planning_missing_field_detail(
+                field,
+                missing_candidates_by_field[field],
+                missing_field_counts[field],
+            )
+            for field in required_fields
+            if missing_field_counts[field]
+        ],
+        "issue_samples": issue_samples,
+        "issue_sample_limit": _LINEAR_PLANNING_SURFACE_SAMPLE_LIMIT,
+        "detail": (
+            "No Linear backlog candidates were provided."
+            if not candidates
+            else (
+                "Linear backlog candidates expose lane, verification, and active "
+                "status-comment planning fields."
+            )
+            if missing_field_count == 0
+            else (
+                "Linear backlog candidates are missing planning fields; inspect "
+                "missing_field_details and issue_samples for exact candidates, fields, "
+                "and accepted aliases."
+            )
+        ),
+    }
+
+
 def _iter_candidate_strings(value: Any) -> Iterable[str]:
     if value is None:
         return
     if isinstance(value, dict):
-        for key in ("name", "title", "value", "label", "id", "state", "status"):
-            text = _candidate_string(value.get(key))
+        for key in ("name", "title", "value", "label", "id", "state", "status", "type"):
+            child = value.get(key)
+            if isinstance(child, (dict, list)):
+                yield from _iter_candidate_strings(child)
+                continue
+            text = _candidate_string(child)
             if text:
                 yield text
+        for key in ("node", "nodes", "edge", "edges"):
+            yield from _iter_candidate_strings(value.get(key))
         return
     if isinstance(value, list):
         for item in value:
@@ -4669,6 +5644,11 @@ def _candidate_status_values(candidate: dict[str, Any]) -> set[str]:
     for key in _BACKLOG_CANDIDATE_STATUS_KEYS:
         values.update(text.lower() for text in _iter_candidate_strings(candidate.get(key)))
     return values
+
+
+def _candidate_has_terminal_state(statuses: set[str]) -> bool:
+    normalized = {_normalize_evidence_key(status) for status in statuses}
+    return bool(normalized & _BACKLOG_CANDIDATE_TERMINAL_STATES)
 
 
 def _candidate_repo_values(candidate: dict[str, Any]) -> list[str]:
@@ -4700,6 +5680,9 @@ def _candidate_bool(candidate: dict[str, Any], *keys: str) -> bool:
 def _candidate_has_human_owner(candidate: dict[str, Any], labels: set[str]) -> bool:
     if labels & _BACKLOG_CANDIDATE_HUMAN_OWNER_LABELS:
         return True
+    normalized_labels = {_normalize_evidence_key(label) for label in labels}
+    if "owner_human" in normalized_labels:
+        return True
     owner_type = _candidate_string(
         candidate.get("owner_type") or candidate.get("ownerType") or candidate.get("ownership")
     ).lower()
@@ -4713,6 +5696,49 @@ def _candidate_has_human_owner(candidate: dict[str, Any], labels: set[str]) -> b
             if _candidate_string(owner.get(key)).lower() == "human":
                 return True
     return False
+
+
+def _candidate_has_hermes_delegate_residue(
+    candidate: dict[str, Any],
+    labels: set[str],
+) -> bool:
+    normalized_labels = {_normalize_evidence_key(label) for label in labels}
+    if labels & _BACKLOG_CANDIDATE_HERMES_DELEGATE_LABELS:
+        return True
+    if normalized_labels & {
+        "delegate_codex",
+        "delegate_hermes",
+        "delegated_codex",
+        "delegated_hermes",
+        "hermes_delegate",
+    }:
+        return True
+
+    for key in _BACKLOG_CANDIDATE_HERMES_DELEGATE_KEYS:
+        for text in _iter_candidate_strings(candidate.get(key)):
+            normalized = _normalize_evidence_key(text)
+            if normalized in {"codex", "delegate_codex", "hermes", "hermes_delegate"}:
+                return True
+    return False
+
+
+def _candidate_cleanup_reason(
+    candidate: dict[str, Any],
+    reasons: Iterable[str],
+) -> Optional[str]:
+    reason_set = set(reasons)
+    labels = _candidate_labels(candidate)
+    if not reason_set or not _candidate_has_hermes_delegate_residue(candidate, labels):
+        return None
+    if reason_set & {
+        "duplicate",
+        "ignored_project",
+        "not_actionable_state",
+        "owner_human",
+        "selected_or_active",
+    }:
+        return "stale_hermes_ownership_residue"
+    return None
 
 
 def _candidate_filter_reasons(
@@ -4748,6 +5774,9 @@ def _candidate_filter_reasons(
         or "duplicate" in statuses
     ):
         reasons.append("duplicate")
+
+    if _candidate_has_terminal_state(statuses):
+        reasons.append("not_actionable_state")
 
     if (
         _candidate_bool(candidate, "repo_unresolved", "repoUnresolved", "repository_unresolved")
@@ -4786,6 +5815,7 @@ def _parallel_candidate_payload(candidate: dict[str, Any]) -> dict[str, Any]:
         "target_surface": "repo-backed self-improvement backlog",
         "safety": {
             "ignored_project": False,
+            "not_actionable_state": False,
             "owner_human": False,
             "duplicate": False,
             "repo_unresolved": False,
@@ -4848,6 +5878,7 @@ def _build_parallel_backlog_selection(
             "filtered_reasons": {},
             "candidates": [],
             "saturation_state": "blocked_by_reliability_gate",
+            "linear_planning_surface": _build_linear_planning_surface(requested_candidates),
             "guardrail_scope": (
                 "Reliability repair blocks new repo-backed work; non-reliability "
                 "review guardrails remain separate from parallel lane selection."
@@ -4862,13 +5893,16 @@ def _build_parallel_backlog_selection(
             selected_candidate_ids=selected_ids,
         )
         if reasons:
-            filtered.append(
-                {
-                    "candidate_id": _candidate_identifier(candidate),
-                    "title": _candidate_title(candidate),
-                    "reasons": sorted(set(reasons)),
-                }
-            )
+            reason_list = sorted(set(reasons))
+            filtered_candidate = {
+                "candidate_id": _candidate_identifier(candidate),
+                "title": _candidate_title(candidate),
+                "reasons": reason_list,
+            }
+            cleanup_reason = _candidate_cleanup_reason(candidate, reason_list)
+            if cleanup_reason:
+                filtered_candidate["cleanup_reason"] = cleanup_reason
+            filtered.append(filtered_candidate)
             continue
         eligible.append(candidate)
 
@@ -4895,6 +5929,7 @@ def _build_parallel_backlog_selection(
         "filtered_candidates": filtered[:10],
         "candidates": selected,
         "saturation_state": saturation_state,
+        "linear_planning_surface": _build_linear_planning_surface(requested_candidates),
         "guardrail_scope": (
             "Quality guardrails suppress raw task-count selection but do not "
             "serialize independent repo-backed candidates that pass safety filters."
@@ -4967,6 +6002,31 @@ def _format_pipeline_summary(
             f"{execution_remediation.get('recent_journal_work_item_count')} journal work item(s), "
             f"blocker={execution_remediation.get('blocking_surface')}"
         )
+        execution_metrics = (execution.get("metrics") or {}) if execution else {}
+        pending_count = execution_metrics.get("pending_journal_follow_through_count")
+        if pending_count is not None:
+            lines.append(f"- pending_journal_follow_through_count={pending_count}")
+        pending_runs = execution_metrics.get("pending_journal_follow_through_codex_runs") or []
+        if pending_runs:
+            run_ids = [str(item.get("id") or item.get("run_id")) for item in pending_runs[:5]]
+            lines.append("- pending_journal_follow_through_codex_runs=" + ", ".join(run_ids))
+        backfill_targets = (
+            execution_metrics.get("journal_backfill_targets")
+            or execution_remediation.get("journal_backfill_targets")
+            or []
+        )
+        if backfill_targets:
+            target_labels = []
+            for item in backfill_targets[:5]:
+                issue_label = ",".join(
+                    str(issue) for issue in item.get("linear_issue_ids") or []
+                )
+                if not issue_label:
+                    issue_label = str(item.get("external_key") or "unlinked")
+                run_id = str(item.get("run_id") or item.get("id") or "unknown")
+                reason = str(item.get("reason") or "journal_backfill_required")
+                target_labels.append(f"{issue_label}/{run_id}:{reason}")
+            lines.append("- journal_backfill_targets=" + ", ".join(target_labels))
         for action in execution_remediation.get("actions") or []:
             lines.append(f"- execution_throughput_action={action}")
     critical = benchmark.get("critical_failures") or []
@@ -4990,6 +6050,15 @@ def _format_pipeline_summary(
                 + ", ".join(
                     f"{reason}={filter_counts[reason]}"
                     for reason in sorted(filter_counts)
+                )
+            )
+        linear_surface = parallel_selection.get("linear_planning_surface") or {}
+        missing_fields = linear_surface.get("missing_field_counts") or {}
+        if missing_fields:
+            lines.append(
+                "- linear_planning_surface_missing="
+                + ", ".join(
+                    f"{field}={missing_fields[field]}" for field in sorted(missing_fields)
                 )
             )
     return "\n".join(lines)
@@ -5039,6 +6108,7 @@ def evaluate_self_improvement_pipeline(
         "contract_version": BENCHMARK_CONTRACT_VERSION,
         "evaluated_at": current.isoformat(),
         "runtime_surface": "hermes-agent-core",
+        "runtime": _self_improvement_runtime_metadata(),
         "benchmark_before": _pipeline_benchmark_summary(benchmark),
         "benchmark": benchmark,
         "reporting_contract": benchmark.get("journal_reporting_contract"),

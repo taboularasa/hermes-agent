@@ -54,6 +54,11 @@ class TestGuidanceConstants:
         assert "ontology_context" in OPERATOR_RULES_GUIDANCE
         assert "web_search_matrix" in OPERATOR_RULES_GUIDANCE
         assert "NEVER substitute `web_search`" in OPERATOR_RULES_GUIDANCE
+        assert "reading coverage alone is not completion" in OPERATOR_RULES_GUIDANCE
+        assert "concrete blog candidates" in OPERATOR_RULES_GUIDANCE
+        assert "ORSD/governance updates or a no-action rationale" in OPERATOR_RULES_GUIDANCE
+        assert "Hermes self-improvement actions or a no-action rationale" in OPERATOR_RULES_GUIDANCE
+        assert "evidence and verification status" in OPERATOR_RULES_GUIDANCE
         assert "workspace_backlog_orchestrator" in OPERATOR_RULES_GUIDANCE
         assert "selected_work" in OPERATOR_RULES_GUIDANCE
         assert "Session-local todo is scratchpad only" in OPERATOR_RULES_GUIDANCE

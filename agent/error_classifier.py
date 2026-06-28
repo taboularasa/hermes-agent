@@ -211,6 +211,12 @@ _MODEL_NOT_FOUND_PATTERNS = [
     "no such model",
     "unknown model",
     "unsupported model",
+    # ChatGPT-account Codex returns 400 with bodies like
+    # "The 'gpt-5.3-codex' model is not supported when using Codex with a
+    # ChatGPT account." for models deprecated on the ChatGPT-auth path.
+    "not supported when using",
+    "is not supported",
+    "model is not supported",
 ]
 
 # OpenRouter aggregator policy-block patterns.
@@ -396,6 +402,7 @@ def classify_api_error(
     _raw_msg = str(error).lower()
     _body_msg = ""
     _metadata_msg = ""
+    _detail_msg = ""
     if isinstance(body, dict):
         _err_obj = body.get("error", {})
         if isinstance(_err_obj, dict):
@@ -414,14 +421,23 @@ def classify_api_error(
                                 _metadata_msg = str(_inner_err.get("message") or "").lower()
                     except (json.JSONDecodeError, TypeError):
                         pass
+            # ChatGPT-account Codex (FastAPI-style) reports the human-readable
+            # reason under "detail", not "message" — e.g. {"detail": "The
+            # 'gpt-5.3-codex' model is not supported when using Codex with a
+            # ChatGPT account."}. Include it so model-not-found patterns match.
+            _detail_msg = str(_err_obj.get("detail") or "").lower()
         if not _body_msg:
             _body_msg = str(body.get("message") or "").lower()
+        if not _detail_msg:
+            _detail_msg = str(body.get("detail") or "").lower()
     # Combine all message sources for pattern matching
     parts = [_raw_msg]
     if _body_msg and _body_msg not in _raw_msg:
         parts.append(_body_msg)
     if _metadata_msg and _metadata_msg not in _raw_msg and _metadata_msg not in _body_msg:
         parts.append(_metadata_msg)
+    if _detail_msg and _detail_msg not in _raw_msg and _detail_msg not in _body_msg:
+        parts.append(_detail_msg)
     error_msg = " ".join(parts)
     provider_lower = (provider or "").strip().lower()
     model_lower = (model or "").strip().lower()
@@ -1051,8 +1067,15 @@ def _extract_message(error: Exception, body: dict) -> str:
             msg = error_obj.get("message", "")
             if isinstance(msg, str) and msg.strip():
                 return msg.strip()[:500]
+            detail = error_obj.get("detail", "")
+            if isinstance(detail, str) and detail.strip():
+                return detail.strip()[:500]
         msg = body.get("message", "")
         if isinstance(msg, str) and msg.strip():
             return msg.strip()[:500]
+        # ChatGPT-account Codex reports the reason under "detail".
+        detail = body.get("detail", "")
+        if isinstance(detail, str) and detail.strip():
+            return detail.strip()[:500]
     # Fallback to str(error)
     return str(error)[:500]
