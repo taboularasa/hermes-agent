@@ -518,6 +518,7 @@ def create_job(
     workdir: Optional[str] = None,
     required_tools: Optional[List[str]] = None,
     required_web_backends: Optional[List[str]] = None,
+    workspace_coordinator: Optional[Dict[str, Any]] = None,
     no_agent: bool = False,
 ) -> Dict[str, Any]:
     """
@@ -604,6 +605,11 @@ def create_job(
     normalized_workdir = _normalize_workdir(workdir)
     normalized_required_tools = _normalize_string_list(required_tools)
     normalized_required_web_backends = _normalize_string_list(required_web_backends)
+    normalized_workspace_coordinator = None
+    if workspace_coordinator is not None:
+        from cron.workspace_coordinator_policy import normalize_workspace_coordinator_config
+
+        normalized_workspace_coordinator = normalize_workspace_coordinator_config(workspace_coordinator)
     normalized_no_agent = bool(no_agent)
 
     # no_agent jobs are meaningless without a script — the script IS the job.
@@ -660,6 +666,7 @@ def create_job(
         "workdir": normalized_workdir,
         "required_tools": normalized_required_tools,
         "required_web_backends": normalized_required_web_backends,
+        "workspace_coordinator": normalized_workspace_coordinator,
     }
 
     jobs = load_jobs()
@@ -750,6 +757,14 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
         for key in ("required_tools", "required_web_backends"):
             if key in updates:
                 updated[key] = _normalize_string_list(updates.get(key))
+        if "workspace_coordinator" in updates:
+            from cron.workspace_coordinator_policy import normalize_workspace_coordinator_config
+
+            updated["workspace_coordinator"] = (
+                normalize_workspace_coordinator_config(updates.get("workspace_coordinator"))
+                if updates.get("workspace_coordinator") is not None
+                else None
+            )
 
         if schedule_changed:
             updated_schedule = updated["schedule"]
