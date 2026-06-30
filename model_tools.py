@@ -721,6 +721,19 @@ def handle_function_call(
     function_args = coerce_tool_args(function_name, function_args)
 
     try:
+        try:
+            from cron.workspace_coordinator_policy import apply_workspace_coordinator_tool_policy
+
+            function_args, _workspace_policy_block = apply_workspace_coordinator_tool_policy(
+                function_name,
+                function_args,
+            )
+            if _workspace_policy_block:
+                return json.dumps({"error": _workspace_policy_block}, ensure_ascii=False)
+        except ImportError:
+            # The dispatcher is imported in non-cron/minimal environments too.
+            pass
+
         if function_name in _AGENT_LOOP_TOOLS:
             return json.dumps({"error": f"{function_name} must be handled by the agent loop"})
 

@@ -285,6 +285,8 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         result["required_tools"] = job["required_tools"]
     if job.get("required_web_backends"):
         result["required_web_backends"] = job["required_web_backends"]
+    if job.get("workspace_coordinator"):
+        result["workspace_coordinator"] = job["workspace_coordinator"]
     return result
 
 
@@ -309,6 +311,7 @@ def cronjob(
     workdir: Optional[str] = None,
     required_tools: Optional[List[str]] = None,
     required_web_backends: Optional[List[str]] = None,
+    workspace_coordinator: Optional[Dict[str, Any]] = None,
     no_agent: Optional[bool] = None,
     task_id: str = None,
 ) -> str:
@@ -377,6 +380,7 @@ def cronjob(
                 workdir=_normalize_optional_job_value(workdir),
                 required_tools=required_tools,
                 required_web_backends=required_web_backends,
+                workspace_coordinator=workspace_coordinator,
                 no_agent=_no_agent,
             )
             return json.dumps(
@@ -515,6 +519,10 @@ def cronjob(
                 updates["required_tools"] = required_tools or None
             if required_web_backends is not None:
                 updates["required_web_backends"] = required_web_backends or None
+            if workspace_coordinator is not None:
+                from cron.workspace_coordinator_policy import normalize_workspace_coordinator_config
+
+                updates["workspace_coordinator"] = normalize_workspace_coordinator_config(workspace_coordinator)
             if no_agent is not None:
                 # Toggling no_agent on/off at update time. If flipping to True,
                 # we need a script to already exist on the job (or be part of
@@ -688,6 +696,23 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
                     "On update, pass an empty array to clear."
                 ),
             },
+            "workspace_coordinator": {
+                "type": "object",
+                "description": (
+                    "Typed ownership policy for workspace backlog coordinator cron jobs. "
+                    "auto_delegate defaults to false and is enforced at tool-dispatch time, "
+                    "so prompt wording cannot enable ownership. ignored_projects always "
+                    "includes De Novo, Symphony, Hermes Agent Upstream, and dojoMOO."
+                ),
+                "properties": {
+                    "auto_delegate": {"type": "boolean", "default": False},
+                    "ignored_projects": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "config_path": {"type": "string"},
+                },
+            },
         },
         "required": ["action"]
     }
@@ -737,6 +762,7 @@ registry.register(
         workdir=args.get("workdir"),
         required_tools=args.get("required_tools"),
         required_web_backends=args.get("required_web_backends"),
+        workspace_coordinator=args.get("workspace_coordinator"),
         no_agent=args.get("no_agent"),
         task_id=kw.get("task_id"),
     ))(),

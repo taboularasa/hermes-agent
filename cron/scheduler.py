@@ -1795,6 +1795,13 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         chat_id="",
         chat_name="",
     )
+    from cron.workspace_coordinator_policy import activate_workspace_coordinator_policy
+
+    _workspace_coordinator_policy_token = activate_workspace_coordinator_policy(
+        job.get("workspace_coordinator")
+        or job.get("workspace_coordinator_config")
+        or {}
+    )
     _cron_delivery_vars = (
         "HERMES_CRON_AUTO_DELIVER_PLATFORM",
         "HERMES_CRON_AUTO_DELIVER_CHAT_ID",
@@ -2232,6 +2239,12 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 os.environ["TERMINAL_CWD"] = _prior_terminal_cwd
         # Clean up ContextVar session/delivery state for this job.
         clear_session_vars(_ctx_tokens)
+        try:
+            from cron.workspace_coordinator_policy import clear_workspace_coordinator_policy
+
+            clear_workspace_coordinator_policy(_workspace_coordinator_policy_token)
+        except Exception as e:
+            logger.debug("Job '%s': failed to clear workspace coordinator policy: %s", job_id, e)
         for _var_name in _cron_delivery_vars:
             _VAR_MAP[_var_name].set("")
         if _session_db:
