@@ -391,6 +391,79 @@ def _web_provider_fallback_candidates(primary_name: str, capability: str) -> Lis
     return candidates
 
 
+def get_active_crawl_provider() -> Optional[Any]:
+    """Resolve the currently-active web crawl provider.
+
+    Upstream removed crawl plumbing from ``agent.web_search_registry`` (only
+    ``get_active_search_provider`` / ``get_active_extract_provider`` remain),
+    but this fork still ships ``web_crawl_tool`` and reports crawl coverage in
+    ``web_search_matrix``. This local resolver mirrors the removed
+    ``web_search_registry.get_active_crawl_provider`` semantics — explicit
+    ``web.crawl_backend``/``web.backend`` config wins (even when unavailable so
+    the dispatcher can surface a precise error), then a single crawl-capable
+    available provider, then the legacy preference walk — using the registry's
+    public provider list so both call sites keep working without the deleted
+    registry helper. Returns ``None`` when no crawl-capable provider resolves.
+    """
+    try:
+        from agent.web_search_registry import get_provider, list_providers
+    except Exception:
+        return None
+
+    try:
+        from agent.web_search_registry import _read_config_key
+
+        configured = _read_config_key("web", "crawl_backend") or _read_config_key(
+            "web", "backend"
+        )
+    except Exception:
+        configured = None
+
+    def _supports_crawl(provider: Any) -> bool:
+        try:
+            return bool(provider.supports_crawl())
+        except Exception:
+            return False
+
+    def _is_available_safe(provider: Any) -> bool:
+        try:
+            return bool(provider.is_available())
+        except Exception:
+            return False
+
+    # 1. Explicit config wins, ignoring availability.
+    if configured:
+        provider = get_provider(configured)
+        if provider is not None and _supports_crawl(provider):
+            return provider
+
+    # 2. Single crawl-capable + available provider.
+    eligible = [
+        provider
+        for provider in list_providers()
+        if _supports_crawl(provider) and _is_available_safe(provider)
+    ]
+    if len(eligible) == 1:
+        return eligible[0]
+
+    # 3. Legacy preference walk, filtered by availability.
+    try:
+        from agent.web_search_registry import _LEGACY_PREFERENCE
+
+        legacy_order = _LEGACY_PREFERENCE
+    except Exception:
+        legacy_order = _MATRIX_PROVIDER_ORDER
+    for name in legacy_order:
+        provider = get_provider(name)
+        if (
+            provider is not None
+            and _supports_crawl(provider)
+            and _is_available_safe(provider)
+        ):
+            return provider
+    return None
+
+
 def _web_search_error_message(response_data: Any, default: str = "web search failed") -> str:
     """Return a compact provider error message for fallback metadata."""
     if isinstance(response_data, dict):
@@ -2434,7 +2507,6 @@ async def web_crawl_tool(
         # shape — {"results": [{"url", "title", "content", ...}]} — is then
         # post-processed by the shared LLM-summarization path below.
         from agent.web_search_registry import (
-            get_active_crawl_provider,
             get_provider as _wsp_get_provider,
         )
 
@@ -3013,7 +3085,6 @@ def web_search_matrix(
         logger.debug("Could not discover web provider plugins: %s", exc)
 
     from agent.web_search_registry import (
-        get_active_crawl_provider,
         get_active_extract_provider,
         get_active_search_provider,
         list_providers,

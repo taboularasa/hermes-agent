@@ -1417,8 +1417,6 @@ def _get_env_config() -> Dict[str, Any]:
     else:
         default_cwd = "/root"
 
-    docker_volumes = _parse_env_var("TERMINAL_DOCKER_VOLUMES", "[]", json.loads, "valid JSON")
-
     # Read TERMINAL_CWD but sanity-check it for container backends.
     # Host-only prefixes covered here: /Users/, /home/, C:\\, C:/.
     # If Docker cwd passthrough is explicitly enabled, remap the host path to
@@ -2446,13 +2444,6 @@ def terminal_tool(
                     "status": "blocked"
                 }, ensure_ascii=False)
 
-        effective_workdir = _resolve_effective_workdir(
-            workdir,
-            config=config,
-            env_type=env_type,
-            cwd=cwd,
-        )
-
         # Prepare command for execution
         pty_disabled_reason = None
         effective_pty = pty
@@ -2486,11 +2477,19 @@ def terminal_tool(
             # For non-local backends: runs inside the sandbox via env.execute().
             from tools.process_registry import process_registry
 
+            # Prefer the live session cwd (a prior `cd` updates env.cwd) over the
+            # init-time/config cwd, mirroring the foreground path. Explicit
+            # ``workdir=`` still wins.
+            effective_cwd = _resolve_command_cwd(
+                workdir=workdir,
+                env=env,
+                default_cwd=cwd,
+            )
             try:
                 if env_type == "local":
                     proc_session = process_registry.spawn_local(
                         command=command,
-                        cwd=effective_workdir,
+                        cwd=effective_cwd,
                         task_id=effective_task_id,
                         session_key=session_key,
                         env_vars=env.env if hasattr(env, 'env') else None,
@@ -2500,7 +2499,7 @@ def terminal_tool(
                     proc_session = process_registry.spawn_via_env(
                         env=env,
                         command=command,
-                        cwd=effective_workdir,
+                        cwd=effective_cwd,
                         task_id=effective_task_id,
                         session_key=session_key,
                     )

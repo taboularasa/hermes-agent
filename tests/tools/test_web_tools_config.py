@@ -488,7 +488,6 @@ class TestWebSearchSchema:
              patch("agent.web_search_registry.list_providers", return_value=[FakeProvider()]), \
              patch("agent.web_search_registry.get_active_search_provider", return_value=FakeProvider()), \
              patch("agent.web_search_registry.get_active_extract_provider", return_value=FakeProvider()), \
-             patch("agent.web_search_registry.get_active_crawl_provider", return_value=FakeProvider()), \
              patch("hermes_cli.config.load_config", return_value={"browser": {"cloud_provider": "firecrawl"}}):
             result = json.loads(
                 tools.web_tools.web_search_matrix(
@@ -539,7 +538,6 @@ class TestWebSearchSchema:
              patch("agent.web_search_registry.list_providers", return_value=[FakeProvider()]), \
              patch("agent.web_search_registry.get_active_search_provider", return_value=None), \
              patch("agent.web_search_registry.get_active_extract_provider", return_value=None), \
-             patch("agent.web_search_registry.get_active_crawl_provider", return_value=None), \
              patch("hermes_cli.config.load_config", return_value={"browser": {"cloud_provider": "firecrawl"}}):
             result = json.loads(
                 tools.web_tools.web_search_matrix(
@@ -600,7 +598,6 @@ class TestWebSearchSchema:
              patch("agent.web_search_registry.get_provider", side_effect=providers.get), \
              patch("agent.web_search_registry.get_active_search_provider", return_value=firecrawl), \
              patch("agent.web_search_registry.get_active_extract_provider", return_value=firecrawl), \
-             patch("agent.web_search_registry.get_active_crawl_provider", return_value=firecrawl), \
              patch("hermes_cli.config.load_config", return_value={"browser": {"cloud_provider": "firecrawl"}}):
             result = json.loads(
                 tools.web_tools.web_search_matrix(
@@ -732,7 +729,6 @@ class TestWebSearchSchema:
             result = json.loads(
                 await tools.web_tools.web_extract_tool(
                     ["https://www.medicaid.gov/example"],
-                    use_llm_processing=False,
                 )
             )
 
@@ -936,7 +932,6 @@ class TestWebExtractProviderStatus:
             result = json.loads(
                 await tools.web_tools.web_extract_tool(
                     ["https://example.com/source.pdf"],
-                    use_llm_processing=False,
                 )
             )
 

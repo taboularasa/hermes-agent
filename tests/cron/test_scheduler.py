@@ -1239,6 +1239,41 @@ class TestRunJobSessionPersistence:
             mock_agent_cls = entered[-1]  # the AIAgent patch
             yield fake_db, mock_agent_cls
 
+    def _make_run_job_patches(self, tmp_path):
+        """Common patches for run_job tests, as a positional list.
+
+        Returns ``(fake_db, patches)`` where ``patches`` is a list of five
+        *unentered* context managers the caller enters as ``patches[0]`` …
+        ``patches[4]`` alongside its own per-test patches (AIAgent,
+        ``get_tool_definitions``, …). Used by the Hadto ontology / preflight
+        tests that need to layer extra scheduler patches per case rather than
+        the fixed bundle in ``_run_job_patches``.
+
+        ``patches[2]`` targets ``hermes_cli.env_loader.load_hermes_dotenv``:
+        the merged scheduler reloads .env through that helper (plus
+        ``reset_secret_source_cache``) rather than a bare ``dotenv.load_dotenv``
+        (#33465). ``reset_secret_source_cache`` only clears an in-process set,
+        so it is safe to run for real; the load-bearing patch is
+        ``resolve_runtime_provider`` (``patches[4]``) so the real network
+        resolver never runs.
+        """
+        fake_db = MagicMock()
+        return fake_db, [
+            patch("cron.scheduler._hermes_home", tmp_path),
+            patch("cron.scheduler._resolve_origin", return_value=None),
+            patch("hermes_cli.env_loader.load_hermes_dotenv"),
+            patch("hermes_state.SessionDB", return_value=fake_db),
+            patch(
+                "hermes_cli.runtime_provider.resolve_runtime_provider",
+                return_value={
+                    "api_key": "test-key",
+                    "base_url": "https://example.invalid/v1",
+                    "provider": "openrouter",
+                    "api_mode": "chat_completions",
+                },
+            ),
+        ]
+
     def test_run_job_passes_enabled_toolsets_to_agent(self, tmp_path):
         job = {
             "id": "toolset-job",

@@ -3375,7 +3375,11 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             )
 
         enabled_toolsets = _resolve_ontology_cron_enabled_toolsets(job, _cfg, prompt)
-        disabled_toolsets = list(_CRON_PREFLIGHT_DISABLED_TOOLSETS)
+        # Layer agent.disabled_toolsets from config.yaml onto the cron baseline
+        # so an LLM-supplied per-job enabled_toolsets cannot re-enable tools the
+        # operator globally disabled (#25752). The merge left this call site on
+        # the bare baseline constant while keeping the resolver, orphaning it.
+        disabled_toolsets = _resolve_cron_disabled_toolsets(_cfg)
         preflight_report = _build_cron_preflight_report(
             job,
             prompt,
