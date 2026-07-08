@@ -251,6 +251,11 @@ class TestToolsetConsistency:
             "self_improvement_pipeline",
         }
 
+        for name, definition in TOOLSETS.items():
+            assert extracted.isdisjoint(definition["tools"]), (
+                f"{name} advertises extracted Hadto self-improvement tools"
+            )
+
         for platform in [
             "hermes-cli",
             "hermes-telegram",
