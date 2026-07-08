@@ -36,3 +36,9 @@ This PR also fixes one repo-local scoring defect found during the reproduction: 
 HAD-271 remains blocked in the manager-owned benchmark path because PRs #154 and #155 changed the Hermes-agent repo-local tool, while the live manager-adjacent path is still executing the separate installed Hadto plugin implementation. Treating checkout-local `critical_failures=[]` as recovery would be misleading until the installed plugin/runtime path either imports the Hermes-agent benchmark code or receives an equivalent sidecar-hydration and minor-drift-threshold repair.
 
 This blocker is not solved by adding status text to the named Codex records. The next truthful recovery path is to repair or redeploy the installed `hadto-hermes-plugin` benchmark surface, then rerun the manager-owned `self_improvement_benchmark` with the same ontology root and require `critical_failures=[]`.
+
+## 2026-07-08 Update
+
+Project-manager evidence at `2026-07-08T09:23Z` still reports `self_improvement_evidence_gate` degraded because the durable evidence sources are stale: `journal_entries` latest `2026-07-04T23:15:00+00:00` (about 82h old) and `codex_runs` latest `2026-07-03T23:34:57.411021+00:00` (about 106h old). `ctx` is disabled by config and remains informational. Ontology intelligence is fresh.
+
+This repo no longer contains the self-improvement benchmark implementation. It was extracted to the Hadto plugin in `cfd0c6fc4`. The repo-side repair for this pass is therefore limited to removing the extracted self-improvement tool names from Hermes core platform defaults so a checkout without the Hadto plugin does not advertise stale repo-local providers. The remaining reliability-floor degradation requires real journal and Codex evidence collection in the operational Hadto runtime. It must not be cleared by fabricated freshness.
