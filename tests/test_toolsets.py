@@ -238,6 +238,30 @@ class TestToolsetConsistency:
         # silently let a platform diverge so far that nothing is shared).
         assert len(core) > 20, f"Suspiciously small shared core: {len(core)} tools"
 
+    def test_extracted_hadto_self_improvement_tools_are_not_core_defaults(self):
+        """The live self-improvement reliability tools are Hadto-plugin owned.
+
+        Keeping their names in the static Hermes core list makes a checkout
+        without that plugin look like it has repo-local benchmark providers.
+        Plugin-registered toolsets are merged through the registry instead.
+        """
+        extracted = {
+            "self_improvement_evidence_gate",
+            "self_improvement_benchmark",
+            "self_improvement_pipeline",
+        }
+
+        for platform in [
+            "hermes-cli",
+            "hermes-telegram",
+            "hermes-discord",
+            "hermes-whatsapp",
+            "hermes-slack",
+            "hermes-signal",
+            "hermes-homeassistant",
+        ]:
+            assert extracted.isdisjoint(TOOLSETS[platform]["tools"])
+
 
 class TestPluginToolsets:
     def test_get_all_toolsets_includes_plugin_toolset(self, monkeypatch):

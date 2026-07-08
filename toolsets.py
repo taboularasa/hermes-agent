@@ -65,9 +65,9 @@ _HERMES_CORE_TOOLS = [
     "execute_code", "delegate_task",
     # Cronjob management
     "cronjob",
-    # Hermes self-improvement reliability floor
-    "self_improvement_evidence_gate", "self_improvement_benchmark",
-    "self_improvement_pipeline",
+    # Self-improvement reliability tools are provided by the Hadto plugin.
+    # Keep them out of the built-in core list so a checkout without that
+    # plugin does not advertise stale repo-local providers.
     # Cross-platform messaging (gated on gateway running via check_fn)
     "send_message",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)

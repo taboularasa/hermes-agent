@@ -16,3 +16,29 @@ HAD-271 cannot be closed from PR #140 alone while the operational cron path cont
 ## Follow-up
 
 This PR also fixes one repo-local scoring defect found during the reproduction: failed Codex attempts with `completed_at` are no longer counted as completed deliveries or claimed work. That correction keeps failed/stale attempts from inflating execution-loop throughput or dragging operator-value evidence as if they were shipped work.
+
+## 2026-06-05 Follow-up After PRs #154 and #155
+
+### Evidence
+
+- This checkout was fast-forwarded to `origin/main` at merge commit `80b36d74c9437a1245427c0d7c5002635f353c0b` for PR #155.
+- Repo-local `tools.self_improvement_tool.self_improvement_benchmark(ontology_root="/home/david/stacks/HAD-1265-smb-ontology-platform-20260605131830", persist=False)` reports `project_score=83.22`, `direction=positive`, `trend=positive`, and `critical_failures=[]`.
+- The authoritative manager-owned benchmark still reports `project_score=68.73`, `direction=negative`, `trend=regressing`, and `critical_failures=["anti_make_work_check", "leading_indicator_drift"]`.
+- The manager-owned `anti_make_work_check` still names `codex_runs:codex_5e2abf1b3617` and `codex_runs:codex_c3614c2aea99` as `status_language_without_value_category_evidence`.
+- Those two Codex aggregate records point at completed Hadto.co blog-delivery runs. Their final messages include durable artifact paths and verification results, but the installed manager-adjacent plugin path does not use the repo-local Codex sidecar hydration added by PR #154.
+- The active launcher at `/home/david/.hermes/scripts/hadto_self_improvement_pipeline.py` still imports `hadto_hermes_plugin.tools.self_improvement` from `/home/david/.hermes/plugins/hadto`.
+- That installed plugin checkout is `https://github.com/taboularasa/hadto-hermes-plugin.git` on branch `had-1156-runtime-probe-clarity` at `f0a563713d0e71ad14b357148ee5fe860efa6f18`, not this Hermes-agent checkout.
+- The installed plugin benchmark implementation builds `anti_make_work_check` through `hadto_hermes_plugin.anti_make_work` and `_anti_make_work_items_for_benchmark`; it lacks the repo-local sidecar hydration path in `tools/self_improvement_tool.py`.
+- A delegated-shell attempt to run the installed plugin benchmark with the manager ontology root and `persist=False` stayed CPU-bound for more than four minutes and touched installed self-improvement ledger files, so it was terminated rather than treated as a safe reproducible proof path.
+
+### Blocker
+
+HAD-271 remains blocked in the manager-owned benchmark path because PRs #154 and #155 changed the Hermes-agent repo-local tool, while the live manager-adjacent path is still executing the separate installed Hadto plugin implementation. Treating checkout-local `critical_failures=[]` as recovery would be misleading until the installed plugin/runtime path either imports the Hermes-agent benchmark code or receives an equivalent sidecar-hydration and minor-drift-threshold repair.
+
+This blocker is not solved by adding status text to the named Codex records. The next truthful recovery path is to repair or redeploy the installed `hadto-hermes-plugin` benchmark surface, then rerun the manager-owned `self_improvement_benchmark` with the same ontology root and require `critical_failures=[]`.
+
+## 2026-07-08 Update
+
+Project-manager evidence at `2026-07-08T09:23Z` still reports `self_improvement_evidence_gate` degraded because the durable evidence sources are stale: `journal_entries` latest `2026-07-04T23:15:00+00:00` (about 82h old) and `codex_runs` latest `2026-07-03T23:34:57.411021+00:00` (about 106h old). `ctx` is disabled by config and remains informational. Ontology intelligence is fresh.
+
+This repo no longer contains the self-improvement benchmark implementation. It was extracted to the Hadto plugin in `cfd0c6fc4`. The repo-side repair for this pass is therefore limited to removing the extracted self-improvement tool names from Hermes core platform defaults so a checkout without the Hadto plugin does not advertise stale repo-local providers. The remaining reliability-floor degradation requires real journal and Codex evidence collection in the operational Hadto runtime. It must not be cleared by fabricated freshness.
