@@ -67,6 +67,14 @@ class TestGuidanceConstants:
         assert "workspace_backlog_orchestrator" in OPERATOR_RULES_GUIDANCE
         assert "selected_work" in OPERATOR_RULES_GUIDANCE
         assert "Session-local todo is scratchpad only" in OPERATOR_RULES_GUIDANCE
+        assert "blob SHA-256 before final Linear intake" in OPERATOR_RULES_GUIDANCE
+        assert "URL/title screening is provisional" in OPERATOR_RULES_GUIDANCE
+        assert "YAML line wrapping or endpoint normalization" in OPERATOR_RULES_GUIDANCE
+        assert "exact hash" in OPERATOR_RULES_GUIDANCE
+        assert "final hash-backed duplicate gate" in OPERATOR_RULES_GUIDANCE
+        assert "before issue creation, delegation, or `selected_work` publication" in OPERATOR_RULES_GUIDANCE
+        assert "cancel active delegates" in OPERATOR_RULES_GUIDANCE
+        assert "clean temporary checkouts" in OPERATOR_RULES_GUIDANCE
         assert "one command per terminal call" in OPERATOR_RULES_GUIDANCE
         assert "Use tool `workdir` instead of `cd &&`" in OPERATOR_RULES_GUIDANCE
         assert "workspace-orchestrator:<IDENTIFIER>" in OPERATOR_RULES_GUIDANCE
@@ -1668,5 +1676,4 @@ class TestParallelToolCallGuidance:
 # =========================================================================
 # Budget warning history stripping
 # =========================================================================
-
 
