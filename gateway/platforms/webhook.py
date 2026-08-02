@@ -40,7 +40,7 @@ import re
 import subprocess
 import time
 from collections import deque
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Literal, Optional
 import urllib.error
 import urllib.request
 
@@ -57,15 +57,19 @@ from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
     MessageType,
+    ProcessingOutcome,
     SendResult,
 )
 from gateway.platforms.hermes_linear_ingress import (
     HERMES_LINEAR_REQUEST_CONTRACT,
     HERMES_LINEAR_SIGNED_ROUTE_NAME,
-    HermesLinearDeliveryLedger,
-    default_hermes_linear_ledger_path,
+    HermesLinearDeliveryInbox,
+    HermesLinearInboxDelivery,
+    default_hermes_linear_inbox_path,
+    hermes_linear_session_chat_id,
     verify_hermes_linear_request,
 )
+from gateway.session import build_session_key
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +171,12 @@ class WebhookAdapter(BasePlatformAdapter):
         self._seen_deliveries: Dict[str, float] = {}
         self._idempotency_ttl: int = 3600  # 1 hour
         self._seen_deliveries_next_prune_at: float = 0.0
-        self._hermes_linear_delivery_ledger = None
+        self._hermes_linear_delivery_inboxes: Dict[str, HermesLinearDeliveryInbox] = {}
+        self._hermes_linear_worker_task: Optional[asyncio.Task] = None
+        self._hermes_linear_worker_wake = asyncio.Event()
+        self._hermes_linear_worker_stop = asyncio.Event()
+        self._hermes_linear_lease_seconds = 60
+        self._hermes_linear_failpoint = None  # test-only callable; never configured
 
         # Rate limiting: per-route timestamps in a fixed window.
         self._rate_counts: Dict[str, Deque[float]] = {}
@@ -220,6 +229,19 @@ class WebhookAdapter(BasePlatformAdapter):
                     "requests and cannot use INSECURE_NO_AUTH."
                 )
 
+            if request_contract == HERMES_LINEAR_REQUEST_CONTRACT:
+                configured_path = route.get("delivery_inbox_path") or route.get(
+                    "delivery_ledger_path"
+                )
+                inbox_path = (
+                    Path(configured_path).expanduser()
+                    if configured_path
+                    else default_hermes_linear_inbox_path()
+                )
+                self._hermes_linear_delivery_inboxes[name] = HermesLinearDeliveryInbox(
+                    inbox_path
+                )
+
             # Safety rail: refuse to start if INSECURE_NO_AUTH is combined with a
             # non-loopback bind. The escape hatch is for local testing only;
             # serving an unauthenticated route on a public interface is a
@@ -244,7 +266,7 @@ class WebhookAdapter(BasePlatformAdapter):
                         f"real target (telegram, discord, slack, github_comment, etc.)."
                     )
 
-        app = web.Application()
+        app = web.Application(client_max_size=self._max_body_bytes)
         app.router.add_get("/health", self._handle_health)
         app.router.add_post("/webhooks/{route_name}", self._handle_webhook)
         # Multi-profile multiplexing: a /p/<profile>/webhooks/<route> prefix
@@ -274,6 +296,15 @@ class WebhookAdapter(BasePlatformAdapter):
         site = web.TCPSite(self._runner, self._host, self._port)
         await site.start()
         self._mark_connected()
+        if self._hermes_linear_delivery_inboxes:
+            self._hermes_linear_worker_stop.clear()
+            self._hermes_linear_worker_task = asyncio.create_task(
+                self._run_hermes_linear_inbox_worker()
+            )
+            self._background_tasks.add(self._hermes_linear_worker_task)
+            self._hermes_linear_worker_task.add_done_callback(
+                self._background_tasks.discard
+            )
 
         route_names = ", ".join(self._routes.keys()) or "(none configured)"
         logger.info(
@@ -285,6 +316,16 @@ class WebhookAdapter(BasePlatformAdapter):
         return True
 
     async def disconnect(self) -> None:
+        self._hermes_linear_worker_stop.set()
+        self._hermes_linear_worker_wake.set()
+        worker = self._hermes_linear_worker_task
+        self._hermes_linear_worker_task = None
+        if worker is not None and not worker.done():
+            worker.cancel()
+            try:
+                await worker
+            except asyncio.CancelledError:
+                pass
         if self._runner:
             await self._runner.cleanup()
             self._runner = None
@@ -406,7 +447,22 @@ class WebhookAdapter(BasePlatformAdapter):
 
     async def _handle_health(self, request: "web.Request") -> "web.Response":
         """GET /health — simple health check."""
-        return web.json_response({"status": "ok", "platform": "webhook"})
+        inbox_states: dict[str, dict[str, int]] = {}
+        activity_states: dict[str, dict[str, int]] = {}
+        for route_name, inbox in self._hermes_linear_delivery_inboxes.items():
+            try:
+                inbox_states[route_name] = await asyncio.to_thread(inbox.state_counts)
+                route_activities = await asyncio.to_thread(inbox.activity_state_counts)
+                if route_activities:
+                    activity_states[route_name] = route_activities
+            except Exception:
+                inbox_states[route_name] = {"diagnostics_unavailable": 1}
+        payload: dict[str, Any] = {"status": "ok", "platform": "webhook"}
+        if inbox_states:
+            payload["hermes_linear_inbox"] = inbox_states
+        if activity_states:
+            payload["hermes_linear_activity"] = activity_states
+        return web.json_response(payload)
 
     def _reload_dynamic_routes(self) -> None:
         """Reload agent-created subscriptions from disk if the file changed."""
@@ -498,6 +554,29 @@ class WebhookAdapter(BasePlatformAdapter):
         if profile not in served:
             return _PROFILE_REJECTED
         return profile
+
+    def _hermes_linear_inbox_for_route(
+        self, route_name: str, route_config: dict
+    ) -> HermesLinearDeliveryInbox:
+        inbox = self._hermes_linear_delivery_inboxes.get(route_name)
+        if inbox is not None:
+            return inbox
+        configured_path = route_config.get("delivery_inbox_path") or route_config.get(
+            "delivery_ledger_path"
+        )
+        inbox_path = (
+            Path(configured_path).expanduser()
+            if configured_path
+            else default_hermes_linear_inbox_path()
+        )
+        inbox = HermesLinearDeliveryInbox(inbox_path)
+        self._hermes_linear_delivery_inboxes[route_name] = inbox
+        return inbox
+
+    def _run_hermes_linear_failpoint(self, name: str, delivery_key: str) -> None:
+        hook = self._hermes_linear_failpoint
+        if callable(hook):
+            hook(name, delivery_key)
 
     async def _handle_webhook(self, request: "web.Request") -> "web.Response":
         """POST /webhooks/{route_name} — receive and process a webhook event."""
@@ -606,9 +685,7 @@ class WebhookAdapter(BasePlatformAdapter):
             try:
                 parsed_payload = json.loads(raw_body)
                 if not isinstance(parsed_payload, dict):
-                    return web.json_response(
-                        {"error": "Cannot parse body"}, status=400
-                    )
+                    return web.json_response({"error": "Cannot parse body"}, status=400)
                 payload = parsed_payload
             except json.JSONDecodeError:
                 # Try form-encoded as fallback
@@ -617,9 +694,7 @@ class WebhookAdapter(BasePlatformAdapter):
 
                     payload = dict(urllib.parse.parse_qsl(raw_body.decode("utf-8")))
                 except Exception:
-                    return web.json_response(
-                        {"error": "Cannot parse body"}, status=400
-                    )
+                    return web.json_response({"error": "Cannot parse body"}, status=400)
 
         # Check event type filter
         event_type = (
@@ -695,28 +770,24 @@ class WebhookAdapter(BasePlatformAdapter):
                     {"error": "Invalid verified delivery"}, status=400
                 )
             try:
-                if self._hermes_linear_delivery_ledger is None:
-                    configured_path = route_config.get("delivery_ledger_path")
-                    ledger_path = (
-                        Path(configured_path).expanduser()
-                        if configured_path
-                        else default_hermes_linear_ledger_path()
-                    )
-                    self._hermes_linear_delivery_ledger = HermesLinearDeliveryLedger(
-                        ledger_path
-                    )
-                claim = self._hermes_linear_delivery_ledger.claim(
-                    delivery_id,
-                    hermes_linear_verification.body_sha256,
-                    int(time.time()),
+                inbox = self._hermes_linear_inbox_for_route(route_name, route_config)
+                claim = inbox.accept(
+                    delivery_key=delivery_id,
+                    body_sha256=hermes_linear_verification.body_sha256,
+                    raw_body=raw_body,
+                    received_at=int(time.time()),
+                    route_name=route_name,
+                    profile=profile if isinstance(profile, str) else None,
                 )
             except Exception as exc:
                 logger.error(
-                    "[webhook] Hermes Linear delivery claim failed route=%s error_type=%s",
+                    "[webhook] Hermes Linear inbox commit failed route=%s error_type=%s",
                     route_name,
                     type(exc).__name__,
                 )
-                return web.json_response({"error": "Delivery claim failed"}, status=503)
+                return web.json_response(
+                    {"error": "Delivery acceptance failed"}, status=503
+                )
             if claim == "duplicate":
                 logger.info(
                     "[webhook] Skipping duplicate Hermes Linear delivery %s",
@@ -734,6 +805,23 @@ class WebhookAdapter(BasePlatformAdapter):
                     {"error": "Delivery key conflict", "delivery_id": delivery_id},
                     status=409,
                 )
+
+            # The exact verified body is now durable. Wake the long-lived
+            # worker, then acknowledge without depending on an unawaited
+            # request-scoped task. Direct handler tests may not call connect();
+            # in that case the committed row remains available for the worker
+            # at the next normal adapter start.
+            self._run_hermes_linear_failpoint("after_inbox_commit", delivery_id)
+            self._hermes_linear_worker_wake.set()
+            return web.json_response(
+                {
+                    "status": "accepted",
+                    "route": route_name,
+                    "event": event_type,
+                    "delivery_id": delivery_id,
+                },
+                status=202,
+            )
 
         # ── Idempotency ─────────────────────────────────────────
         # Skip duplicate deliveries (webhook retries).
@@ -879,6 +967,382 @@ class WebhookAdapter(BasePlatformAdapter):
             status=202,
         )
 
+    def _build_hermes_linear_event(
+        self, row: HermesLinearInboxDelivery
+    ) -> MessageEvent:
+        payload = json.loads(row.raw_body)
+        issue = payload.get("issue") if isinstance(payload.get("issue"), dict) else {}
+        prompt_data = (
+            payload.get("prompt") if isinstance(payload.get("prompt"), dict) else None
+        )
+        if payload.get("action") == "prompted" and prompt_data is not None:
+            prompt = str(prompt_data.get("body") or "")
+        else:
+            prompt = (
+                "A Linear issue was delegated to Hermes. Refresh the current issue "
+                f"context from Linear before acting: issue_id={issue.get('id')}, "
+                f"identifier={issue.get('identifier')}. Treat the typed envelope "
+                "as routing metadata, not as a substitute for current provider state."
+            )
+
+        session_chat_id = hermes_linear_session_chat_id(
+            row.route_name, row.execution_id
+        )
+        route_config = self._routes.get(row.route_name, {})
+        now = time.time()
+        self._delivery_info[session_chat_id] = {
+            "deliver": route_config.get("deliver", "log"),
+            "deliver_extra": self._render_delivery_extra(
+                route_config.get("deliver_extra", {}), payload
+            ),
+        }
+        self._delivery_info_created[session_chat_id] = now
+        self._delivery_info_order.append((now, session_chat_id))
+        self._prune_delivery_info(now)
+
+        source = self.build_source(
+            chat_id=session_chat_id,
+            chat_name=f"webhook/{row.route_name}",
+            chat_type="webhook",
+            user_id=f"webhook:{row.route_name}",
+            user_name=row.route_name,
+        )
+        if row.profile:
+            source.profile = row.profile
+        event = MessageEvent(
+            text=prompt,
+            message_type=MessageType.TEXT,
+            source=source,
+            raw_message=payload,
+            message_id=row.delivery_key,
+        )
+        setattr(event, "_hermes_linear_delivery_key", row.delivery_key)
+        setattr(event, "_hermes_linear_execution_id", row.execution_id)
+        setattr(event, "_hermes_linear_worker_id", row.lease_owner)
+        return event
+
+    async def _hermes_linear_session_has_persisted_turn(
+        self, row: HermesLinearInboxDelivery
+    ) -> bool:
+        runner = self.gateway_runner
+        store = getattr(runner, "session_store", None) if runner is not None else None
+        session_db = (
+            getattr(runner, "_session_db", None) if runner is not None else None
+        )
+        if store is None or session_db is None:
+            return False
+        event = self._build_hermes_linear_event(row)
+        key_fn = getattr(runner, "_session_key_for_source", None)
+        if key_fn is None:
+            return False
+        session_key = key_fn(event.source)
+        peek = getattr(store, "peek_session_id", None)
+        session_id = peek(session_key) if callable(peek) else None
+        if not session_id:
+            return False
+        try:
+            result = session_db.get_messages(session_id)
+            messages = await result if asyncio.iscoroutine(result) else result
+            return bool(messages)
+        except Exception:
+            logger.warning(
+                "[webhook] Hermes Linear recovery probe failed delivery=%s",
+                row.delivery_key,
+            )
+            # Fail closed: uncertain prior execution must never be started twice.
+            return True
+
+    async def _heartbeat_hermes_linear_delivery(
+        self, inbox: HermesLinearDeliveryInbox, row: HermesLinearInboxDelivery
+    ) -> None:
+        worker_id = row.lease_owner
+        if not worker_id:
+            return
+        interval = max(1, self._hermes_linear_lease_seconds // 3)
+        while True:
+            await asyncio.sleep(interval)
+            ok = await asyncio.to_thread(
+                inbox.heartbeat,
+                row.delivery_key,
+                worker_id,
+                int(time.time()),
+                self._hermes_linear_lease_seconds,
+            )
+            if not ok:
+                return
+
+    async def _dispatch_hermes_linear_inbox_row(
+        self, inbox: HermesLinearDeliveryInbox, row: HermesLinearInboxDelivery
+    ) -> None:
+        worker_id = row.lease_owner
+        if not worker_id:
+            return
+        now = int(time.time())
+        if row.state == "started":
+            if await self._hermes_linear_session_has_persisted_turn(row):
+                await asyncio.to_thread(
+                    inbox.mark_stalled_started, row.delivery_key, worker_id, now
+                )
+                logger.warning(
+                    "[webhook] Hermes Linear started delivery awaits session recovery "
+                    "delivery=%s reason=stalled_started_execution",
+                    row.delivery_key,
+                )
+            else:
+                await asyncio.to_thread(
+                    inbox.recover_unstarted, row.delivery_key, worker_id, now
+                )
+                self._hermes_linear_worker_wake.set()
+            return
+
+        event = self._build_hermes_linear_event(row)
+        scheduled = await asyncio.to_thread(
+            inbox.mark_scheduled, row.delivery_key, worker_id, now
+        )
+        if not scheduled:
+            return
+        self._run_hermes_linear_failpoint("after_worker_lease", row.delivery_key)
+        self._run_hermes_linear_failpoint("before_start_transition", row.delivery_key)
+        started = await asyncio.to_thread(
+            inbox.mark_started,
+            delivery_key=row.delivery_key,
+            worker_id=worker_id,
+            now=int(time.time()),
+            activity_body=self._hermes_linear_activity_body(event, "action"),
+        )
+        if not started:
+            return
+        self._run_hermes_linear_failpoint("after_start_transition", row.delivery_key)
+        self._run_hermes_linear_failpoint("before_agent_schedule", row.delivery_key)
+
+        heartbeat = asyncio.create_task(
+            self._heartbeat_hermes_linear_delivery(inbox, row)
+        )
+        try:
+            await self.handle_message(event)
+            self._run_hermes_linear_failpoint("after_agent_schedule", row.delivery_key)
+            session_key = build_session_key(
+                event.source,
+                group_sessions_per_user=self.config.extra.get(
+                    "group_sessions_per_user", True
+                ),
+                thread_sessions_per_user=self.config.extra.get(
+                    "thread_sessions_per_user", False
+                ),
+            )
+            task = self._session_tasks.get(session_key)
+            if task is None:
+                await asyncio.to_thread(
+                    inbox.finish,
+                    delivery_key=row.delivery_key,
+                    outcome="failed",
+                    now=int(time.time()),
+                    reason_code="scheduling_rejected",
+                    error_activity_body=self._hermes_linear_activity_body(
+                        event, "error"
+                    ),
+                )
+                return
+            await asyncio.shield(task)
+        finally:
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
+
+    async def _run_hermes_linear_inbox_worker(self) -> None:
+        worker_id = f"hermes-linear-{os.getpid()}"
+        while not self._hermes_linear_worker_stop.is_set():
+            processed = False
+            for inbox in list(self._hermes_linear_delivery_inboxes.values()):
+                try:
+                    row = await asyncio.to_thread(
+                        inbox.lease_next,
+                        worker_id=worker_id,
+                        now=int(time.time()),
+                        lease_seconds=self._hermes_linear_lease_seconds,
+                    )
+                    if row is None:
+                        activity_processed = (
+                            await self._dispatch_hermes_linear_activity(
+                                inbox, worker_id
+                            )
+                        )
+                        processed = processed or activity_processed
+                        continue
+                    processed = True
+                    await self._dispatch_hermes_linear_inbox_row(inbox, row)
+                    await self._dispatch_hermes_linear_activity(inbox, worker_id)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.error(
+                        "[webhook] Hermes Linear inbox worker error error_type=%s",
+                        type(exc).__name__,
+                    )
+            if processed:
+                continue
+            self._hermes_linear_worker_wake.clear()
+            try:
+                await asyncio.wait_for(
+                    self._hermes_linear_worker_wake.wait(), timeout=0.5
+                )
+            except asyncio.TimeoutError:
+                pass
+
+    @staticmethod
+    def _post_hermes_linear_activity(
+        url: str, secret: str, request_body: bytes
+    ) -> tuple[Literal["delivered", "retry", "terminal"], str]:
+        request = urllib.request.Request(
+            url,
+            data=request_body,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {secret}",
+                "Content-Type": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                status = int(response.status)
+        except urllib.error.HTTPError as exc:
+            status = int(exc.code)
+        except (urllib.error.URLError, TimeoutError, OSError):
+            return "retry", "network_or_timeout"
+        if 200 <= status < 300:
+            return "delivered", "activity_accepted"
+        if status in {408, 425, 429} or status >= 500:
+            return "retry", f"http_{status}_retryable"
+        return "terminal", f"http_{status}_terminal"
+
+    async def _dispatch_hermes_linear_activity(
+        self, inbox: HermesLinearDeliveryInbox, worker_id: str
+    ) -> bool:
+        activity = await asyncio.to_thread(
+            inbox.lease_activity,
+            worker_id=worker_id,
+            now=int(time.time()),
+            lease_seconds=self._hermes_linear_lease_seconds,
+        )
+        if activity is None:
+            return False
+        delivery = await asyncio.to_thread(inbox.get, activity.delivery_key)
+        route_config = self._routes.get(delivery.route_name, {}) if delivery else {}
+        url = str(route_config.get("linear_activity_url") or "").strip()
+        secret = str(route_config.get("linear_activity_secret") or "")
+        if not url or not secret:
+            await asyncio.to_thread(
+                inbox.finish_activity,
+                activity=activity,
+                worker_id=worker_id,
+                result="retry",
+                now=int(time.time()),
+                reason_code="activity_transport_unconfigured",
+            )
+            return True
+        result, reason = await asyncio.to_thread(
+            self._post_hermes_linear_activity, url, secret, activity.request_body
+        )
+        await asyncio.to_thread(
+            inbox.finish_activity,
+            activity=activity,
+            worker_id=worker_id,
+            result=result,
+            now=int(time.time()),
+            reason_code=reason,
+        )
+        logger.info(
+            "[webhook] Hermes Linear activity result delivery=%s kind=%s state=%s reason=%s",
+            activity.delivery_key,
+            activity.kind,
+            result,
+            reason,
+        )
+        return True
+
+    @staticmethod
+    def _hermes_linear_activity_body(
+        event: MessageEvent, kind: Literal["action", "error"]
+    ) -> bytes | None:
+        payload = event.raw_message if isinstance(event.raw_message, dict) else None
+        delivery_key = getattr(event, "_hermes_linear_delivery_key", None)
+        if payload is None or not isinstance(delivery_key, str):
+            return None
+        session = payload.get("agentSession")
+        destination = payload.get("destination")
+        issue = payload.get("issue")
+        if not isinstance(session, dict) or not isinstance(destination, dict):
+            return None
+        issue_identifier = issue.get("identifier") if isinstance(issue, dict) else None
+        activity: dict[str, Any]
+        if kind == "action":
+            activity = {
+                "type": "action",
+                "action": "Hermes execution started",
+                "parameter": str(issue_identifier or "Linear agent session"),
+                "dedupeKey": f"hermes-execution-start:{delivery_key}",
+                "ephemeral": True,
+                "contextualMetadata": {
+                    "source": "hermes-linear-ingress",
+                    "deliveryKey": delivery_key,
+                },
+            }
+        else:
+            activity = {
+                "type": "error",
+                "body": "Hermes could not complete this delegated execution.",
+                "dedupeKey": f"hermes-execution-error:{delivery_key}",
+                "ephemeral": False,
+                "contextualMetadata": {
+                    "source": "hermes-linear-ingress",
+                    "deliveryKey": delivery_key,
+                },
+            }
+        body = {
+            "agentSessionId": session.get("id"),
+            "organizationId": payload.get("organizationId"),
+            "appUserId": destination.get("appUserId"),
+            "activity": activity,
+        }
+        return json.dumps(body, separators=(",", ":")).encode()
+
+    async def _hermes_linear_inbox_context(
+        self, event: MessageEvent
+    ) -> tuple[HermesLinearDeliveryInbox, HermesLinearInboxDelivery] | None:
+        route_name = event.source.user_name if event.source is not None else None
+        if not isinstance(route_name, str):
+            return None
+        inbox = self._hermes_linear_delivery_inboxes.get(route_name)
+        if inbox is None:
+            return None
+        delivery_key = getattr(event, "_hermes_linear_delivery_key", None)
+        if isinstance(delivery_key, str):
+            row = await asyncio.to_thread(inbox.get, delivery_key)
+            return (inbox, row) if row is not None else None
+        chat_id = str(getattr(event.source, "chat_id", ""))
+        match = re.search(r":hermes-linear-([0-9a-f]{32})$", chat_id)
+        if match is None:
+            return None
+        row = await asyncio.to_thread(inbox.get_by_execution_prefix, match.group(1))
+        return (inbox, row) if row is not None else None
+
+    def _hermes_linear_error_activity_from_delivery(
+        self, delivery: HermesLinearInboxDelivery
+    ) -> bytes | None:
+        try:
+            event = self._build_hermes_linear_event(delivery)
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+            return None
+        return self._hermes_linear_activity_body(event, "error")
+
+    async def on_processing_start(self, event: MessageEvent) -> None:
+        # Durable start is committed by the inbox worker immediately before it
+        # invokes handle_message(). The generic base hook intentionally swallows
+        # hook errors, so it cannot be the acceptance/scheduling transaction.
+        return
+
     async def on_processing_complete(self, event: "MessageEvent", outcome: Any) -> None:
         """Close the per-delivery webhook session once its run finishes.
 
@@ -899,6 +1363,37 @@ class WebhookAdapter(BasePlatformAdapter):
         ``end_session()`` is first-reason-wins and no-ops on an already-ended
         row, so this never clobbers a ``compression``/``agent_close`` reason.
         """
+        context = await self._hermes_linear_inbox_context(event)
+        if context is not None:
+            inbox, delivery = context
+            delivery_key = delivery.delivery_key
+            if delivery.state in {"scheduled", "started", "failed"}:
+                succeeded = outcome == ProcessingOutcome.SUCCESS
+                self._run_hermes_linear_failpoint(
+                    "before_finish_transition", delivery_key
+                )
+                await asyncio.to_thread(
+                    inbox.finish,
+                    delivery_key=delivery_key,
+                    outcome="completed" if succeeded else "failed",
+                    now=int(time.time()),
+                    reason_code=(
+                        "execution_completed" if succeeded else "execution_failed"
+                    ),
+                    error_activity_body=(
+                        None
+                        if succeeded
+                        else (
+                            self._hermes_linear_activity_body(event, "error")
+                            or self._hermes_linear_error_activity_from_delivery(
+                                delivery
+                            )
+                        )
+                    ),
+                )
+                self._run_hermes_linear_failpoint(
+                    "after_finish_transition", delivery_key
+                )
         await self._end_webhook_session(event, event.source.chat_id)
 
     async def _end_webhook_session(
