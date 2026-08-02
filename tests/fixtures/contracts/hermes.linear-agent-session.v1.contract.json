@@ -6,6 +6,10 @@
   "canonicalBodySha256": "9a5cdd35dab1f9f93af0491ad905d5c9271f0ece54f47cfe2768063bdcb8e4b0",
   "maxBodyBytes": 65536,
   "maxPromptBytes": 16384,
+  "signedIngressPath": "/webhooks/hermes-linear-v1",
+  "receiptContract": "hermes_linear_v1",
+  "receiptStatuses": ["accepted", "duplicate"],
+  "receiptMaxBytes": 2048,
   "hmacTestTimestamp": "1785672000",
   "hmacTestSecret": "test-only-hermes-linear-secret",
   "hmacSha256": "3438c8ed9914c9d85e586d4fa98bc6b57e98189cf55bdf95f83ffcad210bb2f1"

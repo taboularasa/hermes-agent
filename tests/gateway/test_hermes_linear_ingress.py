@@ -14,9 +14,10 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 import pytest
 
-from gateway.config import PlatformConfig
+from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.hermes_linear_ingress import (
     HERMES_LINEAR_MAX_BODY_BYTES,
+    HERMES_LINEAR_RECEIPT_MAX_BYTES,
     HERMES_LINEAR_REQUEST_CONTRACT,
     HERMES_LINEAR_SIGNED_INGRESS_PATH,
     HERMES_LINEAR_SIGNED_ROUTE_NAME,
@@ -27,7 +28,7 @@ from gateway.platforms.hermes_linear_ingress import (
     verify_hermes_linear_request,
 )
 from gateway.platforms.base import ProcessingOutcome
-from gateway.session import build_session_key
+from gateway.session import SessionSource, SessionStore, build_session_key
 from gateway.platforms.webhook import WebhookAdapter, _INSECURE_NO_AUTH
 
 
@@ -125,6 +126,10 @@ def test_cross_repository_canonical_fixture_and_hmac_vector():
         now=float(contract["hmacTestTimestamp"]),
     )
     assert result.ok
+    assert contract["signedIngressPath"] == HERMES_LINEAR_SIGNED_INGRESS_PATH
+    assert contract["receiptContract"] == HERMES_LINEAR_REQUEST_CONTRACT
+    assert contract["receiptStatuses"] == ["accepted", "duplicate"]
+    assert contract["receiptMaxBytes"] == HERMES_LINEAR_RECEIPT_MAX_BYTES
 
     mutated = body.replace(b"authorized", b"unauthorized", 1)
     rejected = verify_hermes_linear_request(
@@ -297,7 +302,7 @@ def test_inbox_accepts_exact_body_and_records_conflict_without_overwrite(tmp_pat
             body_sha256=digest,
             raw_body=body,
             received_at=NOW,
-            route_name="linear-agent-session",
+            route_name=HERMES_LINEAR_SIGNED_ROUTE_NAME,
             profile=None,
         )
         == "accepted"
@@ -308,7 +313,7 @@ def test_inbox_accepts_exact_body_and_records_conflict_without_overwrite(tmp_pat
             body_sha256=digest,
             raw_body=body,
             received_at=NOW + 1,
-            route_name="linear-agent-session",
+            route_name=HERMES_LINEAR_SIGNED_ROUTE_NAME,
             profile=None,
         )
         == "duplicate"
@@ -319,7 +324,7 @@ def test_inbox_accepts_exact_body_and_records_conflict_without_overwrite(tmp_pat
             body_sha256="0" * 64,
             raw_body=b'{"changed":true}',
             received_at=NOW + 2,
-            route_name="linear-agent-session",
+            route_name=HERMES_LINEAR_SIGNED_ROUTE_NAME,
             profile=None,
         )
         == "conflict"
@@ -344,7 +349,7 @@ def test_inbox_allows_only_one_concurrent_accept(tmp_path):
             body_sha256=digest,
             raw_body=body,
             received_at=NOW + index,
-            route_name="linear-agent-session",
+            route_name=HERMES_LINEAR_SIGNED_ROUTE_NAME,
             profile=None,
         )
 
@@ -364,7 +369,7 @@ def test_inbox_competing_workers_and_expired_lease_recovery(tmp_path):
         body_sha256=digest,
         raw_body=body,
         received_at=NOW,
-        route_name="linear-agent-session",
+        route_name=HERMES_LINEAR_SIGNED_ROUTE_NAME,
         profile=None,
     )
 
@@ -397,7 +402,7 @@ def test_inbox_lifecycle_and_activity_rows_are_idempotent(tmp_path):
         body_sha256=hashlib.sha256(body).hexdigest(),
         raw_body=body,
         received_at=NOW,
-        route_name="linear-agent-session",
+        route_name=HERMES_LINEAR_SIGNED_ROUTE_NAME,
         profile=None,
     )
     row = inbox.lease_next(worker_id="worker-1", now=NOW, lease_seconds=60)
@@ -407,12 +412,17 @@ def test_inbox_lifecycle_and_activity_rows_are_idempotent(tmp_path):
         delivery_key="delivery-1",
         worker_id="worker-1",
         now=NOW,
-        activity_body=b'{"activity":"start"}',
     )
-    assert inbox.mark_started(
+    assert inbox.enqueue_start_activity(
         delivery_key="delivery-1",
         worker_id="worker-1",
         now=NOW + 1,
+        activity_body=b'{"activity":"start"}',
+    )
+    assert inbox.enqueue_start_activity(
+        delivery_key="delivery-1",
+        worker_id="worker-1",
+        now=NOW + 2,
         activity_body=b'{"activity":"different-must-not-overwrite"}',
     )
     assert inbox.activity_states("delivery-1") == {"action": "pending"}
@@ -431,8 +441,8 @@ def test_delivery_key_derives_stable_execution_and_session_identity():
     second = hermes_linear_execution_id("delivery-1")
     assert first == second
     assert first != hermes_linear_execution_id("delivery-2")
-    assert hermes_linear_session_chat_id("linear-agent-session", first) == (
-        f"webhook:linear-agent-session:hermes-linear-{first[:32]}"
+    assert hermes_linear_session_chat_id(HERMES_LINEAR_SIGNED_ROUTE_NAME, first) == (
+        f"webhook:{HERMES_LINEAR_SIGNED_ROUTE_NAME}:hermes-linear-{first[:32]}"
     )
 
 
@@ -463,6 +473,32 @@ def _adapter(tmp_path, *, secret: str = SECRET) -> WebhookAdapter:
     )
 
 
+class _RealSessionRunner:
+    def __init__(self, store: SessionStore):
+        self.session_store = store
+        self._session_db = store._db
+
+    def _session_key_for_source(self, source: SessionSource) -> str:
+        return self.session_store._generate_session_key(source)
+
+
+def _real_session_store(tmp_path, monkeypatch) -> SessionStore:
+    import hermes_state
+
+    session_db_type = hermes_state.SessionDB
+    monkeypatch.setattr(
+        hermes_state,
+        "SessionDB",
+        lambda: session_db_type(tmp_path / "state.db"),
+    )
+    config = GatewayConfig(
+        platforms={Platform.WEBHOOK: PlatformConfig(enabled=True)}
+    )
+    store = SessionStore(sessions_dir=tmp_path / "sessions", config=config)
+    assert store._db is not None
+    return store
+
+
 @pytest.mark.asyncio
 async def test_adapter_accepts_once_and_suppresses_replay(tmp_path):
     adapter = _adapter(tmp_path)
@@ -481,7 +517,14 @@ async def test_adapter_accepts_once_and_suppresses_replay(tmp_path):
         )
         assert response.status == 202
         accepted = await response.json()
-        assert accepted["event"] == "linear_agent_session"
+        assert accepted == {
+            "contract": HERMES_LINEAR_REQUEST_CONTRACT,
+            "schemaVersion": "hermes.linear-agent-session.v1",
+            "status": "accepted",
+            "deliveryKey": "linear:comment:comment-1",
+            "bodySha256": hashlib.sha256(body).hexdigest(),
+        }
+        assert len(await response.read()) <= HERMES_LINEAR_RECEIPT_MAX_BYTES
 
         replay = await client.post(
             HERMES_LINEAR_SIGNED_INGRESS_PATH,
@@ -489,11 +532,17 @@ async def test_adapter_accepts_once_and_suppresses_replay(tmp_path):
             headers=_headers(body, timestamp=timestamp),
         )
         assert replay.status == 200
-        assert (await replay.json())["status"] == "duplicate"
+        assert await replay.json() == {
+            "contract": HERMES_LINEAR_REQUEST_CONTRACT,
+            "schemaVersion": "hermes.linear-agent-session.v1",
+            "status": "duplicate",
+            "deliveryKey": "linear:comment:comment-1",
+            "bodySha256": hashlib.sha256(body).hexdigest(),
+        }
 
     await asyncio.sleep(0)
     handle_message.assert_not_awaited()
-    inbox = adapter._hermes_linear_delivery_inboxes["linear-agent-session"]
+    inbox = adapter._hermes_linear_delivery_inboxes[HERMES_LINEAR_SIGNED_ROUTE_NAME]
     stored = inbox.get("linear:comment:comment-1")
     assert stored is not None
     assert stored.state == "received"
@@ -501,10 +550,13 @@ async def test_adapter_accepts_once_and_suppresses_replay(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_adapter_returns_retryable_error_when_inbox_commit_fails(tmp_path):
+async def test_adapter_returns_retryable_error_when_inbox_commit_fails(
+    tmp_path, caplog
+):
     adapter = _adapter(tmp_path)
     inbox = adapter._hermes_linear_inbox_for_route(
-        "linear-agent-session", adapter._routes["linear-agent-session"]
+        HERMES_LINEAR_SIGNED_ROUTE_NAME,
+        adapter._routes[HERMES_LINEAR_SIGNED_ROUTE_NAME],
     )
     app = web.Application()
     app.router.add_post("/webhooks/{route_name}", adapter._handle_webhook)
@@ -521,7 +573,7 @@ async def test_adapter_returns_retryable_error_when_inbox_commit_fails(tmp_path)
         )
         async with TestClient(TestServer(app)) as client:
             response = await client.post(
-                "/webhooks/linear-agent-session",
+                HERMES_LINEAR_SIGNED_INGRESS_PATH,
                 data=body,
                 headers=_headers(body, timestamp=timestamp),
             )
@@ -530,6 +582,9 @@ async def test_adapter_returns_retryable_error_when_inbox_commit_fails(tmp_path)
     assert response.status == 503
     assert inbox.get("linear:comment:comment-1") is None
     assert "private body" not in response_text
+    assert "private body" not in caplog.text
+    assert "Sanitized human-authored follow-up" not in caplog.text
+    assert SECRET not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -569,17 +624,20 @@ async def test_legacy_loopback_and_signed_ingress_coexist_without_route_drift(tm
             headers=_headers(signed_body, timestamp=timestamp),
         )
         assert signed_new.status == 202
-        assert (await signed_new.json())["route"] == HERMES_LINEAR_SIGNED_ROUTE_NAME
+        assert (await signed_new.json())["status"] == "accepted"
 
     await asyncio.sleep(0)
-    assert handle_message.await_count == 2
+    assert handle_message.await_count == 1
     events = [call.args[0] for call in handle_message.await_args_list]
     assert events[0].source.chat_id.startswith("webhook:linear-agent-session:")
     assert events[0].raw_message == json.loads(legacy_body)
-    assert events[1].source.chat_id.startswith(
-        f"webhook:{HERMES_LINEAR_SIGNED_ROUTE_NAME}:"
-    )
-    assert events[1].raw_message == _envelope()
+    signed_inbox = adapter._hermes_linear_delivery_inboxes[
+        HERMES_LINEAR_SIGNED_ROUTE_NAME
+    ]
+    signed_row = signed_inbox.get("linear:comment:comment-1")
+    assert signed_row is not None
+    assert signed_row.state == "received"
+    assert signed_row.raw_body == signed_body
 
 
 @pytest.mark.asyncio
@@ -639,7 +697,8 @@ async def test_adapter_rejects_stale_request_without_scheduling(tmp_path):
 async def test_worker_schedules_committed_inbox_once_and_completes(tmp_path):
     adapter = _adapter(tmp_path)
     inbox = adapter._hermes_linear_inbox_for_route(
-        "linear-agent-session", adapter._routes["linear-agent-session"]
+        HERMES_LINEAR_SIGNED_ROUTE_NAME,
+        adapter._routes[HERMES_LINEAR_SIGNED_ROUTE_NAME],
     )
     body = _body()
     inbox.accept(
@@ -647,7 +706,7 @@ async def test_worker_schedules_committed_inbox_once_and_completes(tmp_path):
         body_sha256=hashlib.sha256(body).hexdigest(),
         raw_body=body,
         received_at=NOW,
-        route_name="linear-agent-session",
+        route_name=HERMES_LINEAR_SIGNED_ROUTE_NAME,
         profile=None,
     )
     row = inbox.lease_next(worker_id="worker-1", now=NOW, lease_seconds=60)
@@ -681,7 +740,8 @@ async def test_worker_schedules_committed_inbox_once_and_completes(tmp_path):
 async def test_worker_records_scheduling_rejection_without_replay(tmp_path):
     adapter = _adapter(tmp_path)
     inbox = adapter._hermes_linear_inbox_for_route(
-        "linear-agent-session", adapter._routes["linear-agent-session"]
+        HERMES_LINEAR_SIGNED_ROUTE_NAME,
+        adapter._routes[HERMES_LINEAR_SIGNED_ROUTE_NAME],
     )
     body = _body()
     inbox.accept(
@@ -689,7 +749,7 @@ async def test_worker_records_scheduling_rejection_without_replay(tmp_path):
         body_sha256=hashlib.sha256(body).hexdigest(),
         raw_body=body,
         received_at=NOW,
-        route_name="linear-agent-session",
+        route_name=HERMES_LINEAR_SIGNED_ROUTE_NAME,
         profile=None,
     )
     row = inbox.lease_next(worker_id="worker-1", now=NOW, lease_seconds=60)
@@ -705,10 +765,7 @@ async def test_worker_records_scheduling_rejection_without_replay(tmp_path):
     assert stored is not None
     assert stored.state == "failed"
     assert stored.reason_code == "scheduling_rejected"
-    assert inbox.activity_states(row.delivery_key) == {
-        "action": "pending",
-        "error": "pending",
-    }
+    assert inbox.activity_states(row.delivery_key) == {"error": "pending"}
 
 
 @pytest.mark.asyncio
@@ -726,7 +783,8 @@ async def test_worker_crash_boundaries_remain_recoverable(
 ):
     adapter = _adapter(tmp_path)
     inbox = adapter._hermes_linear_inbox_for_route(
-        "linear-agent-session", adapter._routes["linear-agent-session"]
+        HERMES_LINEAR_SIGNED_ROUTE_NAME,
+        adapter._routes[HERMES_LINEAR_SIGNED_ROUTE_NAME],
     )
     body = _body()
     inbox.accept(
@@ -734,7 +792,7 @@ async def test_worker_crash_boundaries_remain_recoverable(
         body_sha256=hashlib.sha256(body).hexdigest(),
         raw_body=body,
         received_at=NOW,
-        route_name="linear-agent-session",
+        route_name=HERMES_LINEAR_SIGNED_ROUTE_NAME,
         profile=None,
     )
     row = inbox.lease_next(worker_id="crashed", now=NOW, lease_seconds=10)
@@ -759,10 +817,15 @@ async def test_worker_crash_boundaries_remain_recoverable(
 
 
 @pytest.mark.asyncio
-async def test_crash_after_agent_schedule_never_blindly_starts_a_second_run(tmp_path):
+async def test_live_real_session_task_survives_worker_loss_without_second_run(
+    tmp_path, monkeypatch
+):
     adapter = _adapter(tmp_path)
+    store = _real_session_store(tmp_path, monkeypatch)
+    adapter.gateway_runner = _RealSessionRunner(store)
     inbox = adapter._hermes_linear_inbox_for_route(
-        "linear-agent-session", adapter._routes["linear-agent-session"]
+        HERMES_LINEAR_SIGNED_ROUTE_NAME,
+        adapter._routes[HERMES_LINEAR_SIGNED_ROUTE_NAME],
     )
     body = _body()
     inbox.accept(
@@ -770,69 +833,75 @@ async def test_crash_after_agent_schedule_never_blindly_starts_a_second_run(tmp_
         body_sha256=hashlib.sha256(body).hexdigest(),
         raw_body=body,
         received_at=NOW,
-        route_name="linear-agent-session",
+        route_name=HERMES_LINEAR_SIGNED_ROUTE_NAME,
         profile=None,
     )
-    row = inbox.lease_next(worker_id="crashed", now=NOW, lease_seconds=10)
+    clock = int(time.time())
+    row = inbox.lease_next(worker_id="crashed", now=clock, lease_seconds=10)
     assert row is not None
-    scheduled_task: asyncio.Task | None = None
+    run_started = asyncio.Event()
+    release_run = asyncio.Event()
+    effective_runs = 0
 
-    async def fake_handle(event):
-        nonlocal scheduled_task
-        session_key = build_session_key(
-            event.source,
-            group_sessions_per_user=True,
-            thread_sessions_per_user=False,
-        )
-        scheduled_task = asyncio.create_task(asyncio.sleep(60))
-        adapter._session_tasks[session_key] = scheduled_task
+    async def real_scheduler_handler(event):
+        nonlocal effective_runs
+        effective_runs += 1
+        store.get_or_create_session(event.source)
+        run_started.set()
+        await release_run.wait()
+        return "completed"
 
-    adapter.handle_message = fake_handle  # type: ignore[invalid-assignment]
-    adapter._hermes_linear_failpoint = lambda name, _key: (
-        (_ for _ in ()).throw(RuntimeError("simulated process loss"))
-        if name == "after_agent_schedule"
-        else None
+    adapter._message_handler = real_scheduler_handler
+    dispatch = asyncio.create_task(
+        adapter._dispatch_hermes_linear_inbox_row(inbox, row)
     )
-    with pytest.MonkeyPatch.context() as monkeypatch:
-        monkeypatch.setattr(time, "time", lambda: NOW)
-        with pytest.raises(RuntimeError, match="simulated process loss"):
-            await adapter._dispatch_hermes_linear_inbox_row(inbox, row)
+    await asyncio.wait_for(run_started.wait(), timeout=2)
+
+    scheduled_event = adapter._build_hermes_linear_event(row)
+    session_key = adapter._hermes_linear_session_key(scheduled_event)
+    scheduled_task = adapter._session_tasks.get(session_key)
+    assert scheduled_task is not None and not scheduled_task.done()
+    session_id = store.peek_session_id(
+        adapter.gateway_runner._session_key_for_source(scheduled_event.source)
+    )
+    assert session_id is not None
+    assert store._db.get_session(session_id) is not None
+
+    # Simulate loss of only the inbox delivery worker. shield() keeps the real
+    # gateway task alive, just as it would while another worker recovers the row.
+    dispatch.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await dispatch
 
     assert inbox.get(row.delivery_key).state == "started"  # type: ignore[union-attr]
-    assert scheduled_task is not None
-    scheduled_task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await scheduled_task
-
-    restarted = HermesLinearDeliveryInbox(tmp_path / "deliveries.db")
-    recovered = restarted.lease_next(
-        worker_id="restarted", now=NOW + 11, lease_seconds=10
+    recovered = inbox.lease_next(
+        worker_id="restarted", now=clock + 11, lease_seconds=10
     )
     assert recovered is not None
-    handle_message = AsyncMock()
-    adapter.handle_message = handle_message  # type: ignore[invalid-assignment]
-    adapter._hermes_linear_failpoint = None
-    with pytest.MonkeyPatch.context() as monkeypatch:
-        monkeypatch.setattr(time, "time", lambda: NOW + 11)
-        monkeypatch.setattr(
-            adapter,
-            "_hermes_linear_session_has_persisted_turn",
-            AsyncMock(return_value=True),
-        )
-        await adapter._dispatch_hermes_linear_inbox_row(restarted, recovered)
+    await adapter._dispatch_hermes_linear_inbox_row(inbox, recovered)
 
-    handle_message.assert_not_awaited()
-    stored = restarted.get(row.delivery_key)
+    stored = inbox.get(row.delivery_key)
     assert stored is not None
     assert stored.state == "failed"
-    assert stored.reason_code == "stalled_started_execution"
+    assert stored.reason_code == "stalled_started_active_task"
+    assert effective_runs == 1
+    assert inbox.activity_states(row.delivery_key) == {"action": "pending"}
+
+    release_run.set()
+    await asyncio.wait_for(scheduled_task, timeout=2)
+    await asyncio.sleep(0)
+    completed = inbox.get(row.delivery_key)
+    assert completed is not None
+    assert completed.state == "completed"
+    assert effective_runs == 1
 
 
 @pytest.mark.asyncio
 async def test_execution_failure_is_durable_and_queues_one_error_activity(tmp_path):
     adapter = _adapter(tmp_path)
     inbox = adapter._hermes_linear_inbox_for_route(
-        "linear-agent-session", adapter._routes["linear-agent-session"]
+        HERMES_LINEAR_SIGNED_ROUTE_NAME,
+        adapter._routes[HERMES_LINEAR_SIGNED_ROUTE_NAME],
     )
     body = _body()
     inbox.accept(
@@ -840,7 +909,7 @@ async def test_execution_failure_is_durable_and_queues_one_error_activity(tmp_pa
         body_sha256=hashlib.sha256(body).hexdigest(),
         raw_body=body,
         received_at=NOW,
-        route_name="linear-agent-session",
+        route_name=HERMES_LINEAR_SIGNED_ROUTE_NAME,
         profile=None,
     )
     row = inbox.lease_next(worker_id="worker-1", now=NOW, lease_seconds=60)
@@ -873,10 +942,108 @@ async def test_execution_failure_is_durable_and_queues_one_error_activity(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_started_crash_recovers_only_when_no_persisted_turn_exists(tmp_path):
+async def test_blocked_run_does_not_starve_second_delivery_or_start_activity(tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter._hermes_linear_max_concurrent_deliveries = 2
+    route = adapter._routes[HERMES_LINEAR_SIGNED_ROUTE_NAME]
+    route["linear_activity_url"] = (
+        "https://phoneitin.example.test/api/internal/linear/agent-session"
+    )
+    route["linear_activity_secret"] = "test-only-activity-secret"
+    inbox = adapter._hermes_linear_inbox_for_route(
+        HERMES_LINEAR_SIGNED_ROUTE_NAME, route
+    )
+    adapter._hermes_linear_delivery_inboxes = {
+        HERMES_LINEAR_SIGNED_ROUTE_NAME: inbox
+    }
+
+    first_release = asyncio.Event()
+    scheduled: list[str] = []
+    posted: list[str] = []
+    agent_tasks: list[asyncio.Task] = []
+
+    for index in (1, 2):
+        envelope = _envelope(f"linear:comment:comment-{index}")
+        envelope["prompt"]["id"] = f"prompt-{index}"
+        envelope["prompt"]["commentId"] = f"comment-{index}"
+        envelope["prompt"]["sourceCommentId"] = f"comment-{index}"
+        body = _body(envelope)
+        inbox.accept(
+            delivery_key=envelope["deliveryKey"],
+            body_sha256=hashlib.sha256(body).hexdigest(),
+            raw_body=body,
+            received_at=NOW + index,
+            route_name=HERMES_LINEAR_SIGNED_ROUTE_NAME,
+            profile=None,
+        )
+
+    async def fake_handle(event):
+        delivery_key = event.message_id
+        scheduled.append(delivery_key)
+        session_key = adapter._hermes_linear_session_key(event)
+
+        async def agent_run():
+            if delivery_key.endswith("comment-1"):
+                await first_release.wait()
+            await adapter.on_processing_complete(event, ProcessingOutcome.SUCCESS)
+
+        task = asyncio.create_task(agent_run())
+        agent_tasks.append(task)
+        adapter._session_tasks[session_key] = task
+
+    adapter.handle_message = fake_handle  # type: ignore[invalid-assignment]
+
+    def post_activity(_url, _secret, request_body):
+        payload = json.loads(request_body)
+        posted.append(payload["activity"]["contextualMetadata"]["deliveryKey"])
+        return "delivered", "activity_accepted"
+
+    adapter._post_hermes_linear_activity = post_activity  # type: ignore[method-assign]
+    adapter._hermes_linear_worker_stop.clear()
+    delivery_worker = asyncio.create_task(
+        adapter._run_hermes_linear_inbox_worker()
+    )
+    activity_worker = asyncio.create_task(
+        adapter._run_hermes_linear_activity_worker()
+    )
+    adapter._hermes_linear_worker_wake.set()
+
+    try:
+        async def both_started_and_reported() -> None:
+            while len(set(scheduled)) < 2 or len(set(posted)) < 2:
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(both_started_and_reported(), timeout=3)
+        assert not first_release.is_set()
+        assert set(scheduled) == {
+            "linear:comment:comment-1",
+            "linear:comment:comment-2",
+        }
+        assert set(posted) == set(scheduled)
+    finally:
+        first_release.set()
+        await asyncio.gather(*agent_tasks, return_exceptions=True)
+        adapter._hermes_linear_worker_stop.set()
+        adapter._hermes_linear_worker_wake.set()
+        adapter._hermes_linear_activity_worker_wake.set()
+        delivery_worker.cancel()
+        activity_worker.cancel()
+        await asyncio.gather(
+            delivery_worker, activity_worker, return_exceptions=True
+        )
+        for task in list(adapter._hermes_linear_delivery_tasks):
+            task.cancel()
+        await asyncio.gather(
+            *adapter._hermes_linear_delivery_tasks, return_exceptions=True
+        )
+
+
+@pytest.mark.asyncio
+async def test_uncertain_started_claim_fails_visible_instead_of_replaying(tmp_path):
     adapter = _adapter(tmp_path)
     inbox = adapter._hermes_linear_inbox_for_route(
-        "linear-agent-session", adapter._routes["linear-agent-session"]
+        HERMES_LINEAR_SIGNED_ROUTE_NAME,
+        adapter._routes[HERMES_LINEAR_SIGNED_ROUTE_NAME],
     )
     body = _body()
     inbox.accept(
@@ -884,7 +1051,7 @@ async def test_started_crash_recovers_only_when_no_persisted_turn_exists(tmp_pat
         body_sha256=hashlib.sha256(body).hexdigest(),
         raw_body=body,
         received_at=NOW,
-        route_name="linear-agent-session",
+        route_name=HERMES_LINEAR_SIGNED_ROUTE_NAME,
         profile=None,
     )
     first = inbox.lease_next(worker_id="crashed", now=NOW, lease_seconds=10)
@@ -899,28 +1066,30 @@ async def test_started_crash_recovers_only_when_no_persisted_turn_exists(tmp_pat
     assert recovered is not None
     assert recovered.state == "started"
 
-    with pytest.MonkeyPatch.context() as monkeypatch:
-        monkeypatch.setattr(time, "time", lambda: NOW + 11)
-        monkeypatch.setattr(
-            adapter,
-            "_hermes_linear_session_has_persisted_turn",
-            AsyncMock(return_value=False),
-        )
+    handle_message = AsyncMock()
+    adapter.handle_message = handle_message  # type: ignore[invalid-assignment]
+    with pytest.MonkeyPatch.context() as clock:
+        clock.setattr(time, "time", lambda: NOW + 11)
         await adapter._dispatch_hermes_linear_inbox_row(inbox, recovered)
 
+    handle_message.assert_not_awaited()
     stored = inbox.get(first.delivery_key)
     assert stored is not None
-    assert stored.state == "received"
-    assert stored.reason_code == "unstarted_lease_recovered"
+    assert stored.state == "failed"
+    assert stored.reason_code == "stalled_started_probe_unavailable"
+    assert inbox.activity_states(first.delivery_key) == {}
 
 
 @pytest.mark.asyncio
 async def test_started_crash_with_persisted_turn_fails_visible_instead_of_double_run(
-    tmp_path,
+    tmp_path, monkeypatch
 ):
     adapter = _adapter(tmp_path)
+    store = _real_session_store(tmp_path, monkeypatch)
+    adapter.gateway_runner = _RealSessionRunner(store)
     inbox = adapter._hermes_linear_inbox_for_route(
-        "linear-agent-session", adapter._routes["linear-agent-session"]
+        HERMES_LINEAR_SIGNED_ROUTE_NAME,
+        adapter._routes[HERMES_LINEAR_SIGNED_ROUTE_NAME],
     )
     body = _body()
     inbox.accept(
@@ -928,7 +1097,7 @@ async def test_started_crash_with_persisted_turn_fails_visible_instead_of_double
         body_sha256=hashlib.sha256(body).hexdigest(),
         raw_body=body,
         received_at=NOW,
-        route_name="linear-agent-session",
+        route_name=HERMES_LINEAR_SIGNED_ROUTE_NAME,
         profile=None,
     )
     first = inbox.lease_next(worker_id="crashed", now=NOW, lease_seconds=10)
@@ -941,41 +1110,50 @@ async def test_started_crash_with_persisted_turn_fails_visible_instead_of_double
     )
     recovered = inbox.lease_next(worker_id="restarted", now=NOW + 11, lease_seconds=10)
     assert recovered is not None
-    handle_message = AsyncMock()
-    adapter.handle_message = handle_message  # type: ignore[invalid-assignment]
+    event = adapter._build_hermes_linear_event(recovered)
+    persisted = store.get_or_create_session(event.source)
+    assert store.peek_session_id(
+        adapter.gateway_runner._session_key_for_source(event.source)
+    ) == persisted.session_id
+    assert store._db.get_session(persisted.session_id) is not None
 
-    with pytest.MonkeyPatch.context() as monkeypatch:
-        monkeypatch.setattr(time, "time", lambda: NOW + 11)
-        monkeypatch.setattr(
-            adapter,
-            "_hermes_linear_session_has_persisted_turn",
-            AsyncMock(return_value=True),
-        )
-        await adapter._dispatch_hermes_linear_inbox_row(inbox, recovered)
+    # Replace the adapter instance while retaining the real persisted session
+    # store and SQLite inbox, matching gateway restart recovery boundaries.
+    restarted_adapter = _adapter(tmp_path)
+    restarted_adapter.gateway_runner = _RealSessionRunner(store)
+    handle_message = AsyncMock()
+    restarted_adapter.handle_message = handle_message  # type: ignore[invalid-assignment]
+
+    with pytest.MonkeyPatch.context() as clock:
+        clock.setattr(time, "time", lambda: NOW + 11)
+        await restarted_adapter._dispatch_hermes_linear_inbox_row(inbox, recovered)
 
     handle_message.assert_not_awaited()
     stored = inbox.get(first.delivery_key)
     assert stored is not None
     assert stored.state == "failed"
-    assert stored.reason_code == "stalled_started_execution"
+    assert stored.reason_code == "stalled_started_persisted_session"
+    assert inbox.activity_states(first.delivery_key) == {"action": "pending"}
 
 
 @pytest.mark.asyncio
 async def test_activity_retry_is_idempotent_and_does_not_duplicate_rows(tmp_path):
     adapter = _adapter(tmp_path)
-    route = adapter._routes["linear-agent-session"]
+    route = adapter._routes[HERMES_LINEAR_SIGNED_ROUTE_NAME]
     route["linear_activity_url"] = (
         "https://phoneitin.example.test/api/internal/linear/agent-session"
     )
     route["linear_activity_secret"] = "test-only-activity-secret"
-    inbox = adapter._hermes_linear_inbox_for_route("linear-agent-session", route)
+    inbox = adapter._hermes_linear_inbox_for_route(
+        HERMES_LINEAR_SIGNED_ROUTE_NAME, route
+    )
     body = _body()
     inbox.accept(
         delivery_key="linear:comment:comment-1",
         body_sha256=hashlib.sha256(body).hexdigest(),
         raw_body=body,
         received_at=NOW,
-        route_name="linear-agent-session",
+        route_name=HERMES_LINEAR_SIGNED_ROUTE_NAME,
         profile=None,
     )
     row = inbox.lease_next(worker_id="worker-1", now=NOW, lease_seconds=60)
@@ -983,6 +1161,11 @@ async def test_activity_retry_is_idempotent_and_does_not_duplicate_rows(tmp_path
     inbox.mark_scheduled(row.delivery_key, "worker-1", NOW)
     event = adapter._build_hermes_linear_event(row)
     inbox.mark_started(
+        delivery_key=row.delivery_key,
+        worker_id="worker-1",
+        now=NOW,
+    )
+    inbox.enqueue_start_activity(
         delivery_key=row.delivery_key,
         worker_id="worker-1",
         now=NOW,
@@ -1025,13 +1208,13 @@ async def test_after_commit_failpoint_leaves_recoverable_row(tmp_path):
 
     async with TestClient(TestServer(app)) as client:
         response = await client.post(
-            "/webhooks/linear-agent-session",
+            HERMES_LINEAR_SIGNED_INGRESS_PATH,
             data=body,
             headers=_headers(body, timestamp=timestamp),
         )
         assert response.status == 500
 
-    inbox = adapter._hermes_linear_delivery_inboxes["linear-agent-session"]
+    inbox = adapter._hermes_linear_delivery_inboxes[HERMES_LINEAR_SIGNED_ROUTE_NAME]
     stored = inbox.get("linear:comment:comment-1")
     assert stored is not None
     assert stored.state == "received"
@@ -1041,7 +1224,8 @@ async def test_after_commit_failpoint_leaves_recoverable_row(tmp_path):
 async def test_health_exposes_bounded_inbox_states_without_bodies(tmp_path):
     adapter = _adapter(tmp_path)
     inbox = adapter._hermes_linear_inbox_for_route(
-        "linear-agent-session", adapter._routes["linear-agent-session"]
+        HERMES_LINEAR_SIGNED_ROUTE_NAME,
+        adapter._routes[HERMES_LINEAR_SIGNED_ROUTE_NAME],
     )
     body = _body()
     inbox.accept(
@@ -1049,12 +1233,14 @@ async def test_health_exposes_bounded_inbox_states_without_bodies(tmp_path):
         body_sha256=hashlib.sha256(body).hexdigest(),
         raw_body=body,
         received_at=NOW,
-        route_name="linear-agent-session",
+        route_name=HERMES_LINEAR_SIGNED_ROUTE_NAME,
         profile=None,
     )
 
     response = await adapter._handle_health(None)  # type: ignore[arg-type]
     payload = json.loads(response.text)
-    assert payload["hermes_linear_inbox"] == {"linear-agent-session": {"received": 1}}
+    assert payload["hermes_linear_inbox"] == {
+        HERMES_LINEAR_SIGNED_ROUTE_NAME: {"received": 1}
+    }
     assert "Sanitized human-authored follow-up" not in response.text
     assert "raw_body" not in response.text

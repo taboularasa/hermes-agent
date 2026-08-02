@@ -18,6 +18,7 @@ HERMES_LINEAR_SIGNED_ROUTE_NAME = "hermes-linear-v1"
 HERMES_LINEAR_SIGNED_INGRESS_PATH = f"/webhooks/{HERMES_LINEAR_SIGNED_ROUTE_NAME}"
 HERMES_LINEAR_MAX_BODY_BYTES = 65_536
 HERMES_LINEAR_MAX_PROMPT_BYTES = 16_384
+HERMES_LINEAR_RECEIPT_MAX_BYTES = 2_048
 HERMES_LINEAR_FRESHNESS_SECONDS = 300
 
 _DELIVERY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9:._-]{1,256}$")
@@ -43,6 +44,22 @@ class HermesLinearVerification:
     payload: dict[str, Any] | None = None
     delivery_key: str | None = None
     body_sha256: str | None = None
+
+
+def hermes_linear_acceptance_receipt(
+    *,
+    status: Literal["accepted", "duplicate"],
+    delivery_key: str,
+    body_sha256: str,
+) -> dict[str, str]:
+    """Return the exact bounded receipt Phoneitin validates after inbox commit."""
+    return {
+        "contract": HERMES_LINEAR_REQUEST_CONTRACT,
+        "schemaVersion": HERMES_LINEAR_SCHEMA_VERSION,
+        "status": status,
+        "deliveryKey": delivery_key,
+        "bodySha256": body_sha256,
+    }
 
 
 def _header(headers: Mapping[str, str], name: str) -> str:
@@ -579,10 +596,8 @@ class HermesLinearDeliveryInbox:
         delivery_key: str,
         worker_id: str,
         now: int,
-        activity_body: bytes | None = None,
     ) -> bool:
         with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(
                 """
                 UPDATE hermes_linear_deliveries
@@ -593,16 +608,43 @@ class HermesLinearDeliveryInbox:
                 """,
                 (now, now, delivery_key, worker_id),
             )
-            if cursor.rowcount == 1 and activity_body is not None:
-                connection.execute(
-                    """
-                    INSERT OR IGNORE INTO hermes_linear_activities (
-                        delivery_key, kind, request_body, next_attempt_at, created_at
-                    ) VALUES (?, 'action', ?, ?, ?)
-                    """,
-                    (delivery_key, activity_body, now, now),
-                )
         return cursor.rowcount == 1
+
+    def enqueue_start_activity(
+        self,
+        *,
+        delivery_key: str,
+        worker_id: str,
+        now: int,
+        activity_body: bytes,
+    ) -> bool:
+        """Queue the idempotent start activity only after scheduler acceptance."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT 1 FROM hermes_linear_deliveries
+                 WHERE delivery_key = ?
+                   AND (
+                     (lease_owner = ? AND state = 'started')
+                     OR state IN ('completed', 'failed')
+                   )
+                """,
+                (delivery_key, worker_id),
+            ).fetchone()
+            if row is None:
+                return False
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO hermes_linear_activities (
+                    delivery_key, kind, request_body, next_attempt_at, created_at
+                ) VALUES (?, 'action', ?, ?, ?)
+                """,
+                (delivery_key, activity_body, now, now),
+            )
+        return cursor.rowcount == 1 or self.activity_states(delivery_key).get(
+            "action"
+        ) is not None
 
     def heartbeat(
         self, delivery_key: str, worker_id: str, now: int, lease_seconds: int
@@ -638,7 +680,7 @@ class HermesLinearDeliveryInbox:
                  WHERE delivery_key = ?
                    AND (
                      state IN ('scheduled', 'started')
-                     OR (state = 'failed' AND reason_code = 'stalled_started_execution')
+                     OR (state = 'failed' AND reason_code LIKE 'stalled_started_%')
                    )
                 """,
                 (outcome, now, now, reason_code, delivery_key),
@@ -654,31 +696,44 @@ class HermesLinearDeliveryInbox:
                 )
         return cursor.rowcount == 1
 
-    def recover_unstarted(self, delivery_key: str, worker_id: str, now: int) -> bool:
-        """Return an expired started lease to received only after a no-run probe."""
-        with self._connect() as connection:
-            cursor = connection.execute(
-                """
-                UPDATE hermes_linear_deliveries
-                   SET state = 'received', reason_code = 'unstarted_lease_recovered',
-                       lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
-                 WHERE delivery_key = ? AND lease_owner = ? AND state = 'started'
-                """,
-                (now, delivery_key, worker_id),
-            )
-        return cursor.rowcount == 1
+    def mark_stalled_started(
+        self,
+        *,
+        delivery_key: str,
+        worker_id: str,
+        now: int,
+        scheduler_evidence: str,
+        activity_body: bytes | None = None,
+    ) -> bool:
+        """Fail an uncertain started claim visibly instead of replaying it.
 
-    def mark_stalled_started(self, delivery_key: str, worker_id: str, now: int) -> bool:
+        Once the start transition commits, a crash may have happened on either
+        side of task creation. The generic gateway scheduler does not expose a
+        cross-process exactly-once claim, so automatic replay would risk a
+        second effective run. Persist the bounded evidence reason and let an
+        already-running task complete the row through ``finish``.
+        """
+        reason_code = f"stalled_started_{scheduler_evidence}"
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(
                 """
                 UPDATE hermes_linear_deliveries
-                   SET state = 'failed', reason_code = 'stalled_started_execution',
+                   SET state = 'failed', reason_code = ?,
                        lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
                  WHERE delivery_key = ? AND lease_owner = ? AND state = 'started'
                 """,
-                (now, delivery_key, worker_id),
+                (reason_code, now, delivery_key, worker_id),
             )
+            if cursor.rowcount == 1 and activity_body is not None:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO hermes_linear_activities (
+                        delivery_key, kind, request_body, next_attempt_at, created_at
+                    ) VALUES (?, 'action', ?, ?, ?)
+                    """,
+                    (delivery_key, activity_body, now, now),
+                )
         return cursor.rowcount == 1
 
     def state_counts(self) -> dict[str, int]:
