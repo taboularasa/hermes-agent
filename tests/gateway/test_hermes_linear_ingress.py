@@ -16,6 +16,8 @@ from gateway.config import PlatformConfig
 from gateway.platforms.hermes_linear_ingress import (
     HERMES_LINEAR_MAX_BODY_BYTES,
     HERMES_LINEAR_REQUEST_CONTRACT,
+    HERMES_LINEAR_SIGNED_INGRESS_PATH,
+    HERMES_LINEAR_SIGNED_ROUTE_NAME,
     HermesLinearDeliveryLedger,
     verify_hermes_linear_request,
 )
@@ -215,13 +217,18 @@ def _adapter(tmp_path, *, secret: str = SECRET) -> WebhookAdapter:
                 "port": 0,
                 "routes": {
                     "linear-agent-session": {
+                        "secret": _INSECURE_NO_AUTH,
+                        "prompt": "{__raw__}",
+                        "deliver": "log",
+                    },
+                    HERMES_LINEAR_SIGNED_ROUTE_NAME: {
                         "secret": secret,
                         "request_contract": HERMES_LINEAR_REQUEST_CONTRACT,
                         "events": ["linear_agent_session"],
                         "prompt": "{__raw__}",
                         "deliver": "log",
                         "delivery_ledger_path": str(tmp_path / "deliveries.db"),
-                    }
+                    },
                 },
             },
         )
@@ -240,7 +247,7 @@ async def test_adapter_accepts_once_and_suppresses_replay(tmp_path):
 
     async with TestClient(TestServer(app)) as client:
         response = await client.post(
-            "/webhooks/linear-agent-session",
+            HERMES_LINEAR_SIGNED_INGRESS_PATH,
             data=body,
             headers=_headers(body, timestamp=timestamp),
         )
@@ -249,7 +256,7 @@ async def test_adapter_accepts_once_and_suppresses_replay(tmp_path):
         assert accepted["event"] == "linear_agent_session"
 
         replay = await client.post(
-            "/webhooks/linear-agent-session",
+            HERMES_LINEAR_SIGNED_INGRESS_PATH,
             data=body,
             headers=_headers(body, timestamp=timestamp),
         )
@@ -258,6 +265,79 @@ async def test_adapter_accepts_once_and_suppresses_replay(tmp_path):
 
     await asyncio.sleep(0)
     handle_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_legacy_loopback_and_signed_ingress_coexist_without_route_drift(tmp_path):
+    adapter = _adapter(tmp_path)
+    handle_message = AsyncMock()
+    adapter.handle_message = handle_message  # type: ignore[invalid-assignment]
+    app = web.Application()
+    app.router.add_post("/webhooks/{route_name}", adapter._handle_webhook)
+    legacy_body = json.dumps(
+        {
+            "type": "AgentSessionEvent",
+            "agentSession": {"id": "legacy-session-1"},
+            "prompt": {"body": "Sanitized legacy loopback fixture"},
+        }
+    ).encode()
+    signed_body = _body()
+    timestamp = int(time.time())
+
+    async with TestClient(TestServer(app)) as client:
+        legacy = await client.post(
+            "/webhooks/linear-agent-session",
+            data=legacy_body,
+        )
+        assert legacy.status == 202
+        assert (await legacy.json())["route"] == "linear-agent-session"
+
+        unsigned_new = await client.post(
+            HERMES_LINEAR_SIGNED_INGRESS_PATH,
+            data=signed_body,
+        )
+        assert unsigned_new.status == 401
+
+        signed_new = await client.post(
+            HERMES_LINEAR_SIGNED_INGRESS_PATH,
+            data=signed_body,
+            headers=_headers(signed_body, timestamp=timestamp),
+        )
+        assert signed_new.status == 202
+        assert (await signed_new.json())["route"] == HERMES_LINEAR_SIGNED_ROUTE_NAME
+
+    await asyncio.sleep(0)
+    assert handle_message.await_count == 2
+    events = [call.args[0] for call in handle_message.await_args_list]
+    assert events[0].source.chat_id.startswith("webhook:linear-agent-session:")
+    assert events[0].raw_message == json.loads(legacy_body)
+    assert events[1].source.chat_id.startswith(
+        f"webhook:{HERMES_LINEAR_SIGNED_ROUTE_NAME}:"
+    )
+    assert events[1].raw_message == _envelope()
+
+
+@pytest.mark.asyncio
+async def test_signed_contract_cannot_replace_the_legacy_route(tmp_path):
+    adapter = WebhookAdapter(
+        PlatformConfig(
+            enabled=True,
+            extra={
+                "host": "127.0.0.1",
+                "port": 0,
+                "routes": {
+                    "linear-agent-session": {
+                        "secret": SECRET,
+                        "request_contract": HERMES_LINEAR_REQUEST_CONTRACT,
+                        "prompt": "{__raw__}",
+                    }
+                },
+            },
+        )
+    )
+
+    with pytest.raises(ValueError, match="restricted to the static"):
+        await adapter.connect()
 
 
 @pytest.mark.asyncio
@@ -281,7 +361,7 @@ async def test_adapter_rejects_stale_request_without_scheduling(tmp_path):
         monkeypatch.setattr(time, "time", lambda: NOW)
         async with TestClient(TestServer(app)) as client:
             response = await client.post(
-                "/webhooks/linear-agent-session",
+                HERMES_LINEAR_SIGNED_INGRESS_PATH,
                 data=body,
                 headers=_headers(body, timestamp=NOW - 301),
             )

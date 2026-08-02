@@ -61,6 +61,7 @@ from gateway.platforms.base import (
 )
 from gateway.platforms.hermes_linear_ingress import (
     HERMES_LINEAR_REQUEST_CONTRACT,
+    HERMES_LINEAR_SIGNED_ROUTE_NAME,
     HermesLinearDeliveryLedger,
     default_hermes_linear_ledger_path,
     verify_hermes_linear_request,
@@ -200,6 +201,15 @@ class WebhookAdapter(BasePlatformAdapter):
                 raise ValueError(
                     f"[webhook] Route '{name}' has unsupported request_contract "
                     f"'{request_contract}'."
+                )
+            if (
+                request_contract == HERMES_LINEAR_REQUEST_CONTRACT
+                and name != HERMES_LINEAR_SIGNED_ROUTE_NAME
+            ):
+                raise ValueError(
+                    f"[webhook] Hermes Linear request contract is restricted to "
+                    f"the static '{HERMES_LINEAR_SIGNED_ROUTE_NAME}' route, not "
+                    f"'{name}'."
                 )
             if (
                 request_contract == HERMES_LINEAR_REQUEST_CONTRACT
