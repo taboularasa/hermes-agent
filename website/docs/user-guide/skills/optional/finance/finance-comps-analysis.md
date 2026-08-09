@@ -1,14 +1,14 @@
 ---
-title: "Comps Analysis"
+title: "Comps Analysis — Build comparable-company valuation workbooks in Excel"
 sidebar_label: "Comps Analysis"
-description: "Build comparable company analysis in Excel — operating metrics, valuation multiples, statistical benchmarking vs peer sets"
+description: "Build comparable-company valuation workbooks in Excel"
 ---
 
 {/* This page is auto-generated from the skill's SKILL.md by website/scripts/generate-skill-docs.py. Edit the source SKILL.md, not this page. */}
 
 # Comps Analysis
 
-Build comparable company analysis in Excel — operating metrics, valuation multiples, statistical benchmarking vs peer sets. Pairs with excel-author. Use for public-company valuation, IPO pricing, sector benchmarking, or outlier detection.
+Build comparable-company valuation workbooks in Excel.
 
 ## Skill metadata
 
@@ -377,7 +377,7 @@ If you have more than 15 metrics, you're probably including noise. Edit ruthless
 
 ### Sanity Checks
 - **Margin test**: Gross margin > EBITDA margin > Net margin (always true by definition)
-- **Multiple reasonableness**:
+- **Multiple reasonableness**: 
   - EV/Revenue: typically 0.5-20x (varies widely by industry)
   - EV/EBITDA: typically 8-25x (fairly consistent across industries)
   - P/E: typically 10-50x (depends on growth rate)
@@ -562,18 +562,18 @@ Add if relevant: Asset Turnover, Inventory Turns, Backlog
 ## Section 10: Red Flags & Warning Signs
 
 ### Data Quality Issues
-🚩 Inconsistent time periods (mixing quarterly and annual)
-🚩 Missing data without explanation
+🚩 Inconsistent time periods (mixing quarterly and annual)  
+🚩 Missing data without explanation  
 🚩 Significant differences between data sources (>10% variance)
 
 ### Valuation Red Flags
-🚩 Negative EBITDA companies being valued on EBITDA multiples (use revenue multiples instead)
-🚩 P/E ratios >100x without hypergrowth story
+🚩 Negative EBITDA companies being valued on EBITDA multiples (use revenue multiples instead)  
+🚩 P/E ratios >100x without hypergrowth story  
 🚩 Margins that don't make sense for the industry
 
 ### Comparability Issues
-🚩 Different fiscal year ends (causes timing problems)
-🚩ixing pure-play and conglomerates
+🚩 Different fiscal year ends (causes timing problems)  
+🚩ixing pure-play and conglomerates  
 🚩 Materially different business models labeled as "comps"
 
 **When in doubt, exclude the company.** Better to have 3 perfect comps than 6 questionable ones.

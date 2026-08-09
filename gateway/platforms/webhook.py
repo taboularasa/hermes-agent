@@ -11,8 +11,7 @@ Each route defines:
   - secret: HMAC secret for signature validation (REQUIRED)
   - prompt: template string formatted with the webhook payload
   - skills: optional list of skills to load for the agent
-  - deliver: where to send the response (linear_comment, github_comment,
-    telegram, etc.)
+  - deliver: where to send the response (github_comment, telegram, etc.)
   - deliver_extra: additional delivery config (repo, pr_number, chat_id)
   - deliver_only: if true, skip the agent — the rendered prompt IS the
     message that gets delivered.  Use for external push notifications
@@ -24,6 +23,10 @@ Security:
   - Rate limiting per route (fixed-window, configurable)
   - Idempotency cache prevents duplicate agent runs on webhook retries
   - Body size limits checked before reading payload
+  - Generic HMAC supports a V2 signature (X-Webhook-Signature-V2) that
+    binds a timestamp into the signed data for replay protection; the
+    legacy body-only V1 (X-Webhook-Signature) is deprecated but still
+    accepted with a warning, since it has no replay protection
   - Set secret to "INSECURE_NO_AUTH" to skip validation (testing only)
 """
 
@@ -34,14 +37,12 @@ import hashlib
 import hmac
 import json
 import logging
-import os
 import re
 import subprocess
+import sys
 import time
 from collections import deque
-from typing import Any, Deque, Dict, List, Optional
-import urllib.error
-import urllib.request
+from typing import Any, Deque, Dict, Optional
 
 try:
     from aiohttp import web
@@ -58,8 +59,42 @@ from gateway.platforms.base import (
     MessageType,
     SendResult,
 )
+from gateway.platforms.webhook_filters import (
+    DEFAULT_SCRIPT_TIMEOUT_SECONDS,
+    WebhookRouteProcessor,
+)
+from gateway.response_filters import is_autonomous_silence_response
 
 logger = logging.getLogger(__name__)
+
+
+def _is_webhook_silence_response(content: Any) -> bool:
+    """Whether an agent response means "deliberately say nothing".
+
+    Webhook routes are autonomous background lanes: a subscription prompt tells
+    the agent to answer with ``[SILENT]`` when a tick produced nothing worth a
+    human's attention (a duplicate inbound, a stand-down because a sibling lane
+    already replied, a routine close).  Nobody is waiting on the other end, so
+    there is no reader for whom a "nothing happened" message is useful.
+
+    The reason this is the loose autonomous rule rather than the live gateway's
+    is what the two lanes optimise for.  In an interactive chat, swallowing a
+    real answer because it happens to open with a marker is much worse than
+    showing a stray marker, so ``is_intentional_silence_response`` demands the
+    response be EXACTLY a marker.  A webhook run has the opposite payoff: the
+    cost of a leaked non-story is a pointless notification on every tick, and
+    models reliably add a sentence explaining why they stayed quiet — which
+    under the strict rule flips the whole thing back to "deliver".  That is not
+    a hypothetical: it is why a Helper support lane kept messaging its owner to
+    report that it had nothing to report.
+
+    So use the shared autonomous-lane matcher (also used by cron), which treats
+    a marker on its own first or last line as silence while still delivering
+    prose that merely mentions one mid-sentence.  Sharing the function keeps
+    the two autonomous lanes from drifting apart, and keeps the interactive
+    path untouched.
+    """
+    return is_autonomous_silence_response(content)
 
 # Sentinel returned by _resolve_request_profile when a /p/<profile>/ prefix
 # names a profile this gateway does not serve (→ 404). Distinct from None
@@ -73,12 +108,29 @@ _BUILTIN_DELIVER_PLATFORMS = {
     "qqbot", "yuanbao",
 }
 
-DEFAULT_HOST = "0.0.0.0"
+# Default bind host. ``None`` tells aiohttp/asyncio's ``create_server`` to bind
+# BOTH address families (IPv4 + IPv6) — the portable dual-stack default.
+#
+# Why not "0.0.0.0" (the old default) or "::"?
+#   - "0.0.0.0" binds IPv4 ONLY. On IPv6-only private networks — notably Fly.io
+#     6PN, where an agent's ``<app>.internal`` name resolves to an ``fdaa:…``
+#     IPv6 address — an IPv4-only listener is unreachable. That is exactly why
+#     hosted-agent webhook routes were publicly unreachable: the edge router
+#     reverse-proxies to ``<app>.internal:8644`` over 6PN (IPv6) but the adapter
+#     was listening on 0.0.0.0 (v4 only) → connection refused.
+#   - "::" is NOT a safe fix: on hosts where the kernel sets IPV6_V6ONLY=1
+#     (verified on Fly machines), binding "::" yields an IPv6-ONLY socket, which
+#     then breaks the IPv4 loopback health check (``curl 127.0.0.1:8644/health``)
+#     and the AF_INET port-conflict probe in connect().
+#   - ``None`` asks the event loop to create a listening socket per resolved
+#     family, so both 127.0.0.1 (v4) and the 6PN fdaa (v6) are served regardless
+#     of the bindv6only sysctl. Users can still pin a specific host via
+#     ``platforms.webhook.extra.host``.
+DEFAULT_HOST = None
 DEFAULT_PORT = 8644
 _INSECURE_NO_AUTH = "INSECURE_NO_AUTH"
 _DYNAMIC_ROUTES_FILENAME = "webhook_subscriptions.json"
 _RATE_WINDOW_SECONDS = 60.0
-
 # Hostnames/IP literals that only serve connections originating on the same
 # machine. Anything else is treated as a public bind for safety-rail purposes.
 _LOOPBACK_HOSTS = frozenset({
@@ -90,7 +142,7 @@ _LOOPBACK_HOSTS = frozenset({
 })
 
 
-def _is_loopback_host(host: str) -> bool:
+def _is_loopback_host(host: Optional[str]) -> bool:
     """True when `host` binds only to the local machine.
 
     Covers IPv4 loopback, the standard `localhost` alias, IPv6 loopback in
@@ -103,6 +155,20 @@ def _is_loopback_host(host: str) -> bool:
     return host.strip().lower() in _LOOPBACK_HOSTS
 
 
+def _hmac_str_equal(provided: str, expected: str) -> bool:
+    """Timing-safe equality for two ``str`` values, tolerant of non-ASCII input.
+
+    ``hmac.compare_digest`` raises ``TypeError`` when given a ``str`` that
+    contains non-ASCII characters. The ``provided`` value here is an
+    attacker-controlled signature/token header on a public, unauthenticated
+    webhook endpoint, so a single non-ASCII byte would otherwise raise out of
+    the request handler and return a 500 instead of rejecting the request.
+    Comparing as UTF-8 bytes keeps the constant-time guarantee while making a
+    hostile header fail closed with a clean rejection.
+    """
+    return hmac.compare_digest(provided.encode(), expected.encode())
+
+
 def check_webhook_requirements() -> bool:
     """Check if webhook adapter dependencies are available."""
     return AIOHTTP_AVAILABLE
@@ -111,11 +177,19 @@ def check_webhook_requirements() -> bool:
 class WebhookAdapter(BasePlatformAdapter):
     """Generic webhook receiver that triggers agent runs from HTTP POSTs."""
 
-    SUPPORTS_MESSAGE_EDITING = False
+    # No human is present to answer a "session restored — what next?" prompt:
+    # webhook runs are event-triggered.  The startup auto-resume turn must
+    # instruct the model to FINISH the interrupted work instead of emitting an
+    # interactive acknowledgement that abandons the task (#57056).
+    interactive_resume: bool = False
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.WEBHOOK)
-        self._host: str = config.extra.get("host", DEFAULT_HOST)
+        # ``host`` may be None (dual-stack default) or a user-pinned string.
+        # A config value of empty string / null is normalised to None so it
+        # also means "bind all families" rather than an invalid "" host.
+        _cfg_host = config.extra.get("host", DEFAULT_HOST)
+        self._host: Optional[str] = _cfg_host or None
         self._port: int = int(config.extra.get("port", DEFAULT_PORT))
         self._global_secret: str = config.extra.get("secret", "")
         self._static_routes: Dict[str, dict] = config.extra.get("routes", {})
@@ -123,6 +197,9 @@ class WebhookAdapter(BasePlatformAdapter):
         self._dynamic_routes_mtime: float = 0.0
         self._routes: Dict[str, dict] = dict(self._static_routes)
         self._runner = None
+        # Routes already warned about legacy V1 body-only signatures
+        # (once-per-route so a busy sender doesn't spam the log).
+        self._v1_signature_warned: set[str] = set()
 
         # Delivery info keyed by session chat_id.
         #
@@ -154,6 +231,15 @@ class WebhookAdapter(BasePlatformAdapter):
         self._max_body_bytes: int = int(
             config.extra.get("max_body_bytes", 1_048_576)
         )  # 1MB
+        self._script_timeout_seconds: int = int(
+            config.extra.get(
+                "script_timeout_seconds",
+                DEFAULT_SCRIPT_TIMEOUT_SECONDS,
+            )
+        )
+        self._route_processor = WebhookRouteProcessor(
+            script_timeout_seconds=self._script_timeout_seconds
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -197,7 +283,10 @@ class WebhookAdapter(BasePlatformAdapter):
                         f"real target (telegram, discord, slack, github_comment, etc.)."
                     )
 
-        app = web.Application()
+        # client_max_size makes aiohttp enforce the cap on every read path,
+        # including Transfer-Encoding: chunked bodies that carry no
+        # Content-Length and would otherwise bypass the header check below.
+        app = web.Application(client_max_size=self._max_body_bytes)
         app.router.add_get("/health", self._handle_health)
         app.router.add_post("/webhooks/{route_name}", self._handle_webhook)
         # Multi-profile multiplexing: a /p/<profile>/webhooks/<route> prefix
@@ -209,27 +298,46 @@ class WebhookAdapter(BasePlatformAdapter):
             "/p/{profile}/webhooks/{route_name}", self._handle_webhook
         )
 
-        # Port conflict detection — fail fast if port is already in use
-        import socket as _socket
-        try:
-            with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as _s:
-                _s.settimeout(1)
-                _s.connect(('127.0.0.1', self._port))
-            logger.error('[webhook] Port %d already in use. Set a different port in config.yaml: platforms.webhook.port', self._port)
-            return False
-        except (ConnectionRefusedError, OSError):
-            pass  # port is free
-
         self._runner = web.AppRunner(app)
         await self._runner.setup()
-        site = web.TCPSite(self._runner, self._host, self._port)
-        await site.start()
+        # Do not probe only one address family before binding. With the
+        # dual-stack default, an IPv6-only listener can already own this port
+        # while 127.0.0.1 still looks free.
+        #
+        # SO_REUSEADDR is platform-dependent:
+        #   - macOS (BSD semantics): two wildcard/specific sockets with
+        #     SO_REUSEADDR can silently split traffic while both servers
+        #     report success — so disable it there.
+        #   - Linux: SO_REUSEADDR only permits rebinding past TIME_WAIT
+        #     (a second live listener needs SO_REUSEPORT, which we never
+        #     set). Disabling it would make a quick gateway restart fail
+        #     to bind for up to ~60s — so keep the default (enabled).
+        site = web.TCPSite(
+            self._runner,
+            self._host,
+            self._port,
+            reuse_address=False if sys.platform == "darwin" else None,
+        )
+        try:
+            await site.start()
+        except OSError as exc:
+            await self._runner.cleanup()
+            self._runner = None
+            logger.error(
+                "[webhook] Could not bind %s:%d: %s. "
+                "Set a different host or port in config.yaml under "
+                "platforms.webhook.extra.",
+                self._host or "all IPv4+IPv6 interfaces",
+                self._port,
+                exc,
+            )
+            return False
         self._mark_connected()
 
         route_names = ", ".join(self._routes.keys()) or "(none configured)"
         logger.info(
             "[webhook] Listening on %s:%d — routes: %s",
-            self._host,
+            self._host or "* (all interfaces, IPv4+IPv6)",
             self._port,
             route_names,
         )
@@ -258,15 +366,18 @@ class WebhookAdapter(BasePlatformAdapter):
         do not consume the entry and silently downgrade the final response
         to the ``log`` deliver type.  TTL cleanup happens on POST.
         """
+        if _is_webhook_silence_response(content):
+            logger.info(
+                "[webhook] Response for %s is a silence marker — not delivering", chat_id
+            )
+            return SendResult(success=True)
+
         delivery = self._delivery_info.get(chat_id, {})
         deliver_type = delivery.get("deliver", "log")
 
         if deliver_type == "log":
             logger.info("[webhook] Response for %s: %s", chat_id, content[:200])
             return SendResult(success=True)
-
-        if deliver_type == "linear_comment":
-            return await self._deliver_linear_comment(content, delivery)
 
         if deliver_type == "github_comment":
             return await self._deliver_github_comment(content, delivery)
@@ -448,6 +559,28 @@ class WebhookAdapter(BasePlatformAdapter):
             return _PROFILE_REJECTED
         return profile
 
+    @staticmethod
+    def _route_allows_profile(
+        route_config: dict,
+        request_profile: Optional[str],
+    ) -> bool:
+        """Return whether a route is bound to the URL-selected profile.
+
+        Omitting ``profile`` keeps a route on the default profile. An explicit
+        null, blank, or non-string value is malformed and fails closed.
+        """
+        if "profile" not in route_config:
+            configured_profile = "default"
+        else:
+            configured_profile = route_config.get("profile")
+        if not isinstance(configured_profile, str):
+            return False
+        configured_profile = configured_profile.strip()
+        if not configured_profile:
+            return False
+        effective_profile = request_profile or "default"
+        return configured_profile == effective_profile
+
     async def _handle_webhook(self, request: "web.Request") -> "web.Response":
         """POST /webhooks/{route_name} — receive and process a webhook event."""
         # Hot-reload dynamic subscriptions on each request (mtime-gated, cheap)
@@ -464,6 +597,19 @@ class WebhookAdapter(BasePlatformAdapter):
             )
 
         if not route_config:
+            return web.json_response(
+                {"error": f"Unknown route: {route_name}"}, status=404
+            )
+
+        if not self._route_allows_profile(route_config, profile):
+            effective_profile = profile or "default"
+            logger.warning(
+                "[webhook] Route %s is not authorized for profile %r",
+                route_name,
+                effective_profile,
+            )
+            # Match the unknown-route response so callers cannot use profile
+            # mismatches to enumerate route bindings.
             return web.json_response(
                 {"error": f"Unknown route: {route_name}"}, status=404
             )
@@ -488,9 +634,21 @@ class WebhookAdapter(BasePlatformAdapter):
         # Read body (must be done before any validation)
         try:
             raw_body = await request.read()
+        except web.HTTPRequestEntityTooLarge:
+            # aiohttp's client_max_size tripped — chunked or lying
+            # Content-Length. Same 413 as the header check above.
+            return web.json_response(
+                {"error": "Payload too large"}, status=413
+            )
         except Exception as e:
             logger.error("[webhook] Failed to read body: %s", e)
             return web.json_response({"error": "Bad request"}, status=400)
+        if len(raw_body) > self._max_body_bytes:
+            # Defense in depth: enforce the cap on the actual bytes read even
+            # if the server-level limit was bypassed or misconfigured.
+            return web.json_response(
+                {"error": "Payload too large"}, status=413
+            )
 
         # Validate HMAC signature FIRST (skip only for the explicit local-test
         # INSECURE_NO_AUTH mode). Missing/empty secrets must fail closed here,
@@ -557,6 +715,45 @@ class WebhookAdapter(BasePlatformAdapter):
             return web.json_response(
                 {"status": "ignored", "event": event_type}
             )
+
+        if not self._route_processor.route_filters_match(
+            route_config, payload, event_type, request.headers
+        ):
+            logger.info(
+                "[webhook] filtered event=%s route=%s",
+                event_type,
+                route_name,
+            )
+            return web.json_response(
+                {
+                    "status": "ignored",
+                    "reason": "filter",
+                    "route": route_name,
+                }
+            )
+
+        if route_config.get("script"):
+            # run_route_script shells out (subprocess.run, up to its timeout);
+            # run it in a worker thread so it can't block the gateway event loop.
+            keep, transformed_payload = await asyncio.to_thread(
+                self._route_processor.run_route_script,
+                route_config.get("script"),
+                payload,
+            )
+            if not keep:
+                logger.info(
+                    "[webhook] script ignored event=%s route=%s",
+                    event_type,
+                    route_name,
+                )
+                return web.json_response(
+                    {
+                        "status": "ignored",
+                        "reason": "script",
+                        "route": route_name,
+                    }
+                )
+            payload = transformed_payload or payload
 
         # Format prompt from template
         prompt_template = route_config.get("prompt", "")
@@ -724,11 +921,7 @@ class WebhookAdapter(BasePlatformAdapter):
         # returns before the run starts, so nothing can be closed here).
         task = asyncio.create_task(self.handle_message(event))
         self._background_tasks.add(task)
-        task.add_done_callback(
-            lambda done_task, route=route_name, delivery=delivery_id: (
-                self._handle_background_task_done(done_task, route, delivery)
-            )
-        )
+        task.add_done_callback(self._background_tasks.discard)
 
         return web.json_response(
             {
@@ -867,20 +1060,79 @@ class WebhookAdapter(BasePlatformAdapter):
             expected = "sha256=" + hmac.new(
                 secret.encode(), body, hashlib.sha256
             ).hexdigest()
-            return hmac.compare_digest(gh_sig, expected)
+            return _hmac_str_equal(gh_sig, expected)
 
         # GitLab: X-Gitlab-Token = <plain secret>
         gl_token = request.headers.get("X-Gitlab-Token", "")
         if gl_token:
-            return hmac.compare_digest(gl_token, secret)
+            return _hmac_str_equal(gl_token, secret)
 
-        # Generic: X-Webhook-Signature = <hex HMAC-SHA256>
+        # Generic V2: X-Webhook-Signature-V2 = <hex HMAC-SHA256 of "<timestamp>.<body>">
+        #             X-Webhook-Timestamp = <unix seconds> (required for V2)
+        # Checked independently of (and before) legacy V1 below — a sender
+        # that only ever sends V2 headers must still validate here; nesting
+        # this inside `if generic_sig:` would silently skip V2-only senders.
+        #
+        # The presence of X-Webhook-Signature-V2 alone selects V2 mode and
+        # commits to it — it must NOT fall through to the V1 branch just
+        # because the timestamp is missing/malformed/expired. A sender
+        # migrating to V2 typically sends both V1 and V2 headers together
+        # for compatibility; if incomplete V2 fell through to V1, an
+        # attacker who captured one such mixed request could strip the
+        # X-Webhook-Timestamp header from a replay and have it validate
+        # against the still-present, still-unprotected V1 signature instead
+        # — silently downgrading a V2-protected request back to the replay
+        # hole V2 exists to close.
+        v2_sig = request.headers.get("X-Webhook-Signature-V2", "")
+        if v2_sig:
+            v2_timestamp = request.headers.get("X-Webhook-Timestamp", "")
+            if not v2_timestamp:
+                logger.warning(
+                    "[webhook] Route '%s' sent X-Webhook-Signature-V2 with "
+                    "no X-Webhook-Timestamp — rejecting rather than "
+                    "falling back to legacy V1",
+                    request.match_info.get("route_name", ""),
+                )
+                return False
+            try:
+                ts = int(v2_timestamp)
+            except (TypeError, ValueError):
+                return False
+            if abs(int(time.time()) - ts) > 300:
+                logger.warning(
+                    "[webhook] Route '%s' generic HMAC V2 timestamp outside replay window",
+                    request.match_info.get("route_name", ""),
+                )
+                return False
+            signed_content = v2_timestamp.encode() + b"." + body
+            expected_v2 = hmac.new(
+                secret.encode(), signed_content, hashlib.sha256
+            ).hexdigest()
+            return _hmac_str_equal(v2_sig, expected_v2)
+
+        # Generic V1 (legacy): X-Webhook-Signature = <hex HMAC-SHA256 of body>
+        # (deprecated — no replay protection, since the signature only
+        # covers the body: a captured (body, signature) pair replays
+        # indefinitely with no timestamp binding it to a specific delivery.)
+        # Only reachable when X-Webhook-Signature-V2 was not sent at all —
+        # see the guard above.
         generic_sig = request.headers.get("X-Webhook-Signature", "")
         if generic_sig:
             expected = hmac.new(
                 secret.encode(), body, hashlib.sha256
             ).hexdigest()
-            return hmac.compare_digest(generic_sig, expected)
+            route_name = request.match_info.get("route_name", "")
+            if route_name not in self._v1_signature_warned:
+                self._v1_signature_warned.add(route_name)
+                logger.warning(
+                    "[webhook] Route '%s' uses legacy body-only HMAC (no "
+                    "timestamp), which is vulnerable to replay attacks. Add "
+                    "an 'X-Webhook-Timestamp' header and switch to "
+                    "'X-Webhook-Signature-V2' (HMAC-SHA256 of "
+                    "'<timestamp>.<body>').",
+                    route_name,
+                )
+            return _hmac_str_equal(generic_sig, expected)
 
         # No recognised signature header but secret is configured → reject
         logger.debug(
@@ -934,7 +1186,7 @@ class WebhookAdapter(BasePlatformAdapter):
                 version, signature = part.split(",", 1)
             except ValueError:
                 continue
-            if version == "v1" and hmac.compare_digest(signature, expected):
+            if version == "v1" and _hmac_str_equal(signature, expected):
                 return True
         return False
 
@@ -970,6 +1222,8 @@ class WebhookAdapter(BasePlatformAdapter):
             # Special token: dump the entire payload as JSON
             if key == "__raw__":
                 return json.dumps(payload, indent=2)[:4000]
+            if key == "event_type":
+                return event_type
             value: Any = payload
             for part in key.split("."):
                 if isinstance(value, dict):
@@ -1017,9 +1271,6 @@ class WebhookAdapter(BasePlatformAdapter):
             logger.info("[webhook] direct-deliver log-only: %s", content[:200])
             return SendResult(success=True)
 
-        if deliver_type == "linear_comment":
-            return await self._deliver_linear_comment(content, delivery)
-
         if deliver_type == "github_comment":
             return await self._deliver_github_comment(content, delivery)
 
@@ -1028,126 +1279,6 @@ class WebhookAdapter(BasePlatformAdapter):
         return await self._deliver_cross_platform(
             deliver_type, content, delivery
         )
-
-    def _handle_background_task_done(
-        self,
-        task: "asyncio.Task[Any]",
-        route_name: str,
-        delivery_id: str,
-    ) -> None:
-        self._background_tasks.discard(task)
-        if task.cancelled():
-            return
-        try:
-            exc = task.exception()
-        except asyncio.CancelledError:
-            return
-        if exc is None:
-            return
-        logger.exception(
-            "[webhook] Background handler failed route=%s delivery=%s",
-            route_name,
-            delivery_id,
-            exc_info=(type(exc), exc, exc.__traceback__),
-        )
-
-    async def _deliver_linear_comment(
-        self, content: str, delivery: dict
-    ) -> SendResult:
-        """Post agent response as a Linear issue comment."""
-        extra = delivery.get("deliver_extra", {})
-        payload = delivery.get("payload", {})
-        session = payload.get("agentSession") if isinstance(payload, dict) else {}
-        session = session if isinstance(session, dict) else {}
-        issue = session.get("issue") if isinstance(session, dict) else {}
-        if not isinstance(issue, dict) and isinstance(payload, dict):
-            issue = payload.get("issue", {})
-        issue = issue if isinstance(issue, dict) else {}
-
-        issue_id = str(extra.get("issue_id") or issue.get("id") or "").strip()
-        issue_identifier = str(
-            extra.get("issue_identifier") or issue.get("identifier") or ""
-        ).strip()
-        if not issue_id and issue_identifier:
-            issue_id = issue_identifier
-        if not issue_id:
-            logger.error(
-                "[webhook] linear_comment delivery missing issue_id/issue_identifier"
-            )
-            return SendResult(
-                success=False, error="Missing issue_id or issue_identifier"
-            )
-
-        token = os.getenv("LINEAR_API_KEY") or os.getenv("LINEAR_API_TOKEN")
-        if not token:
-            logger.error(
-                "[webhook] LINEAR_API_KEY is required for linear_comment delivery"
-            )
-            return SendResult(success=False, error="Missing LINEAR_API_KEY")
-
-        body = str(content or "").strip()
-        if not body:
-            return SendResult(success=True)
-        marker = str(extra.get("marker") or "").strip()
-        if marker and marker not in body:
-            body = f"{marker}\n\n{body}"
-
-        mutation = """
-        mutation WebhookLinearComment($input: CommentCreateInput!) {
-          commentCreate(input: $input) {
-            success
-            comment { id url }
-          }
-        }
-        """
-        request_body = json.dumps(
-            {
-                "query": mutation,
-                "variables": {"input": {"issueId": issue_id, "body": body}},
-            }
-        ).encode("utf-8")
-
-        def _post() -> dict:
-            req = urllib.request.Request(
-                "https://api.linear.app/graphql",
-                data=request_body,
-                headers={
-                    "Authorization": token,
-                    "Content-Type": "application/json",
-                },
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                raw = resp.read().decode("utf-8", errors="replace")
-            return json.loads(raw)
-
-        try:
-            result = await asyncio.to_thread(_post)
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", errors="replace")[:500]
-            logger.error("[webhook] Linear comment HTTP error: %s", detail)
-            return SendResult(success=False, error=detail or str(e))
-        except Exception as e:
-            logger.error("[webhook] Linear comment delivery error: %s", e)
-            return SendResult(success=False, error=str(e))
-
-        errors = result.get("errors")
-        if errors:
-            logger.error("[webhook] Linear comment GraphQL errors: %s", errors)
-            return SendResult(success=False, error=json.dumps(errors)[:500])
-
-        comment_create = (result.get("data") or {}).get("commentCreate") or {}
-        if not comment_create.get("success"):
-            logger.error("[webhook] Linear commentCreate did not succeed")
-            return SendResult(success=False, error="commentCreate failed")
-
-        comment = comment_create.get("comment") or {}
-        logger.info(
-            "[webhook] Posted Linear comment issue=%s comment=%s",
-            issue_identifier or issue_id,
-            comment.get("id") or "?",
-        )
-        return SendResult(success=True, message_id=comment.get("id"))
 
     async def _deliver_github_comment(
         self, content: str, delivery: dict
@@ -1199,7 +1330,7 @@ class WebhookAdapter(BasePlatformAdapter):
                     content,
                 ],
                 capture_output=True,
-                text=True,
+                text=True, encoding='utf-8', errors='replace',
                 timeout=30,
             )
             if result.returncode == 0:
@@ -1241,7 +1372,18 @@ class WebhookAdapter(BasePlatformAdapter):
                 success=False, error=f"Unknown platform: {platform_name}"
             )
 
+        # Default adapters first; multiplex may park Slack/etc. only on a
+        # secondary profile (self._profile_adapters). Fall back so webhook
+        # deliver:slack still works when default has slack disabled.
         adapter = self.gateway_runner.adapters.get(target_platform)
+        if not adapter:
+            for _prof, amap in (getattr(self.gateway_runner, "_profile_adapters", None) or {}).items():
+                if not isinstance(amap, dict):
+                    continue
+                cand = amap.get(target_platform)
+                if cand is not None:
+                    adapter = cand
+                    break
         if not adapter:
             return SendResult(
                 success=False,

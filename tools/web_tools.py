@@ -27,16 +27,13 @@ Debug Mode:
 - Captures all tool calls, results, and compression metrics
 
 Usage:
-    from web_tools import web_search_tool, web_extract_tool, web_crawl_tool
-
+    from web_tools import web_search_tool, web_extract_tool
+    
     # Search the web
     results = web_search_tool("Python machine learning libraries", limit=3)
-
-    # Extract content from URLs
+    
+    # Extract content from URLs  
     content = web_extract_tool(["https://example.com"], format="markdown")
-
-    # Crawl a website
-    crawl_data = web_crawl_tool("example.com", "Find contact information")
 """
 
 import json
@@ -44,9 +41,7 @@ import logging
 import os
 import re
 import asyncio
-import hashlib
-from html.parser import HTMLParser
-from typing import List, Dict, Any, Optional, TYPE_CHECKING, Tuple
+from typing import List, Dict, Any, Optional, TYPE_CHECKING
 import httpx  # noqa: F401 — kept at module top so tests can patch tools.web_tools.httpx
 # After the web-provider plugin migration (PR #25182), the Firecrawl SDK
 # proxy, client construction, and response-shape normalizers all live in
@@ -88,11 +83,6 @@ _parallel_client: Optional[Any] = None
 _async_parallel_client: Optional[Any] = None
 _exa_client: Optional[Any] = None
 
-from agent.auxiliary_client import (
-    async_call_llm,
-    extract_content_or_reasoning,
-    get_async_text_auxiliary_client,
-)
 from tools.debug_helpers import DebugSession
 # Imported solely so unit tests can monkeypatch these names on
 # tools.web_tools (the firecrawl plugin reads them via its own import chain).
@@ -107,11 +97,25 @@ from tools.tool_backend_helpers import (  # noqa: F401
     nous_tool_gateway_unavailable_message,
     prefers_gateway,
 )
-from tools.url_safety import async_is_safe_url, is_safe_url, normalize_url_for_request, sensitive_query_param_name
-from tools.website_policy import check_website_access
+from tools.url_safety import async_is_safe_url, normalize_url_for_request, sensitive_query_param_name
 import sys
 
 logger = logging.getLogger(__name__)
+
+
+def _web_extract_url(value: Any) -> Optional[str]:
+    """Return a usable URL from a model-supplied extract item.
+
+    Models sometimes forward a complete web-search result instead of its URL.
+    Accept the two common URL keys, but reject missing/non-string values rather
+    than stringifying arbitrary objects into misleading fetch targets.
+    """
+    if isinstance(value, dict):
+        value = value.get("url") or value.get("href")
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
 
 
 # ─── Backend Selection ────────────────────────────────────────────────────────
@@ -143,7 +147,11 @@ def _load_web_config() -> dict:
     """Load the ``web:`` section from ~/.hermes/config.yaml."""
     try:
         from hermes_cli.config import load_config
-        return load_config().get("web", {})
+        # ``or {}``: a present-but-null ``web:`` section (YAML ``web:`` with no
+        # body) makes ``.get("web", {})`` return None, which would break every
+        # caller that does ``_load_web_config().get(...)``. Honor the ``-> dict``
+        # contract so callers never see None.
+        return load_config().get("web") or {}
     except (ImportError, Exception):
         return {}
 
@@ -344,158 +352,6 @@ def _is_backend_available(backend: str) -> bool:
     return False
 
 
-def _web_provider_fallback_candidates(primary_name: str, capability: str) -> List[Any]:
-    """Return available providers to try after a configured provider fails."""
-    _ensure_web_search_plugins_registered()
-    try:
-        from agent.web_search_registry import get_provider, list_providers
-    except Exception:
-        return []
-
-    primary_name = str(primary_name or "").strip()
-    registered = {str(provider.name): provider for provider in list_providers()}
-    seen_names = {primary_name}
-    ordered_names = []
-    for name in _MATRIX_PROVIDER_ORDER:
-        if name not in seen_names:
-            ordered_names.append(name)
-            seen_names.add(name)
-    ordered_names.extend(sorted(name for name in registered if name not in seen_names))
-
-    capability_check = {
-        "search": "supports_search",
-        "extract": "supports_extract",
-        "crawl": "supports_crawl",
-    }.get(capability)
-    if capability_check is None:
-        return []
-
-    candidates = []
-    for name in ordered_names:
-        provider = get_provider(name)
-        if provider is None:
-            continue
-        supports = getattr(provider, capability_check, None)
-        try:
-            provider_supported = bool(callable(supports) and supports())
-        except Exception:
-            provider_supported = False
-        if not provider_supported:
-            continue
-        try:
-            available = bool(provider.is_available())
-        except Exception:
-            available = False
-        if available:
-            candidates.append(provider)
-    return candidates
-
-
-def get_active_crawl_provider() -> Optional[Any]:
-    """Resolve the currently-active web crawl provider.
-
-    Upstream removed crawl plumbing from ``agent.web_search_registry`` (only
-    ``get_active_search_provider`` / ``get_active_extract_provider`` remain),
-    but this fork still ships ``web_crawl_tool`` and reports crawl coverage in
-    ``web_search_matrix``. This local resolver mirrors the removed
-    ``web_search_registry.get_active_crawl_provider`` semantics — explicit
-    ``web.crawl_backend``/``web.backend`` config wins (even when unavailable so
-    the dispatcher can surface a precise error), then a single crawl-capable
-    available provider, then the legacy preference walk — using the registry's
-    public provider list so both call sites keep working without the deleted
-    registry helper. Returns ``None`` when no crawl-capable provider resolves.
-    """
-    try:
-        from agent.web_search_registry import get_provider, list_providers
-    except Exception:
-        return None
-
-    try:
-        from agent.web_search_registry import _read_config_key
-
-        configured = _read_config_key("web", "crawl_backend") or _read_config_key(
-            "web", "backend"
-        )
-    except Exception:
-        configured = None
-
-    def _supports_crawl(provider: Any) -> bool:
-        try:
-            return bool(provider.supports_crawl())
-        except Exception:
-            return False
-
-    def _is_available_safe(provider: Any) -> bool:
-        try:
-            return bool(provider.is_available())
-        except Exception:
-            return False
-
-    # 1. Explicit config wins, ignoring availability.
-    if configured:
-        provider = get_provider(configured)
-        if provider is not None and _supports_crawl(provider):
-            return provider
-
-    # 2. Single crawl-capable + available provider.
-    eligible = [
-        provider
-        for provider in list_providers()
-        if _supports_crawl(provider) and _is_available_safe(provider)
-    ]
-    if len(eligible) == 1:
-        return eligible[0]
-
-    # 3. Legacy preference walk, filtered by availability.
-    try:
-        from agent.web_search_registry import _LEGACY_PREFERENCE
-
-        legacy_order = _LEGACY_PREFERENCE
-    except Exception:
-        legacy_order = _MATRIX_PROVIDER_ORDER
-    for name in legacy_order:
-        provider = get_provider(name)
-        if (
-            provider is not None
-            and _supports_crawl(provider)
-            and _is_available_safe(provider)
-        ):
-            return provider
-    return None
-
-
-def _web_search_error_message(response_data: Any, default: str = "web search failed") -> str:
-    """Return a compact provider error message for fallback metadata."""
-    if isinstance(response_data, dict):
-        error = response_data.get("error") or response_data.get("message")
-        if error:
-            return str(error)
-    return default
-
-
-def _web_search_should_try_fallback(response_data: Any) -> bool:
-    if not isinstance(response_data, dict):
-        return True
-    if response_data.get("success", False):
-        return False
-    error = str(response_data.get("error") or "").lower()
-    if not error:
-        return True
-    retryable_markers = (
-        "payment required",
-        "insufficient credits",
-        "quota",
-        "rate limit",
-        "429",
-        "402",
-        "432",
-        "timeout",
-        "temporarily",
-        "unavailable",
-    )
-    return any(marker in error for marker in retryable_markers)
-
-
 def _ddgs_package_importable() -> bool:
     """Return True when the ``ddgs`` Python package can be imported.
 
@@ -558,266 +414,6 @@ def _web_requires_env() -> list[str]:
 # unit-test patches.
 
 
-DEFAULT_MIN_LENGTH_FOR_SUMMARIZATION = 5000
-_DIRECT_HTTP_FALLBACK_MAX_TEXT_CHARS = 1_000_000
-
-
-def _classify_web_extract_failure(error: Any, provider_name: str = "") -> Optional[str]:
-    """Return a stable machine-readable category for web extraction failures."""
-    text = str(error or "").lower()
-    provider = str(provider_name or "").lower()
-    if not text:
-        return None
-    if provider == "firecrawl" and (
-        "payment required" in text
-        or "insufficient credits" in text
-        or "credits have been exhausted" in text
-        or "top up" in text
-        or "402" in text
-    ):
-        return "provider_credit_exhaustion"
-    if (
-        "api key" in text
-        or "not configured" in text
-        or "missing direct config" in text
-        or "missing credentials" in text
-    ):
-        return "provider_credentials_absent"
-    return None
-
-
-class _HTMLTextExtractor(HTMLParser):
-    """Small stdlib HTML-to-text extractor for direct HTTP fallback."""
-
-    _BLOCK_TAGS = {
-        "address", "article", "aside", "blockquote", "br", "div", "dl", "fieldset",
-        "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5",
-        "h6", "header", "hr", "li", "main", "nav", "ol", "p", "pre", "section",
-        "table", "tr", "ul",
-    }
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self._parts: List[str] = []
-        self._skip_depth = 0
-
-    def handle_starttag(self, tag: str, attrs: List[tuple[str, Optional[str]]]) -> None:
-        if tag in {"script", "style", "noscript"}:
-            self._skip_depth += 1
-            return
-        if tag in self._BLOCK_TAGS:
-            self._parts.append("\n")
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in {"script", "style", "noscript"} and self._skip_depth:
-            self._skip_depth -= 1
-            return
-        if tag in self._BLOCK_TAGS:
-            self._parts.append("\n")
-
-    def handle_data(self, data: str) -> None:
-        if not self._skip_depth and data:
-            self._parts.append(data)
-
-    def text(self) -> str:
-        text = "".join(self._parts)
-        text = re.sub(r"[ \t\r\f\v]+", " ", text)
-        text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
-        return text.strip()
-
-
-def _html_to_text(content: str) -> str:
-    parser = _HTMLTextExtractor()
-    try:
-        parser.feed(content)
-        parser.close()
-        text = parser.text()
-    except Exception:
-        text = re.sub(r"<[^>]+>", " ", content)
-        text = re.sub(r"\s+", " ", text).strip()
-    return text or content
-
-
-def _extract_html_title(content: str) -> str:
-    match = re.search(r"<title[^>]*>(.*?)</title>", content, re.IGNORECASE | re.DOTALL)
-    if not match:
-        return ""
-    title = re.sub(r"\s+", " ", match.group(1)).strip()
-    return title
-
-
-def _truncate_direct_http_content(content: str) -> str:
-    if len(content) <= _DIRECT_HTTP_FALLBACK_MAX_TEXT_CHARS:
-        return content
-    return (
-        content[:_DIRECT_HTTP_FALLBACK_MAX_TEXT_CHARS]
-        + "\n\n[Direct HTTP fallback content truncated after "
-        + f"{_DIRECT_HTTP_FALLBACK_MAX_TEXT_CHARS:,} characters.]"
-    )
-
-
-async def _direct_http_extract_one(url: str, format: Optional[str] = None) -> Dict[str, Any]:
-    """Fetch one URL without a scrape provider for credit-exhaustion fallback."""
-    blocked = check_website_access(url)
-    if blocked:
-        return {
-            "url": url,
-            "title": "",
-            "content": "",
-            "raw_content": "",
-            "error": blocked["message"],
-            "blocked_by_policy": {
-                "host": blocked["host"],
-                "rule": blocked["rule"],
-                "source": blocked["source"],
-            },
-        }
-
-    headers = {
-        "User-Agent": (
-            "Hermes web_extract direct-http fallback "
-            "(provider credit exhaustion recovery)"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/pdf,text/plain,*/*;q=0.8",
-    }
-    async with httpx.AsyncClient(follow_redirects=True, timeout=30.0, headers=headers) as client:
-        response = await client.get(url)
-        response.raise_for_status()
-
-    final_url = str(response.url)
-    if not is_safe_url(final_url):
-        return {
-            "url": final_url,
-            "title": "",
-            "content": "",
-            "raw_content": "",
-            "error": "Blocked: URL redirected to a private or internal network address",
-        }
-
-    final_blocked = check_website_access(final_url)
-    if final_blocked:
-        return {
-            "url": final_url,
-            "title": "",
-            "content": "",
-            "raw_content": "",
-            "error": final_blocked["message"],
-            "blocked_by_policy": {
-                "host": final_blocked["host"],
-                "rule": final_blocked["rule"],
-                "source": final_blocked["source"],
-            },
-        }
-
-    body = response.content or b""
-    content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
-    metadata = {
-        "source": "direct_http",
-        "content_type": content_type or None,
-        "byte_length": len(body),
-        "sha256": hashlib.sha256(body).hexdigest(),
-    }
-
-    is_pdf = content_type == "application/pdf" or final_url.lower().split("?", 1)[0].endswith(".pdf")
-    if is_pdf:
-        content = (
-            "[Direct HTTP fallback fetched PDF source bytes; text extraction was not "
-            "available in the scraper fallback. "
-            f"byte_length={metadata['byte_length']} sha256={metadata['sha256']}]"
-        )
-        return {
-            "url": final_url,
-            "title": "",
-            "content": content,
-            "raw_content": content,
-            "metadata": metadata,
-        }
-
-    text = response.text or body.decode(response.encoding or "utf-8", errors="replace")
-    title = _extract_html_title(text)
-    if format != "html" and ("html" in content_type or re.search(r"<html[\s>]", text, re.IGNORECASE)):
-        text = _html_to_text(text)
-    text = _truncate_direct_http_content(text)
-    return {
-        "url": final_url,
-        "title": title,
-        "content": text,
-        "raw_content": text,
-        "metadata": metadata,
-    }
-
-
-async def _apply_web_extract_degradation_fallback(
-    *,
-    provider_name: str,
-    results: List[Dict[str, Any]],
-    format: Optional[str],
-) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Apply deterministic fallback for known provider degradation categories."""
-    if str(provider_name or "").lower() != "firecrawl":
-        return results, []
-
-    updated: List[Dict[str, Any]] = []
-    degradations: List[Dict[str, Any]] = []
-    for result in results:
-        if not isinstance(result, dict):
-            updated.append(result)
-            continue
-
-        error = result.get("error")
-        category = _classify_web_extract_failure(error, provider_name)
-        if category != "provider_credit_exhaustion":
-            updated.append(result)
-            continue
-
-        url = str(result.get("url") or "").strip()
-        degradation = {
-            "category": category,
-            "primary_provider": "firecrawl",
-            "primary_operation": "web_extract",
-            "primary_status": "failed",
-            "primary_error": str(error or ""),
-            "fallback_provider": "direct_http",
-            "fallback_status": "not_attempted",
-        }
-
-        if not url or not is_safe_url(url):
-            degradation["fallback_status"] = "blocked"
-            degradation["fallback_error"] = "URL was empty or failed safety checks"
-            retained = dict(result)
-            retained["degradation"] = degradation
-            updated.append(retained)
-            degradations.append(degradation)
-            continue
-
-        try:
-            fallback = await _direct_http_extract_one(url, format=format)
-        except Exception as exc:  # noqa: BLE001 - preserve primary failure
-            fallback = {
-                "url": url,
-                "title": "",
-                "content": "",
-                "raw_content": "",
-                "error": str(exc),
-            }
-
-        retained: Dict[str, Any]
-        if isinstance(fallback, dict) and fallback.get("content") and not fallback.get("error"):
-            degradation["fallback_status"] = "succeeded"
-            retained = dict(fallback)
-            retained["degradation"] = degradation
-        else:
-            degradation["fallback_status"] = "failed"
-            degradation["fallback_error"] = str((fallback or {}).get("error") or "direct HTTP fallback failed")
-            retained = dict(result)
-            retained["degradation"] = degradation
-
-        updated.append(retained)
-        degradations.append(degradation)
-
-    return updated, degradations
-
-
 # Default budget (characters) of clean page text sent to the model. Pages at
 # or under this size are returned whole; larger pages are head+tail truncated
 # and the full text is stored on disk (see _store_full_text). Spending context,
@@ -826,7 +422,7 @@ async def _apply_web_extract_degradation_fallback(
 DEFAULT_EXTRACT_CHAR_LIMIT = 15000
 
 # Hard ceiling on the full-text file written to cache/web. The truncate-store
-# path otherwise calls path.write_text(content) with no upper bound, so a
+# path otherwise calls path.write_text(content, encoding="utf-8") with no upper bound, so a
 # multi-MB page (some backends return very large markdown) writes unbounded
 # bytes to disk on every extract. Cap the stored copy; the model only ever
 # sees char_limit anyway, and a 2MB page is already far more than any single
@@ -835,443 +431,6 @@ DEFAULT_EXTRACT_CHAR_LIMIT = 15000
 MAX_STORED_TEXT_CHARS = 2_000_000
 
 _debug = DebugSession("web_tools", env_var="WEB_TOOLS_DEBUG")
-
-
-def _is_nous_auxiliary_client(client: Any) -> bool:
-    """Return True when the resolved auxiliary backend is Nous Portal."""
-    from urllib.parse import urlparse
-
-    base_url = str(getattr(client, "base_url", "") or "")
-    host = (urlparse(base_url).hostname or "").lower()
-    return host == "nousresearch.com" or host.endswith(".nousresearch.com")
-
-
-def _resolve_web_extract_auxiliary(model: Optional[str] = None) -> tuple[Optional[Any], Optional[str], Dict[str, Any]]:
-    """Resolve the current web-extract auxiliary client, model, and extra body."""
-    client, default_model = get_async_text_auxiliary_client("web_extract")
-    configured_model = os.getenv("AUXILIARY_WEB_EXTRACT_MODEL", "").strip()
-    effective_model = model or configured_model or default_model
-
-    extra_body: Dict[str, Any] = {}
-    if client is not None and _is_nous_auxiliary_client(client):
-        from agent.auxiliary_client import get_auxiliary_extra_body
-        from agent.portal_tags import nous_portal_tags
-        extra_body = get_auxiliary_extra_body() or {"tags": nous_portal_tags()}
-
-    return client, effective_model, extra_body
-
-
-def _get_default_summarizer_model() -> Optional[str]:
-    """Return the current default model for web extraction summarization."""
-    _, model, _ = _resolve_web_extract_auxiliary()
-    return model
-
-
-async def process_content_with_llm(
-    content: str,
-    url: str = "",
-    title: str = "",
-    model: Optional[str] = None,
-    min_length: int = DEFAULT_MIN_LENGTH_FOR_SUMMARIZATION
-) -> Optional[str]:
-    """
-    Process web content using LLM to create intelligent summaries with key excerpts.
-
-    This function uses Gemini 3 Flash Preview (or specified model) via OpenRouter API
-    to intelligently extract key information and create markdown summaries,
-    significantly reducing token usage while preserving all important information.
-
-    For very large content (>500k chars), uses chunked processing with synthesis.
-    For extremely large content (>2M chars), refuses to process entirely.
-
-    Args:
-        content (str): The raw content to process
-        url (str): The source URL (for context, optional)
-        title (str): The page title (for context, optional)
-        model (str): The model to use for processing (default: google/gemini-3-flash-preview)
-        min_length (int): Minimum content length to trigger processing (default: 5000)
-
-    Returns:
-        Optional[str]: Processed markdown content, or None if content too short or processing fails
-    """
-    # Size thresholds
-    MAX_CONTENT_SIZE = 2_000_000  # 2M chars - refuse entirely above this
-    CHUNK_THRESHOLD = 500_000     # 500k chars - use chunked processing above this
-    CHUNK_SIZE = 100_000          # 100k chars per chunk
-    MAX_OUTPUT_SIZE = 5000        # Hard cap on final output size
-
-    try:
-        content_len = len(content)
-
-        # Refuse if content is absurdly large
-        if content_len > MAX_CONTENT_SIZE:
-            size_mb = content_len / 1_000_000
-            logger.warning("Content too large (%.1fMB > 2MB limit). Refusing to process.", size_mb)
-            return f"[Content too large to process: {size_mb:.1f}MB. Try using web_crawl with specific extraction instructions, or search for a more focused source.]"
-
-        # Skip processing if content is too short
-        if content_len < min_length:
-            logger.debug("Content too short (%d < %d chars), skipping LLM processing", content_len, min_length)
-            return None
-
-        # Create context information
-        context_info = []
-        if title:
-            context_info.append(f"Title: {title}")
-        if url:
-            context_info.append(f"Source: {url}")
-        context_str = "\n".join(context_info) + "\n\n" if context_info else ""
-
-        # Check if we need chunked processing
-        if content_len > CHUNK_THRESHOLD:
-            logger.info("Content large (%d chars). Using chunked processing...", content_len)
-            return await _process_large_content_chunked(
-                content, context_str, model, CHUNK_SIZE, MAX_OUTPUT_SIZE
-            )
-
-        # Standard single-pass processing for normal content
-        logger.info("Processing content with LLM (%d characters)", content_len)
-
-        processed_content = await _call_summarizer_llm(content, context_str, model)
-
-        if processed_content:
-            # Enforce output cap
-            if len(processed_content) > MAX_OUTPUT_SIZE:
-                processed_content = processed_content[:MAX_OUTPUT_SIZE] + "\n\n[... summary truncated for context management ...]"
-
-            # Log compression metrics
-            processed_length = len(processed_content)
-            compression_ratio = processed_length / content_len if content_len > 0 else 1.0
-            logger.info("Content processed: %d -> %d chars (%.1f%%)", content_len, processed_length, compression_ratio * 100)
-
-        return processed_content
-
-    except Exception as e:
-        logger.warning(
-            "web_extract LLM summarization failed (%s). "
-            "Tip: increase auxiliary.web_extract.timeout in config.yaml "
-            "or switch to a faster auxiliary model.",
-            str(e)[:120],
-        )
-        # Fall back to truncated raw content instead of returning a useless
-        # error message.  The first ~5000 chars are almost always more useful
-        # to the model than "[Failed to process content: ...]".
-        truncated = content[:MAX_OUTPUT_SIZE]
-        if len(content) > MAX_OUTPUT_SIZE:
-            truncated += (
-                f"\n\n[Content truncated — showing first {MAX_OUTPUT_SIZE:,} of "
-                f"{len(content):,} chars. LLM summarization timed out. "
-                f"To fix: increase auxiliary.web_extract.timeout in config.yaml, "
-                f"or use a faster auxiliary model. Use browser_navigate for the full page.]"
-            )
-        return truncated
-
-
-async def _call_summarizer_llm(
-    content: str,
-    context_str: str,
-    model: Optional[str],
-    max_tokens: int = 20000,
-    is_chunk: bool = False,
-    chunk_info: str = ""
-) -> Optional[str]:
-    """
-    Make a single LLM call to summarize content.
-
-    Args:
-        content: The content to summarize
-        context_str: Context information (title, URL)
-        model: Model to use
-        max_tokens: Maximum output tokens
-        is_chunk: Whether this is a chunk of a larger document
-        chunk_info: Information about chunk position (e.g., "Chunk 2/5")
-
-    Returns:
-        Summarized content or None on failure
-    """
-    if is_chunk:
-        # Chunk-specific prompt - aware that this is partial content
-        system_prompt = """You are an expert content analyst processing a SECTION of a larger document. Your job is to extract and summarize the key information from THIS SECTION ONLY.
-
-Important guidelines for chunk processing:
-1. Do NOT write introductions or conclusions - this is a partial document
-2. Focus on extracting ALL key facts, figures, data points, and insights from this section
-3. Preserve important quotes, code snippets, and specific details verbatim
-4. Use bullet points and structured formatting for easy synthesis later
-5. Note any references to other sections (e.g., "as mentioned earlier", "see below") without trying to resolve them
-
-Your output will be combined with summaries of other sections, so focus on thorough extraction rather than narrative flow."""
-
-        user_prompt = f"""Extract key information from this SECTION of a larger document:
-
-{context_str}{chunk_info}
-
-SECTION CONTENT:
-{content}
-
-Extract all important information from this section in a structured format. Focus on facts, data, insights, and key details. Do not add introductions or conclusions."""
-
-    else:
-        # Standard full-document prompt
-        system_prompt = """You are an expert content analyst. Your job is to process web content and create a comprehensive yet concise summary that preserves all important information while dramatically reducing bulk.
-
-Create a well-structured markdown summary that includes:
-1. Key excerpts (quotes, code snippets, important facts) in their original format
-2. Comprehensive summary of all other important information
-3. Proper markdown formatting with headers, bullets, and emphasis
-
-Your goal is to preserve ALL important information while reducing length. Never lose key facts, figures, insights, or actionable information. Make it scannable and well-organized."""
-
-        user_prompt = f"""Please process this web content and create a comprehensive markdown summary:
-
-{context_str}CONTENT TO PROCESS:
-{content}
-
-Create a markdown summary that captures all key information in a well-organized, scannable format. Include important quotes and code snippets in their original formatting. Focus on actionable information, specific details, and unique insights."""
-
-    # Call the LLM with retry logic — keep retries low since summarization
-    # is a nice-to-have; the caller falls back to truncated content on failure.
-    max_retries = 2
-    retry_delay = 2
-    last_error = None
-
-    for attempt in range(max_retries):
-        try:
-            aux_client, effective_model, extra_body = _resolve_web_extract_auxiliary(model)
-            if aux_client is None or not effective_model:
-                logger.warning("No auxiliary model available for web content processing")
-                return None
-            call_kwargs = {
-                "task": "web_extract",
-                "model": effective_model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": 0.1,
-                "max_tokens": max_tokens,
-                # No explicit timeout — async_call_llm reads auxiliary.web_extract.timeout
-                # from config.yaml. Fresh configs ship with 360s; if the key is absent
-                # the runtime default is 30s (_DEFAULT_AUX_TIMEOUT in
-                # agent/auxiliary_client.py). Users with slow local models should set
-                # or increase auxiliary.web_extract.timeout in config.yaml.
-            }
-            if extra_body:
-                call_kwargs["extra_body"] = extra_body
-            response = await async_call_llm(**call_kwargs)
-            content = extract_content_or_reasoning(response)
-            if content:
-                return content
-            # Reasoning-only / empty response — let the retry loop handle it
-            logger.warning("LLM returned empty content (attempt %d/%d), retrying", attempt + 1, max_retries)
-            if attempt < max_retries - 1:
-                await asyncio.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, 60)
-                continue
-            return content  # Return whatever we got after exhausting retries
-        except RuntimeError:
-            logger.warning("No auxiliary model available for web content processing")
-            return None
-        except Exception as api_error:
-            last_error = api_error
-            if attempt < max_retries - 1:
-                logger.warning("LLM API call failed (attempt %d/%d): %s", attempt + 1, max_retries, str(api_error)[:100])
-                logger.warning("Retrying in %ds...", retry_delay)
-                await asyncio.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, 60)
-            else:
-                raise last_error
-
-    return None
-
-
-async def _process_large_content_chunked(
-    content: str,
-    context_str: str,
-    model: Optional[str],
-    chunk_size: int,
-    max_output_size: int
-) -> Optional[str]:
-    """
-    Process large content by chunking, summarizing each chunk in parallel,
-    then synthesizing the summaries.
-
-    Args:
-        content: The large content to process
-        context_str: Context information
-        model: Model to use
-        chunk_size: Size of each chunk in characters
-        max_output_size: Maximum final output size
-
-    Returns:
-        Synthesized summary or None on failure
-    """
-    # Split content into chunks
-    chunks = []
-    for i in range(0, len(content), chunk_size):
-        chunk = content[i:i + chunk_size]
-        chunks.append(chunk)
-
-    logger.info("Split into %d chunks of ~%d chars each", len(chunks), chunk_size)
-
-    # Summarize each chunk in parallel
-    async def summarize_chunk(chunk_idx: int, chunk_content: str) -> tuple[int, Optional[str]]:
-        """Summarize a single chunk."""
-        try:
-            chunk_info = f"[Processing chunk {chunk_idx + 1} of {len(chunks)}]"
-            summary = await _call_summarizer_llm(
-                chunk_content,
-                context_str,
-                model,
-                max_tokens=10000,
-                is_chunk=True,
-                chunk_info=chunk_info
-            )
-            if summary:
-                logger.info("Chunk %d/%d summarized: %d -> %d chars", chunk_idx + 1, len(chunks), len(chunk_content), len(summary))
-            return chunk_idx, summary
-        except Exception as e:
-            logger.warning("Chunk %d/%d failed: %s", chunk_idx + 1, len(chunks), str(e)[:50])
-            return chunk_idx, None
-
-    # Run all chunk summarizations in parallel
-    tasks = [summarize_chunk(i, chunk) for i, chunk in enumerate(chunks)]
-    # Use return_exceptions=True so a single task failure does not discard
-    # all other successfully summarized chunks.
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    # Filter out exceptions, then collect successful summaries in order
-    successful_results = []
-    for result_item in results:
-        if isinstance(result_item, BaseException):
-            logger.warning("Chunk summarization task failed: %s", result_item)
-            continue
-        successful_results.append(result_item)
-
-    summaries = []
-    for chunk_idx, summary in sorted(successful_results, key=lambda x: x[0]):
-        if summary:
-            summaries.append(f"## Section {chunk_idx + 1}\n{summary}")
-
-    if not summaries:
-        logger.debug("All chunk summarizations failed")
-        return "[Failed to process large content: all chunk summarizations failed]"
-
-    logger.info("Got %d/%d chunk summaries", len(summaries), len(chunks))
-
-    # If only one chunk succeeded, just return it (with cap)
-    if len(summaries) == 1:
-        result = summaries[0]
-        if len(result) > max_output_size:
-            result = result[:max_output_size] + "\n\n[... truncated ...]"
-        return result
-
-    # Synthesize the summaries into a final summary
-    logger.info("Synthesizing %d summaries...", len(summaries))
-
-    combined_summaries = "\n\n---\n\n".join(summaries)
-
-    synthesis_prompt = f"""You have been given summaries of different sections of a large document.
-Synthesize these into ONE cohesive, comprehensive summary that:
-1. Removes redundancy between sections
-2. Preserves all key facts, figures, and actionable information
-3. Is well-organized with clear structure
-4. Is under {max_output_size} characters
-
-{context_str}SECTION SUMMARIES:
-{combined_summaries}
-
-Create a single, unified markdown summary."""
-
-    try:
-        aux_client, effective_model, extra_body = _resolve_web_extract_auxiliary(model)
-        if aux_client is None or not effective_model:
-            logger.warning("No auxiliary model for synthesis, concatenating summaries")
-            fallback = "\n\n".join(summaries)
-            if len(fallback) > max_output_size:
-                fallback = fallback[:max_output_size] + "\n\n[... truncated ...]"
-            return fallback
-
-        call_kwargs = {
-            "task": "web_extract",
-            "model": effective_model,
-            "messages": [
-                {"role": "system", "content": "You synthesize multiple summaries into one cohesive, comprehensive summary. Be thorough but concise."},
-                {"role": "user", "content": synthesis_prompt},
-            ],
-            "temperature": 0.1,
-            "max_tokens": 20000,
-        }
-        if extra_body:
-            call_kwargs["extra_body"] = extra_body
-        response = await async_call_llm(**call_kwargs)
-        final_summary = extract_content_or_reasoning(response)
-
-        # Retry once on empty content (reasoning-only response)
-        if not final_summary:
-            logger.warning("Synthesis LLM returned empty content, retrying once")
-            response = await async_call_llm(**call_kwargs)
-            final_summary = extract_content_or_reasoning(response)
-
-        # If still None after retry, fall back to concatenated summaries
-        if not final_summary:
-            logger.warning("Synthesis failed after retry — concatenating chunk summaries")
-            fallback = "\n\n".join(summaries)
-            if len(fallback) > max_output_size:
-                fallback = fallback[:max_output_size] + "\n\n[... truncated ...]"
-            return fallback
-
-        # Enforce hard cap
-        if len(final_summary) > max_output_size:
-            final_summary = final_summary[:max_output_size] + "\n\n[... summary truncated for context management ...]"
-
-        original_len = len(content)
-        final_len = len(final_summary)
-        compression = final_len / original_len if original_len > 0 else 1.0
-
-        logger.info("Synthesis complete: %d -> %d chars (%.2f%%)", original_len, final_len, compression * 100)
-        return final_summary
-
-    except Exception as e:
-        logger.warning("Synthesis failed: %s", str(e)[:100])
-        # Fall back to concatenated summaries with truncation
-        fallback = "\n\n".join(summaries)
-        if len(fallback) > max_output_size:
-            fallback = fallback[:max_output_size] + "\n\n[... truncated due to synthesis failure ...]"
-        return fallback
-
-
-def clean_base64_images(text: str) -> str:
-    """
-    Remove base64 encoded images from text to reduce token count and clutter.
-
-    This function finds and removes base64 encoded images in various formats:
-    - (data:image/png;base64,...)
-    - (data:image/jpeg;base64,...)
-    - (data:image/svg+xml;base64,...)
-    - data:image/[type];base64,... (without parentheses)
-
-    Args:
-        text: The text content to clean
-
-    Returns:
-        Cleaned text with base64 images replaced with placeholders
-    """
-    # Pattern to match base64 encoded images wrapped in parentheses
-    # Matches: (data:image/[type];base64,[base64-string])
-    base64_with_parens_pattern = r'\(data:image/[^;]+;base64,[A-Za-z0-9+/=]+\)'
-
-    # Pattern to match base64 encoded images without parentheses
-    # Matches: data:image/[type];base64,[base64-string]
-    base64_pattern = r'data:image/[^;]+;base64,[A-Za-z0-9+/=]+'
-
-    # Replace parentheses-wrapped images first
-    cleaned_text = re.sub(base64_with_parens_pattern, '[BASE64_IMAGE_REMOVED]', text)
-
-    # Then replace any remaining non-parentheses images
-    cleaned_text = re.sub(base64_pattern, '[BASE64_IMAGE_REMOVED]', cleaned_text)
-
-    return cleaned_text
 
 
 def _get_extract_char_limit() -> int:
@@ -1386,7 +545,6 @@ def _truncate_with_footer(
 
     total = len(content)
     stored_path = _store_full_text(url, content)
-    shown = len(head) + len(tail)
 
     footer_lines = [
         "",
@@ -1416,6 +574,7 @@ def _truncate_with_footer(
     model_text = head + "\n\n[... middle omitted — see footer ...]\n\n" + tail
     model_text += "\n" + "\n".join(footer_lines)
     return model_text, True
+
 
 
 # ─── Exa / Parallel inline helpers — moved into plugins ──────────────────────
@@ -1465,11 +624,11 @@ def web_search_tool(query: str, limit: int = 5) -> str:
 
     Note: This function returns search result metadata only (URLs, titles, descriptions).
     Use web_extract_tool to get full content from specific URLs.
-
+    
     Args:
         query (str): The search query to look up
         limit (int): Maximum number of results to return (default: 5)
-
+    
     Returns:
         str: JSON string containing search results with the following structure:
              {
@@ -1486,7 +645,7 @@ def web_search_tool(query: str, limit: int = 5) -> str:
                      ]
                  }
              }
-
+    
     Raises:
         Exception: If search fails or API key is not set
     """
@@ -1506,7 +665,7 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         "original_response_size": 0,
         "final_response_size": 0
     }
-
+    
     try:
         from tools.interrupt import is_interrupted
         if is_interrupted():
@@ -1520,6 +679,7 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         from agent.web_search_registry import (
             get_active_search_provider,
             get_provider as _wsp_get_provider,
+            _disabled_web_plugin_for,
         )
 
         backend = _get_search_backend()
@@ -1531,101 +691,35 @@ def web_search_tool(query: str, limit: int = 5) -> str:
             provider = get_active_search_provider()
 
         if provider is None:
-            response_data = {
-                "success": False,
-                "error": (
-                    "No web search provider configured. "
-                    "Run `hermes tools` to set one up."
-                ),
-            }
+            # A bundled web plugin the user explicitly disabled looks
+            # identical to "no provider" here — point at the real cause
+            # (re-enable the plugin) rather than a generic setup hint.
+            disabled_key = _disabled_web_plugin_for(capability="search")
+            if disabled_key:
+                _vendor = disabled_key.split("/", 1)[-1]
+                response_data = {
+                    "success": False,
+                    "error": (
+                        f"web.search_backend is set to '{_vendor}', but its "
+                        f"plugin ('{disabled_key}') is disabled in config. "
+                        f"Re-enable it with `hermes plugins enable {disabled_key}` "
+                        "(or remove it from plugins.disabled)."
+                    ),
+                }
+            else:
+                response_data = {
+                    "success": False,
+                    "error": (
+                        "No web search provider configured. "
+                        "Run `hermes tools` to set one up."
+                    ),
+                }
         else:
             logger.info(
                 "Web search via %s: '%s' (limit: %d)",
                 provider.name, query, limit,
             )
-            primary_exception = None
-            try:
-                response_data = provider.search(query, limit)
-            except Exception as exc:  # noqa: BLE001 - fallback may recover quota outages
-                primary_exception = exc
-                response_data = {"success": False, "error": str(exc)}
-
-            if _web_search_should_try_fallback(response_data):
-                attempted = [provider.name]
-                fallback_errors = {}
-                fallback_succeeded = False
-                first_error = _web_search_error_message(response_data)
-                for fallback_provider in _web_provider_fallback_candidates(
-                    provider.name, "search"
-                ):
-                    if fallback_provider.name in attempted:
-                        continue
-                    attempted.append(fallback_provider.name)
-                    logger.info(
-                        "Web search fallback via %s after %s failed",
-                        fallback_provider.name,
-                        provider.name,
-                    )
-                    try:
-                        fallback_response = fallback_provider.search(query, limit)
-                    except Exception as exc:  # noqa: BLE001 - keep walking retryable fallbacks
-                        fallback_response = {"success": False, "error": str(exc)}
-
-                    if isinstance(fallback_response, dict) and fallback_response.get(
-                        "success", False
-                    ):
-                        fallback_response.setdefault("meta", {})
-                        if isinstance(fallback_response["meta"], dict):
-                            fallback_response["meta"].update(
-                                {
-                                    "primary_provider": provider.name,
-                                    "provider": fallback_provider.name,
-                                    "fallback_from": provider.name,
-                                    "fallback_reason": first_error,
-                                    "providers_attempted": attempted,
-                                }
-                            )
-                            if fallback_errors:
-                                fallback_response["meta"]["fallback_errors"] = fallback_errors
-                        response_data = fallback_response
-                        fallback_succeeded = True
-                        break
-
-                    fallback_errors[fallback_provider.name] = _web_search_error_message(
-                        fallback_response
-                    )
-                    if not _web_search_should_try_fallback(fallback_response):
-                        break
-
-                if primary_exception is not None and not fallback_succeeded:
-                    raise primary_exception
-
-                if (
-                    len(attempted) > 1
-                    and isinstance(response_data, dict)
-                    and not response_data.get("success", False)
-                ):
-                    response_data.setdefault("meta", {})
-                    if isinstance(response_data["meta"], dict):
-                        response_data["meta"].update(
-                            {
-                                "primary_provider": provider.name,
-                                "provider": provider.name,
-                                "providers_attempted": attempted,
-                                "fallback_errors": fallback_errors,
-                            }
-                        )
-            elif primary_exception is not None:
-                raise primary_exception
-
-        if not isinstance(response_data, dict):
-            response_data = {
-                "success": False,
-                "error": _web_search_error_message(
-                    response_data,
-                    default="web search returned an invalid response",
-                ),
-            }
+            response_data = provider.search(query, limit)
 
         debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
         result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
@@ -1645,529 +739,8 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         return tool_error(error_msg)
 
 
-def _normalize_matrix_queries(queries: Any) -> Tuple[List[Dict[str, str]], Optional[str]]:
-    """Normalize matrix-search query input into labeled query objects."""
-    if isinstance(queries, str):
-        raw_items = [line.strip() for line in queries.splitlines() if line.strip()]
-    elif isinstance(queries, list):
-        raw_items = queries
-    else:
-        return [], "queries must be a list of strings/objects or newline-delimited text"
-
-    normalized: List[Dict[str, str]] = []
-    for item in raw_items:
-        if isinstance(item, str):
-            query = item.strip()
-            label = query
-        elif isinstance(item, dict):
-            query = str(item.get("query") or item.get("q") or "").strip()
-            label = str(item.get("label") or item.get("id") or query).strip()
-        else:
-            return [], "each query must be a string or an object with a query field"
-        if query:
-            normalized.append({"label": label or query, "query": query})
-
-    if not normalized:
-        return [], "at least one non-empty query is required"
-    return normalized[:12], None
-
-
-def _coerce_matrix_provider_list(value: Any) -> List[str]:
-    """Normalize caller-supplied provider names without logging secrets."""
-    if value is None:
-        return []
-    if isinstance(value, str):
-        raw_items = value.split(",")
-    elif isinstance(value, (list, tuple, set)):
-        raw_items = value
-    else:
-        return []
-
-    normalized: List[str] = []
-    for item in raw_items:
-        name = str(item or "").strip().lower()
-        if name and name not in normalized:
-            normalized.append(name)
-    return normalized[:12]
-
-
-_MATRIX_PROVIDER_ENV_KEYS = {
-    "exa": ("EXA_API_KEY",),
-    "parallel": ("PARALLEL_API_KEY",),
-    "tavily": ("TAVILY_API_KEY",),
-    "firecrawl": ("FIRECRAWL_API_KEY", "FIRECRAWL_API_URL", "FIRECRAWL_GATEWAY_URL"),
-    "searxng": ("SEARXNG_URL",),
-    "brave-free": ("BRAVE_SEARCH_API_KEY",),
-    "ddgs": (),
-}
-_MATRIX_PROVIDER_ORDER = (
-    "firecrawl",
-    "parallel",
-    "tavily",
-    "exa",
-    "searxng",
-    "brave-free",
-    "ddgs",
-)
-
-
-def _ensure_web_search_plugins_registered() -> None:
-    """Best-effort load of bundled web provider plugins for direct callers."""
-    try:
-        from agent.web_search_registry import list_providers
-
-        if list_providers():
-            return
-        from hermes_cli.plugins import discover_plugins
-
-        discover_plugins()
-    except Exception as exc:  # noqa: BLE001 - matrix can still report no providers
-        logger.debug("Could not ensure web provider plugins are registered: %s", exc)
-
-
-def _provider_present_env_keys(provider: str) -> List[str]:
-    return [key for key in _MATRIX_PROVIDER_ENV_KEYS.get(provider, ()) if _has_env(key)]
-
-
-def _provider_matrix_status() -> Dict[str, Any]:
-    """Return registry-backed provider availability without network calls."""
-    _ensure_web_search_plugins_registered()
-    try:
-        from agent.web_search_registry import get_provider, list_providers
-    except Exception:
-        return {
-            "available_providers": [],
-            "missing_providers": list(_MATRIX_PROVIDER_ORDER),
-            "providers": {},
-        }
-
-    registered = {provider.name for provider in list_providers()}
-    ordered = list(_MATRIX_PROVIDER_ORDER)
-    ordered.extend(sorted(registered - set(ordered)))
-
-    available: List[str] = []
-    missing: List[str] = []
-    providers: Dict[str, Dict[str, Any]] = {}
-    for name in ordered:
-        provider = get_provider(name)
-        supports_search = bool(provider and provider.supports_search())
-        try:
-            provider_available = bool(provider and supports_search and provider.is_available())
-        except Exception as exc:  # noqa: BLE001
-            provider_available = False
-            availability_error = str(exc)
-        else:
-            availability_error = None
-        entry: Dict[str, Any] = {
-            "registered": provider is not None,
-            "supports_search": supports_search,
-            "available": provider_available,
-            "required_env_keys": list(_MATRIX_PROVIDER_ENV_KEYS.get(name, ())),
-            "present_env_keys": _provider_present_env_keys(name),
-        }
-        if availability_error:
-            entry["availability_error"] = availability_error
-        providers[name] = entry
-        if provider_available:
-            available.append(name)
-        else:
-            missing.append(name)
-
-    return {
-        "available_providers": available,
-        "missing_providers": missing,
-        "providers": providers,
-    }
-
-
-def _canonicalize_matrix_result_url(url: str) -> str:
-    if not url:
-        return ""
-    try:
-        from urllib.parse import urlsplit, urlunsplit
-
-        parts = urlsplit(url.strip())
-        path = parts.path.rstrip("/") or "/"
-        return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, parts.query, ""))
-    except Exception:
-        return url.strip()
-
-
-def _normalize_provider_matrix_results(
-    provider: str, response_data: Dict[str, Any]
-) -> List[Dict[str, Any]]:
-    results = (
-        response_data.get("data", {}).get("web", [])
-        if isinstance(response_data, dict)
-        else []
-    )
-    normalized: List[Dict[str, Any]] = []
-    for index, result in enumerate(results):
-        if not isinstance(result, dict):
-            continue
-        normalized.append(
-            {
-                "provider": provider,
-                "url": result.get("url", ""),
-                "title": result.get("title", ""),
-                "description": result.get("description", ""),
-                "position": int(result.get("position") or index + 1),
-            }
-        )
-    return normalized
-
-
-def _web_provider_matrix_search(
-    query: str,
-    limit: int = 5,
-    providers: Any = None,
-    required_providers: Any = None,
-) -> Dict[str, Any]:
-    """Search one query across all requested registered web providers."""
-    query = str(query or "").strip()
-    if not query:
-        return {"success": False, "error": "query is required for provider matrix search"}
-    try:
-        limit = int(limit)
-    except (TypeError, ValueError):
-        limit = 5
-    limit = min(max(limit, 1), 10)
-
-    status = _provider_matrix_status()
-    requested = _coerce_matrix_provider_list(providers)
-    if not requested or "all" in requested:
-        requested = [
-            name
-            for name, entry in status.get("providers", {}).items()
-            if entry.get("registered")
-        ]
-
-    required = set(_coerce_matrix_provider_list(required_providers))
-    if not requested:
-        return {
-            "success": False,
-            "coverage_status": "failed",
-            "degraded_coverage": True,
-            "error": "No configured web search providers are available for provider matrix search.",
-            "provider_status": status,
-            "requested_providers": requested,
-            "providers": [],
-        }
-
-    try:
-        from agent.web_search_registry import get_provider
-        from tools.interrupt import is_interrupted
-    except Exception as exc:
-        return {"success": False, "error": f"Web provider registry unavailable: {exc}"}
-
-    provider_results: Dict[str, Dict[str, Any]] = {}
-    provider_reports: List[Dict[str, Any]] = []
-    fused_index: Dict[str, Dict[str, Any]] = {}
-    required_failures: List[str] = []
-
-    for provider_name in requested:
-        if is_interrupted():
-            return {"success": False, "error": "Interrupted"}
-
-        provider = get_provider(provider_name)
-        if provider is None:
-            provider_results[provider_name] = {
-                "success": False,
-                "result_count": 0,
-                "error": f"Web search provider {provider_name!r} is not registered.",
-                "results": [],
-            }
-            provider_reports.append({
-                "provider": provider_name,
-                "status": "unavailable",
-                "error": "provider is not registered",
-                "results": [],
-            })
-            if provider_name in required:
-                required_failures.append(provider_name)
-            continue
-
-        display_name = getattr(provider, "display_name", provider_name)
-        try:
-            supports_search = bool(provider.supports_search())
-        except Exception:
-            supports_search = False
-        if not supports_search:
-            provider_results[provider_name] = {
-                "success": False,
-                "result_count": 0,
-                "error": "provider does not support search",
-                "results": [],
-            }
-            provider_reports.append({
-                "provider": provider_name,
-                "display_name": display_name,
-                "status": "unsupported",
-                "error": "provider does not support search",
-                "results": [],
-            })
-            if provider_name in required:
-                required_failures.append(provider_name)
-            continue
-
-        provider_status = status.get("providers", {}).get(provider_name, {})
-        if not provider_status.get("available"):
-            provider_results[provider_name] = {
-                "success": False,
-                "result_count": 0,
-                "error": "provider credentials or endpoint are unavailable",
-                "results": [],
-            }
-            provider_reports.append({
-                "provider": provider_name,
-                "display_name": display_name,
-                "status": "unavailable",
-                "error": "provider credentials or endpoint are unavailable",
-                "results": [],
-            })
-            if provider_name in required:
-                required_failures.append(provider_name)
-            continue
-
-        try:
-            response_data = provider.search(query, limit=limit)
-            provider_success = bool(
-                isinstance(response_data, dict) and response_data.get("success", False)
-            )
-            normalized = _normalize_provider_matrix_results(provider_name, response_data)
-            provider_results[provider_name] = {
-                "success": provider_success,
-                "result_count": len(normalized),
-                "results": normalized,
-            }
-            if not provider_success:
-                error = (
-                    response_data.get("error") if isinstance(response_data, dict) else "provider search failed"
-                )
-                provider_results[provider_name]["error"] = error
-                provider_reports.append({
-                    "provider": provider_name,
-                    "display_name": display_name,
-                    "status": "error",
-                    "error": str(error or "search failed"),
-                    "results": [],
-                })
-                if provider_name in required:
-                    required_failures.append(provider_name)
-                continue
-            provider_reports.append({
-                "provider": provider_name,
-                "display_name": display_name,
-                "status": "ok",
-                "result_count": len(normalized),
-                "results": normalized,
-            })
-            for item in normalized:
-                key = (
-                    _canonicalize_matrix_result_url(item["url"])
-                    or item["url"]
-                    or f"{provider_name}:{item['position']}"
-                )
-                entry = fused_index.setdefault(
-                    key,
-                    {
-                        "url": item["url"],
-                        "title": item["title"],
-                        "description": item["description"],
-                        "providers": [],
-                        "positions": {},
-                    },
-                )
-                if item["provider"] not in entry["providers"]:
-                    entry["providers"].append(item["provider"])
-                entry["positions"][item["provider"]] = item["position"]
-                if not entry.get("title") and item["title"]:
-                    entry["title"] = item["title"]
-                if not entry.get("description") and item["description"]:
-                    entry["description"] = item["description"]
-        except Exception as exc:
-            provider_results[provider_name] = {
-                "success": False,
-                "result_count": 0,
-                "error": str(exc),
-                "results": [],
-            }
-            provider_reports.append({
-                "provider": provider_name,
-                "display_name": display_name,
-                "status": "error",
-                "error": f"search failed: {type(exc).__name__}: {exc}",
-                "results": [],
-            })
-            if provider_name in required:
-                required_failures.append(provider_name)
-
-    fused_results = []
-    for entry in fused_index.values():
-        provider_hits = len(entry["providers"])
-        avg_position = sum(entry["positions"].values()) / max(1, provider_hits)
-        fused_results.append(
-            {
-                "url": entry["url"],
-                "title": entry["title"],
-                "description": entry["description"],
-                "providers": sorted(entry["providers"]),
-                "provider_hits": provider_hits,
-                "positions": entry["positions"],
-                "position": min(entry["positions"].values()) if entry["positions"] else None,
-                "_avg_position": avg_position,
-            }
-        )
-    fused_results.sort(
-        key=lambda item: (
-            -int(item.get("provider_hits") or 0),
-            float(item.get("_avg_position") or 999.0),
-            str(item.get("title") or ""),
-        )
-    )
-
-    trimmed_results = []
-    for item in fused_results[:limit]:
-        payload = dict(item)
-        payload.pop("_avg_position", None)
-        trimmed_results.append(payload)
-
-    successful = [
-        provider
-        for provider, result in provider_results.items()
-        if result.get("success")
-    ]
-    failed_or_unavailable = [
-        report for report in provider_reports if report.get("status") != "ok"
-    ]
-    coverage_status = "complete"
-    if not successful:
-        coverage_status = "failed"
-    elif failed_or_unavailable:
-        coverage_status = "degraded"
-
-    response: Dict[str, Any] = {
-        "success": bool(successful) and not required_failures,
-        "query": query,
-        "strategy": "provider_matrix",
-        "coverage_status": coverage_status,
-        "degraded_coverage": coverage_status != "complete",
-        "data": {"web": trimmed_results},
-        "provider_status": status,
-        "providers_requested": len(provider_reports),
-        "providers_succeeded": len(successful),
-        "providers_used": successful,
-        "providers_missing": [item["provider"] for item in failed_or_unavailable],
-        "providers": provider_reports,
-        "provider_results": provider_results,
-    }
-    if required:
-        response["required_providers"] = sorted(required)
-    if not successful:
-        response["error"] = "All requested web search providers failed."
-    if required_failures:
-        response["error"] = (
-            "Required search providers unavailable or failed: "
-            + ", ".join(sorted(set(required_failures)))
-        )
-    return response
-
-
-def web_search_matrix_tool(
-    queries: Any = None,
-    limit_per_query: int = 3,
-    *,
-    query: Any = None,
-    limit: Any = None,
-    providers: Any = None,
-    required_providers: Any = None,
-) -> str:
-    """Run a bounded matrix of web searches and return per-query + deduped results."""
-    if query is None and isinstance(queries, str):
-        query = queries
-        queries = None
-
-    if query is not None or providers or required_providers:
-        response_data = _web_provider_matrix_search(
-            query=query,
-            limit=limit if limit is not None else limit_per_query,
-            providers=providers,
-            required_providers=required_providers,
-        )
-        return json.dumps(response_data, indent=2, ensure_ascii=False)
-
-    normalized, error = _normalize_matrix_queries(queries)
-    if error:
-        return tool_error(error, success=False)
-
-    try:
-        limit = int(limit_per_query)
-    except (TypeError, ValueError):
-        limit = 3
-    limit = min(max(limit, 1), 10)
-
-    matrix = []
-    deduped = []
-    seen_urls = set()
-    failures = []
-
-    for item in normalized:
-        query = item["query"]
-        raw = web_search_tool(query, limit=limit)
-        try:
-            payload = json.loads(raw)
-        except Exception as exc:
-            payload = {"success": False, "error": f"Invalid web_search response: {exc}"}
-
-        results = []
-        if isinstance(payload, dict):
-            results = ((payload.get("data") or {}).get("web") or [])
-            if not payload.get("success", False):
-                failures.append({
-                    "label": item["label"],
-                    "query": query,
-                    "error": payload.get("error") or "web_search failed",
-                })
-
-        for result in results:
-            url = str(result.get("url") or "").strip()
-            if not url or url in seen_urls:
-                continue
-            seen_urls.add(url)
-            deduped.append({
-                "query_label": item["label"],
-                "query": query,
-                **result,
-            })
-
-        matrix.append({
-            "label": item["label"],
-            "query": query,
-            "success": bool(isinstance(payload, dict) and payload.get("success", False)),
-            "results_count": len(results),
-            "results": results,
-            "error": payload.get("error") if isinstance(payload, dict) else None,
-        })
-
-    response_data = {
-        "success": not failures,
-        "data": {
-            "matrix": matrix,
-            "deduped_web": deduped,
-        },
-        "meta": {
-            "query_count": len(normalized),
-            "limit_per_query": limit,
-            "configured_backend": _get_search_backend(),
-        },
-    }
-    if failures:
-        response_data["errors"] = failures
-    return json.dumps(response_data, indent=2, ensure_ascii=False)
-
-
 async def web_extract_tool(
-    urls: List[str],
+    urls: List[Any],
     format: str = None,
     char_limit: Optional[int] = None,
 ) -> str:
@@ -2183,7 +756,8 @@ async def web_extract_tool(
     ``[IMAGE: alt]`` placeholders (real image URLs are preserved as links).
 
     Args:
-        urls (List[str]): List of URLs to extract content from
+        urls (List[Any]): URL strings or search-result objects containing a
+            string ``url`` or ``href`` field
         format (str): Desired output format ("markdown" or "html", optional)
         char_limit (Optional[int]): Per-page char budget sent to the model
             (default: web.extract_char_limit or 15000). Larger pages truncate.
@@ -2203,7 +777,21 @@ async def web_extract_tool(
     from agent.redact import _PREFIX_RE
     from urllib.parse import unquote
     normalized_urls: List[str] = []
-    for _url in urls:
+    normalized_indices: List[int] = []
+    invalid_urls: Dict[int, Dict[str, Any]] = {}
+    for index, item in enumerate(urls):
+        _url = _web_extract_url(item)
+        if _url is None:
+            invalid_urls[index] = {
+                "url": "",
+                "title": "",
+                "content": "",
+                "error": (
+                    f"Invalid URL item at index {index}: expected a URL string "
+                    "or an object with a string 'url' or 'href' field"
+                ),
+            }
+            continue
         normalized_url = normalize_url_for_request(_url)
         if (
             _PREFIX_RE.search(_url)
@@ -2228,6 +816,7 @@ async def web_extract_tool(
                 ),
             })
         normalized_urls.append(normalized_url)
+        normalized_indices.append(index)
 
     debug_call_data = {
         "parameters": {
@@ -2243,24 +832,23 @@ async def web_extract_tool(
         "truncation_metrics": [],
         "processing_applied": []
     }
-
+    
     try:
         logger.info("Extracting content from %d URL(s)", len(normalized_urls))
 
         # ── SSRF protection — filter out private/internal URLs before any backend ──
         safe_urls = []
-        ssrf_blocked: List[Dict[str, Any]] = []
-        for url in normalized_urls:
+        safe_indices = []
+        ssrf_blocked: Dict[int, Dict[str, Any]] = {}
+        for index, url in zip(normalized_indices, normalized_urls):
             if not await async_is_safe_url(url):
-                ssrf_blocked.append({
+                ssrf_blocked[index] = {
                     "url": url, "title": "", "content": "",
                     "error": "Blocked: URL targets a private or internal network address",
-                })
+                }
             else:
                 safe_urls.append(url)
-
-        extract_provider_name = None
-        extract_degradations: List[Dict[str, Any]] = []
+                safe_indices.append(index)
 
         # Dispatch only safe URLs to the configured backend
         if not safe_urls:
@@ -2279,6 +867,7 @@ async def web_extract_tool(
             from agent.web_search_registry import (
                 get_active_extract_provider,
                 get_provider as _wsp_get_provider,
+                _disabled_web_plugin_for,
             )
 
             provider = _wsp_get_provider(backend) if backend else None
@@ -2304,6 +893,27 @@ async def web_extract_tool(
                     )
                 provider = get_active_extract_provider()
                 if provider is None:
+                    # If the configured backend is a bundled web plugin the
+                    # user explicitly disabled, the backend is set correctly
+                    # and the real fix is to re-enable the plugin — say so
+                    # instead of telling them to set web.extract_backend
+                    # (which they already did). #40190 follow-up.
+                    disabled_key = _disabled_web_plugin_for(capability="extract")
+                    if disabled_key:
+                        _vendor = disabled_key.split("/", 1)[-1]
+                        return json.dumps(
+                            {
+                                "success": False,
+                                "error": (
+                                    f"web.extract_backend is set to '{_vendor}', "
+                                    f"but its plugin ('{disabled_key}') is disabled "
+                                    "in config. Re-enable it with "
+                                    f"`hermes plugins enable {disabled_key}` "
+                                    "(or remove it from plugins.disabled)."
+                                ),
+                            },
+                            ensure_ascii=False,
+                        )
                     return json.dumps(
                         {
                             "success": False,
@@ -2319,7 +929,6 @@ async def web_extract_tool(
             logger.info(
                 "Web extract via %s: %d URL(s)", provider.name, len(safe_urls)
             )
-            extract_provider_name = provider.name
 
             # Async-or-sync dispatch: parallel + firecrawl have async
             # extract(); exa + tavily are sync.
@@ -2333,23 +942,31 @@ async def web_extract_tool(
                     provider.extract, safe_urls, format=format
                 )
 
-            if not isinstance(results, list):
-                results = []
-            results, extract_degradations = await _apply_web_extract_degradation_fallback(
-                provider_name=extract_provider_name or "",
-                results=results,
-                format=format,
-            )
-
-        # Merge any SSRF-blocked results back in
-        if ssrf_blocked:
-            results = ssrf_blocked + results
+        # Reconstruct the original input order across invalid, blocked, and
+        # provider-processed entries. Providers are expected to preserve the
+        # order of the safe URL list they receive.
+        if invalid_urls or ssrf_blocked:
+            safe_results = {
+                index: (
+                    results[position]
+                    if position < len(results)
+                    else {
+                        "url": safe_urls[position],
+                        "title": "",
+                        "content": "",
+                        "error": "Extract backend returned no result for this URL",
+                    }
+                )
+                for position, index in enumerate(safe_indices)
+            }
+            by_index = {**safe_results, **ssrf_blocked, **invalid_urls}
+            results = [by_index[index] for index in range(len(urls))]
 
         response = {"results": results}
-
+        
         pages_extracted = len(response.get('results', []))
         logger.info("Extracted content from %d pages", pages_extracted)
-
+        
         debug_call_data["pages_extracted"] = pages_extracted
         debug_call_data["original_response_size"] = len(json.dumps(response))
 
@@ -2386,38 +1003,17 @@ async def web_extract_tool(
                 logger.info("%s (%d chars, whole)", url, len(clean))
 
         # Trim output to minimal fields per entry: title, content, error
-        trimmed_results = []
-        for r in response.get("results", []):
-            trimmed = {
+        trimmed_results = [
+            {
                 "url": r.get("url", ""),
                 "title": r.get("title", ""),
                 "content": r.get("content", ""),
                 "error": r.get("error"),
+                **({  "blocked_by_policy": r["blocked_by_policy"]} if "blocked_by_policy" in r else {}),
             }
-            if "provider_status" in r:
-                trimmed["provider_status"] = r["provider_status"]
-            if "blocked_by_policy" in r:
-                trimmed["blocked_by_policy"] = r["blocked_by_policy"]
-            if "degradation" in r:
-                trimmed["degradation"] = r["degradation"]
-            trimmed_results.append(trimmed)
+            for r in response.get("results", [])
+        ]
         trimmed_response = {"results": trimmed_results}
-        provider_status = next(
-            (
-                r.get("provider_status")
-                for r in response.get("results", [])
-                if isinstance(r.get("provider_status"), dict)
-            ),
-            None,
-        )
-        if provider_status:
-            trimmed_response["provider_status"] = provider_status
-        if extract_provider_name or extract_degradations:
-            trimmed_response["meta"] = {
-                "extract_provider": extract_provider_name,
-            }
-            if extract_degradations:
-                trimmed_response["meta"]["degradations"] = extract_degradations
 
         if trimmed_response.get("results") == []:
             result_json = tool_error("Content was inaccessible or not found")
@@ -2431,253 +1027,21 @@ async def web_extract_tool(
 
         debug_call_data["final_response_size"] = len(cleaned_result)
         debug_call_data["processing_applied"].append("base64_image_conversion")
-
+        
         # Log debug information
         _debug.log_call("web_extract_tool", debug_call_data)
         _debug.save()
-
+        
         return cleaned_result
-
+            
     except Exception as e:
         error_msg = f"Error extracting content: {str(e)}"
         logger.debug("%s", error_msg)
-
+        
         debug_call_data["error"] = error_msg
         _debug.log_call("web_extract_tool", debug_call_data)
         _debug.save()
-
-        return tool_error(error_msg)
-
-
-async def web_crawl_tool(
-    url: str,
-    instructions: str = None,
-    depth: str = "basic",
-    use_llm_processing: bool = True,
-    model: Optional[str] = None,
-    min_length: int = DEFAULT_MIN_LENGTH_FOR_SUMMARIZATION
-) -> str:
-    """
-    Crawl a website with specific instructions using available crawling API backend.
-
-    This function provides a generic interface for web crawling that can work
-    with multiple backends. Currently uses Firecrawl.
-
-    Args:
-        url (str): The base URL to crawl (can include or exclude https://)
-        instructions (str): Instructions for what to crawl/extract using LLM intelligence (optional)
-        depth (str): Depth of extraction ("basic" or "advanced", default: "basic")
-        use_llm_processing (bool): Whether to process content with LLM for summarization (default: True)
-        model (Optional[str]): The model to use for LLM processing (defaults to current auxiliary backend model)
-        min_length (int): Minimum content length to trigger LLM processing (default: 5000)
-
-    Returns:
-        str: JSON string containing crawled content. If LLM processing is enabled and successful,
-             the 'content' field will contain the processed markdown summary instead of raw content.
-             Each page is processed individually.
-
-    Raises:
-        Exception: If crawling fails or API key is not set
-    """
-    debug_call_data = {
-        "parameters": {
-            "url": url,
-            "instructions": instructions,
-            "depth": depth,
-            "use_llm_processing": use_llm_processing,
-            "model": model,
-            "min_length": min_length
-        },
-        "error": None,
-        "pages_crawled": 0,
-        "pages_processed_with_llm": 0,
-        "original_response_size": 0,
-        "final_response_size": 0,
-        "compression_metrics": [],
-        "processing_applied": []
-    }
-
-    try:
-        effective_model = model or _get_default_summarizer_model()
-        auxiliary_available = check_auxiliary_model()
-        backend = _get_backend()
-
-        # Tavily (and any future plugin advertising supports_crawl=True)
-        # dispatches through agent.web_search_registry. The crawl response
-        # shape — {"results": [{"url", "title", "content", ...}]} — is then
-        # post-processed by the shared LLM-summarization path below.
-        from agent.web_search_registry import (
-            get_provider as _wsp_get_provider,
-        )
-
-        crawl_provider = _wsp_get_provider(backend) if backend else None
-        if crawl_provider is not None and not crawl_provider.supports_crawl():
-            # When the configured provider is search-only AND cannot
-            # extract URLs either (brave-free / ddgs / searxng), surface a
-            # typed "search-only" error rather than silently switching to
-            # a different crawl backend. When the provider supports extract
-            # but not crawl (e.g. firecrawl), fall through to the legacy
-            # firecrawl-via-extract path below.
-            if not crawl_provider.supports_extract():
-                return json.dumps(
-                    {
-                        "success": False,
-                        "error": (
-                            f"{crawl_provider.display_name} is a search-only "
-                            "backend and cannot crawl URLs. "
-                            "Set FIRECRAWL_API_KEY for crawling, or use "
-                            "web_search instead."
-                        ),
-                    },
-                    ensure_ascii=False,
-                )
-            crawl_provider = None  # let legacy firecrawl path handle it
-        if crawl_provider is None:
-            crawl_provider = get_active_crawl_provider()
-
-        # Mirror main's upstream availability gate: when the resolved
-        # provider is configured-but-unavailable (e.g. firecrawl without
-        # FIRECRAWL_API_KEY), short-circuit BEFORE we dispatch so the
-        # error envelope matches the legacy top-level shape
-        # ``{"success": False, "error": "..."}`` rather than burying the
-        # configuration message inside a per-page ``results[]`` entry.
-        if crawl_provider is not None and not crawl_provider.is_available():
-            return json.dumps(
-                {
-                    "success": False,
-                    "error": (
-                        "web_crawl requires Firecrawl. Set FIRECRAWL_API_KEY, "
-                        f"FIRECRAWL_API_URL{_firecrawl_backend_help_suffix()}, "
-                        "or use web_search + web_extract instead."
-                    ),
-                },
-                ensure_ascii=False,
-            )
-
-        if crawl_provider is not None:
-            # Ensure URL has protocol
-            if not url.startswith(('http://', 'https://')):
-                url = f'https://{url}'
-
-            # SSRF protection — block private/internal addresses
-            if not is_safe_url(url):
-                return json.dumps({"results": [{"url": url, "title": "", "content": "",
-                    "error": "Blocked: URL targets a private or internal network address"}]}, ensure_ascii=False)
-
-            # Website policy check
-            blocked = check_website_access(url)
-            if blocked:
-                logger.info("Blocked web_crawl for %s by rule %s", blocked["host"], blocked["rule"])
-                return json.dumps({"results": [{"url": url, "title": "", "content": "", "error": blocked["message"],
-                    "blocked_by_policy": {"host": blocked["host"], "rule": blocked["rule"], "source": blocked["source"]}}]}, ensure_ascii=False)
-
-            from tools.interrupt import is_interrupted as _is_int
-            if _is_int():
-                return tool_error("Interrupted", success=False)
-
-            logger.info("Web crawl via %s: %s", crawl_provider.name, url)
-
-            # Async-or-sync dispatch — Tavily's crawl is sync, but a future
-            # async-crawl provider works transparently.
-            import inspect
-            crawl_kwargs = {"depth": depth, "limit": 20}
-            if instructions:
-                crawl_kwargs["instructions"] = instructions
-
-            if inspect.iscoroutinefunction(crawl_provider.crawl):
-                response = await crawl_provider.crawl(url, **crawl_kwargs)
-            else:
-                response = await asyncio.to_thread(
-                    crawl_provider.crawl, url, **crawl_kwargs
-                )
-
-            # Provider returns {"results": [...]} matching what the shared
-            # LLM post-processing below expects.
-            if not isinstance(response, dict):
-                response = {"results": []}
-            response.setdefault("results", [])
-
-            # Fall through to the shared LLM processing and trimming below
-            # (skip the Firecrawl-specific crawl logic)
-            pages_crawled = len(response.get('results', []))
-            logger.info("Crawled %d pages", pages_crawled)
-            debug_call_data["pages_crawled"] = pages_crawled
-            debug_call_data["original_response_size"] = len(json.dumps(response))
-
-            # Process each result with LLM if enabled
-            if use_llm_processing and auxiliary_available:
-                logger.info("Processing crawled content with LLM (parallel)...")
-                debug_call_data["processing_applied"].append("llm_processing")
-
-                async def _process_tavily_crawl(result):
-                    page_url = result.get('url', 'Unknown URL')
-                    title = result.get('title', '')
-                    content = result.get('content', '')
-                    if not content:
-                        return result, None, "no_content"
-                    original_size = len(content)
-                    processed = await process_content_with_llm(content, page_url, title, effective_model, min_length)
-                    if processed:
-                        result['raw_content'] = content
-                        result['content'] = processed
-                        metrics = {"url": page_url, "original_size": original_size, "processed_size": len(processed),
-                                   "compression_ratio": len(processed) / original_size if original_size else 1.0, "model_used": effective_model}
-                        return result, metrics, "processed"
-                    metrics = {"url": page_url, "original_size": original_size, "processed_size": original_size,
-                               "compression_ratio": 1.0, "model_used": None, "reason": "content_too_short"}
-                    return result, metrics, "too_short"
-
-                tasks = [_process_tavily_crawl(r) for r in response.get('results', [])]
-                # Use return_exceptions=True so a single task failure does not
-                # discard all other successfully processed crawl results.
-                processed_results = await asyncio.gather(*tasks, return_exceptions=True)
-                for result_item in processed_results:
-                    if isinstance(result_item, BaseException):
-                        logger.warning("Tavily crawl processing task failed: %s", result_item)
-                        continue
-                    result, metrics, status = result_item
-                    if status == "processed":
-                        debug_call_data["compression_metrics"].append(metrics)
-                        debug_call_data["pages_processed_with_llm"] += 1
-
-            if use_llm_processing and not auxiliary_available:
-                logger.warning("LLM processing requested but no auxiliary model available, returning raw content")
-                debug_call_data["processing_applied"].append("llm_processing_unavailable")
-
-            trimmed_results = [{"url": r.get("url", ""), "title": r.get("title", ""), "content": r.get("content", ""), "error": r.get("error"),
-                **({  "blocked_by_policy": r["blocked_by_policy"]} if "blocked_by_policy" in r else {})} for r in response.get("results", [])]
-            result_json = json.dumps({"results": trimmed_results}, indent=2, ensure_ascii=False)
-            cleaned_result = clean_base64_images(result_json)
-            debug_call_data["final_response_size"] = len(cleaned_result)
-            _debug.log_call("web_crawl_tool", debug_call_data)
-            _debug.save()
-            return cleaned_result
-
-        # No registered provider supports crawl AND no crawl-capable plugin
-        # is available. Surface a typed error pointing the user at the two
-        # crawl-capable providers (Firecrawl + Tavily).
-        return json.dumps(
-            {
-                "success": False,
-                "error": (
-                    "web_crawl has no available backend. "
-                    "Set FIRECRAWL_API_KEY (or FIRECRAWL_API_URL for "
-                    f"self-hosted){_firecrawl_backend_help_suffix()}, "
-                    "or set TAVILY_API_KEY for Tavily. "
-                    "Alternatively use web_search + web_extract instead."
-                ),
-            },
-            ensure_ascii=False,
-        )
-
-    except Exception as e:
-        error_msg = f"Error crawling website: {str(e)}"
-        logger.debug("%s", error_msg)
-
-        debug_call_data["error"] = error_msg
-        _debug.log_call("web_crawl_tool", debug_call_data)
-        _debug.save()
-
+        
         return tool_error(error_msg)
 
 
@@ -2692,7 +1056,9 @@ def check_web_api_key() -> bool:
     :func:`_is_backend_available`, which delegates non-legacy names to the
     registry.
     """
-    configured = _load_web_config().get("backend", "").lower().strip()
+    # ``or ""``: a null ``web.backend`` value yields None from ``.get``, and
+    # ``None.lower()`` would raise. Mirrors ``_get_backend``.
+    configured = (_load_web_config().get("backend") or "").lower().strip()
     if configured and _is_backend_available(configured):
         return True
     # Any built-in backend with credentials present. This is a boolean OR, so
@@ -2718,470 +1084,6 @@ def check_web_api_key() -> bool:
         return False
 
 
-def check_auxiliary_model() -> bool:
-    """Check if an auxiliary text model is available for LLM content processing."""
-    client, _, _ = _resolve_web_extract_auxiliary()
-    return client is not None
-
-
-_WEB_PROVIDER_CONFIG_VARS = {
-    "brave-free": ("BRAVE_SEARCH_API_KEY",),
-    "ddgs": (),
-    "exa": ("EXA_API_KEY",),
-    "firecrawl": (
-        "FIRECRAWL_API_KEY",
-        "FIRECRAWL_API_URL",
-        "FIRECRAWL_GATEWAY_URL",
-        "TOOL_GATEWAY_DOMAIN",
-        "TOOL_GATEWAY_USER_TOKEN",
-    ),
-    "parallel": ("PARALLEL_API_KEY",),
-    "searxng": ("SEARXNG_URL",),
-    "tavily": ("TAVILY_API_KEY",),
-}
-_WEB_MATRIX_CAPABILITIES = ("search", "extract", "crawl")
-_WEB_MATRIX_SEARCH_PROVIDERS = (
-    "all",
-    "brave-free",
-    "ddgs",
-    "exa",
-    "firecrawl",
-    "parallel",
-    "searxng",
-    "tavily",
-)
-
-
-def _normalize_matrix_items(value: Any, *, allowed: Optional[set[str]] = None) -> list[str]:
-    """Normalize tool args that may arrive as a string or list."""
-    if value is None:
-        return []
-    if isinstance(value, str):
-        raw_items = [part.strip() for part in value.split(",")]
-    elif isinstance(value, (list, tuple, set)):
-        raw_items = [str(part).strip() for part in value]
-    else:
-        raw_items = [str(value).strip()]
-
-    normalized: list[str] = []
-    for item in raw_items:
-        lowered = item.lower()
-        if not lowered:
-            continue
-        if allowed is not None and lowered not in allowed:
-            continue
-        if lowered not in normalized:
-            normalized.append(lowered)
-    return normalized
-
-
-def _safe_provider_bool(provider: Any, method_name: str) -> bool:
-    try:
-        method = getattr(provider, method_name)
-        return bool(method())
-    except Exception:
-        return False
-
-
-def _provider_config_presence(provider_name: str) -> dict[str, list[str]]:
-    env_names = _WEB_PROVIDER_CONFIG_VARS.get(provider_name, ())
-    present = [name for name in env_names if _has_env(name)]
-    missing = [name for name in env_names if name not in present]
-    return {"present": present, "missing": missing}
-
-
-def _provider_matrix_row(provider: Any) -> dict[str, Any]:
-    name = str(getattr(provider, "name", "") or "").strip().lower()
-    capabilities = {
-        "search": _safe_provider_bool(provider, "supports_search"),
-        "extract": _safe_provider_bool(provider, "supports_extract"),
-        "crawl": _safe_provider_bool(provider, "supports_crawl"),
-    }
-    available = _safe_provider_bool(provider, "is_available")
-    config = _provider_config_presence(name)
-    return {
-        "name": name,
-        "display_name": str(getattr(provider, "display_name", name) or name),
-        "available": available,
-        "configured": bool(config["present"]) or available,
-        "capabilities": capabilities,
-        "config": config,
-    }
-
-
-def _configured_browser_cloud_provider() -> str:
-    try:
-        from hermes_cli.config import load_config
-
-        browser_cfg = (load_config() or {}).get("browser", {})
-        if isinstance(browser_cfg, dict):
-            return str(browser_cfg.get("cloud_provider") or "").strip().lower()
-    except Exception as exc:
-        logger.debug("Could not read browser cloud provider config: %s", exc)
-    return ""
-
-
-def _firecrawl_surface_status(providers_by_name: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    provider = providers_by_name.get("firecrawl") or {}
-    capabilities = provider.get("capabilities") if isinstance(provider, dict) else {}
-    available = bool(provider.get("available")) if isinstance(provider, dict) else False
-    browser_provider = _configured_browser_cloud_provider()
-    browser_key_present = _has_env("FIRECRAWL_API_KEY")
-    return {
-        "search": available and bool(capabilities.get("search")),
-        "scrape": available and bool(capabilities.get("extract")),
-        "extract": available and bool(capabilities.get("extract")),
-        "crawl": available and bool(capabilities.get("crawl")),
-        "interact": browser_provider == "firecrawl" and browser_key_present,
-        "browser_cloud_provider": browser_provider or None,
-        "config": {
-            "present": [name for name in ("FIRECRAWL_API_KEY", "FIRECRAWL_API_URL") if _has_env(name)],
-            "missing": [name for name in ("FIRECRAWL_API_KEY", "FIRECRAWL_API_URL") if not _has_env(name)],
-        },
-    }
-
-
-def _matrix_provider_status(providers: list[dict[str, Any]]) -> dict[str, Any]:
-    available = sorted(
-        row["name"]
-        for row in providers
-        if row.get("available")
-    )
-    providers_by_name = {
-        row["name"]: {
-            "available": row.get("available", False),
-            "capabilities": row.get("capabilities", {}),
-            "required_env_keys": list(_WEB_PROVIDER_CONFIG_VARS.get(row["name"], ())),
-            "present_env_keys": row.get("config", {}).get("present", []),
-            "missing_env_keys": row.get("config", {}).get("missing", []),
-        }
-        for row in providers
-    }
-    return {
-        "available_providers": available,
-        "missing_providers": sorted(
-            row["name"]
-            for row in providers
-            if not row.get("available")
-        ),
-        "providers": providers_by_name,
-    }
-
-
-def _canonicalize_matrix_result_url(url: str) -> str:
-    if not url:
-        return ""
-    try:
-        from urllib.parse import urlsplit, urlunsplit
-
-        parts = urlsplit(url.strip())
-    except Exception:
-        return url.strip()
-    path = parts.path.rstrip("/") or "/"
-    return urlunsplit(
-        (parts.scheme.lower(), parts.netloc.lower(), path, parts.query, "")
-    )
-
-
-def _normalize_matrix_search_results(
-    provider: str,
-    response_data: dict[str, Any],
-) -> list[dict[str, Any]]:
-    results = (
-        response_data.get("data", {}).get("web", [])
-        if isinstance(response_data, dict)
-        else []
-    )
-    normalized: list[dict[str, Any]] = []
-    for index, result in enumerate(results):
-        if not isinstance(result, dict):
-            continue
-        normalized.append(
-            {
-                "provider": provider,
-                "url": str(result.get("url") or ""),
-                "title": str(result.get("title") or ""),
-                "description": str(result.get("description") or ""),
-                "position": int(result.get("position") or index + 1),
-            }
-        )
-    return normalized
-
-
-def _run_web_search_matrix_query(
-    query: str,
-    limit: int,
-    providers: list[dict[str, Any]],
-    requested_providers: list[str],
-) -> dict[str, Any]:
-    from agent.web_search_registry import get_provider
-
-    try:
-        limit = int(limit)
-    except (TypeError, ValueError):
-        limit = 5
-    limit = min(max(limit, 1), 10)
-
-    providers_by_name = {row["name"]: row for row in providers}
-    if not requested_providers or "all" in requested_providers:
-        requested = [
-            row["name"]
-            for row in providers
-            if row.get("available") and row.get("capabilities", {}).get("search")
-        ]
-    else:
-        requested = [
-            provider
-            for provider in requested_providers
-            if provider in providers_by_name and provider != "all"
-        ]
-
-    available_requested = [
-        provider
-        for provider in requested
-        if providers_by_name.get(provider, {}).get("available")
-        and providers_by_name.get(provider, {}).get("capabilities", {}).get("search")
-    ]
-    missing_requested = [
-        provider for provider in requested if provider not in available_requested
-    ]
-
-    provider_results: dict[str, dict[str, Any]] = {}
-    fused_index: dict[str, dict[str, Any]] = {}
-
-    for provider_name in available_requested:
-        provider = get_provider(provider_name)
-        if provider is None:
-            provider_results[provider_name] = {
-                "success": False,
-                "result_count": 0,
-                "error": f"Web search provider {provider_name!r} is not registered.",
-                "results": [],
-            }
-            continue
-        try:
-            response_data = provider.search(query, limit=limit)
-            normalized = _normalize_matrix_search_results(provider_name, response_data)
-            provider_results[provider_name] = {
-                "success": bool(response_data.get("success", True)),
-                "result_count": len(normalized),
-                "results": normalized,
-            }
-            if response_data.get("error"):
-                provider_results[provider_name]["error"] = str(response_data["error"])
-            for item in normalized:
-                key = (
-                    _canonicalize_matrix_result_url(item["url"])
-                    or item["url"]
-                    or f"{provider_name}:{item['position']}"
-                )
-                entry = fused_index.setdefault(
-                    key,
-                    {
-                        "url": item["url"],
-                        "title": item["title"],
-                        "description": item["description"],
-                        "providers": [],
-                        "positions": {},
-                    },
-                )
-                if item["provider"] not in entry["providers"]:
-                    entry["providers"].append(item["provider"])
-                entry["positions"][item["provider"]] = item["position"]
-                if not entry.get("title") and item["title"]:
-                    entry["title"] = item["title"]
-                if not entry.get("description") and item["description"]:
-                    entry["description"] = item["description"]
-        except Exception as exc:
-            provider_results[provider_name] = {
-                "success": False,
-                "result_count": 0,
-                "error": str(exc),
-                "results": [],
-            }
-
-    fused_results = []
-    for entry in fused_index.values():
-        provider_hits = len(entry["providers"])
-        avg_position = sum(entry["positions"].values()) / max(1, provider_hits)
-        fused_results.append(
-            {
-                "url": entry["url"],
-                "title": entry["title"],
-                "description": entry["description"],
-                "providers": sorted(entry["providers"]),
-                "provider_hits": provider_hits,
-                "positions": entry["positions"],
-                "position": (
-                    min(entry["positions"].values()) if entry["positions"] else None
-                ),
-                "_avg_position": avg_position,
-            }
-        )
-
-    fused_results.sort(
-        key=lambda item: (
-            -int(item.get("provider_hits") or 0),
-            float(item.get("_avg_position") or 999.0),
-            str(item.get("title") or ""),
-        )
-    )
-    trimmed_results = []
-    for item in fused_results[:limit]:
-        payload = dict(item)
-        payload.pop("_avg_position", None)
-        trimmed_results.append(payload)
-
-    if not available_requested:
-        return {
-            "query": query,
-            "strategy": "all_available" if not requested_providers or "all" in requested_providers else "requested",
-            "data": {"web": []},
-            "providers_used": [],
-            "providers_missing": missing_requested,
-            "provider_results": provider_results,
-            "search_error": "No configured web search providers are available for web_search_matrix.",
-        }
-
-    return {
-        "query": query,
-        "strategy": "all_available" if not requested_providers or "all" in requested_providers else "requested",
-        "data": {"web": trimmed_results},
-        "providers_used": available_requested,
-        "providers_missing": missing_requested,
-        "provider_results": provider_results,
-    }
-
-
-def web_search_matrix(
-    query: Optional[str] = None,
-    limit: int = 5,
-    providers: Optional[List[str]] = None,
-    require_capabilities: Optional[List[str]] = None,
-    require_providers: Optional[List[str]] = None,
-) -> str:
-    """Return provider status, or run a fused multi-provider search.
-
-    The result reports provider names, capability flags, availability, active
-    providers, and env-var presence by variable name only. It never includes
-    env values. When ``query`` is supplied, the same payload also includes
-    fused search results across the available/requested search providers.
-    """
-    required_caps = _normalize_matrix_items(
-        require_capabilities,
-        allowed=set(_WEB_MATRIX_CAPABILITIES),
-    )
-    required_providers = _normalize_matrix_items(require_providers)
-    requested_search_providers = _normalize_matrix_items(
-        providers,
-        allowed=set(_WEB_MATRIX_SEARCH_PROVIDERS),
-    )
-
-    try:
-        from hermes_cli.plugins import discover_plugins
-
-        discover_plugins()
-    except Exception as exc:
-        logger.debug("Could not discover web provider plugins: %s", exc)
-
-    from agent.web_search_registry import (
-        get_active_extract_provider,
-        get_active_search_provider,
-        list_providers,
-    )
-
-    providers = [_provider_matrix_row(provider) for provider in list_providers()]
-    providers_by_name = {row["name"]: row for row in providers}
-
-    def _active_row(provider: Any, capability: str) -> Optional[dict[str, Any]]:
-        if provider is None:
-            return None
-        row = _provider_matrix_row(provider)
-        return {
-            "name": row["name"],
-            "display_name": row["display_name"],
-            "available": row["available"],
-            "capability": capability,
-        }
-
-    active = {
-        "search": _active_row(get_active_search_provider(), "search"),
-        "extract": _active_row(get_active_extract_provider(), "extract"),
-        "crawl": _active_row(get_active_crawl_provider(), "crawl"),
-    }
-
-    blocked_reasons: list[str] = []
-    if not providers:
-        blocked_reasons.append("no web providers are registered")
-
-    for name in required_providers:
-        provider = providers_by_name.get(name)
-        if provider is None:
-            blocked_reasons.append(f"required provider '{name}' is not registered")
-            continue
-        if not provider["available"]:
-            blocked_reasons.append(f"required provider '{name}' is not available")
-
-    for capability in required_caps:
-        if not any(
-            row["available"] and row["capabilities"].get(capability)
-            for row in providers
-        ):
-            blocked_reasons.append(
-                f"no available web provider supports {capability}"
-            )
-
-    status = "dependency_blocked" if blocked_reasons else "ok"
-    payload: dict[str, Any] = {
-        "success": not blocked_reasons,
-        "status": status,
-        "requirements": {
-            "capabilities": required_caps,
-            "providers": required_providers,
-        },
-        "active": active,
-        "providers": providers,
-        "provider_status": _matrix_provider_status(providers),
-        "firecrawl_surfaces": _firecrawl_surface_status(providers_by_name),
-        "blocked_reasons": blocked_reasons,
-    }
-
-    query_text = str(query or "").strip()
-    if query_text and not blocked_reasons:
-        search_payload = _run_web_search_matrix_query(
-            query_text,
-            limit,
-            providers,
-            requested_search_providers,
-        )
-        payload.update(search_payload)
-        if search_payload.get("search_error"):
-            payload["success"] = False
-            payload["status"] = "dependency_blocked"
-            payload["blocked_reasons"] = [
-                *payload["blocked_reasons"],
-                str(search_payload["search_error"]),
-            ]
-    elif query_text:
-        payload.update(
-            {
-                "query": query_text,
-                "strategy": "skipped_dependency_blocked",
-                "data": {"web": []},
-                "providers_used": [],
-                "providers_missing": requested_search_providers,
-                "provider_results": {},
-                "search_error": "web_search_matrix requirements are unavailable; search skipped.",
-            }
-        )
-
-    return json.dumps(
-        payload,
-        indent=2,
-        ensure_ascii=False,
-    )
-
-
 if __name__ == "__main__":
     """
     Simple test/demo when run directly
@@ -3192,8 +1094,9 @@ if __name__ == "__main__":
     # Check if API keys are available
     web_available = check_web_api_key()
     tool_gateway_available = _is_tool_gateway_ready()
-    firecrawl_key_available = bool(os.getenv("FIRECRAWL_API_KEY", "").strip())
-    firecrawl_url_available = bool(os.getenv("FIRECRAWL_API_URL", "").strip())
+    from hermes_cli.config import get_env_value as _gev
+    firecrawl_key_available = bool((_gev("FIRECRAWL_API_KEY") or "").strip())
+    firecrawl_url_available = bool((_gev("FIRECRAWL_API_URL") or "").strip())
 
     if web_available:
         backend = _get_backend()
@@ -3211,7 +1114,7 @@ if __name__ == "__main__":
         elif backend == "ddgs":
             print("   Using DuckDuckGo via ddgs package (search only)")
         elif firecrawl_url_available:
-            print(f"   Using self-hosted Firecrawl: {os.getenv('FIRECRAWL_API_URL').strip().rstrip('/')}")
+            print(f"   Using self-hosted Firecrawl: {(_gev('FIRECRAWL_API_URL') or '').strip().rstrip('/')}")
         elif firecrawl_key_available:
             print("   Using direct Firecrawl cloud API")
         elif tool_gateway_available:
@@ -3307,142 +1210,6 @@ WEB_EXTRACT_SCHEMA = {
     }
 }
 
-WEB_SEARCH_MATRIX_SCHEMA = {
-    "name": "web_search_matrix",
-    "description": (
-        "Search across configured web providers, run labeled query matrices, "
-        "and report provider capability status. Returns fused results when "
-        "query is supplied, plus provider availability, active "
-        "search/extract/crawl providers, Firecrawl surface status, and env-var "
-        "presence by variable name only."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": (
-                    "Optional search query. Omit this to report provider status "
-                    "without making external search calls."
-                ),
-            },
-            "queries": {
-                "type": "array",
-                "items": {
-                    "oneOf": [
-                        {"type": "string"},
-                        {
-                            "type": "object",
-                            "properties": {
-                                "label": {"type": "string"},
-                                "query": {"type": "string"},
-                            },
-                            "required": ["query"],
-                        },
-                    ]
-                },
-                "description": "One to twelve source-discovery queries, as strings or {label, query} objects.",
-                "minItems": 1,
-                "maxItems": 12,
-            },
-            "limit": {
-                "type": "integer",
-                "description": "Maximum number of fused search results to return.",
-                "minimum": 1,
-                "maximum": 10,
-            },
-            "limit_per_query": {
-                "type": "integer",
-                "description": "Maximum results per labeled query. Defaults to 3.",
-                "minimum": 1,
-                "maximum": 10,
-                "default": 3,
-            },
-            "providers": {
-                "type": "array",
-                "items": {
-                    "type": "string",
-                    "enum": list(_WEB_MATRIX_SEARCH_PROVIDERS),
-                },
-                "description": (
-                    "Optional search provider subset. Defaults to all available "
-                    "search providers when query is supplied."
-                ),
-            },
-            "required_providers": {
-                "type": "array",
-                "description": (
-                    "Providers that must succeed in source-discovery query mode. "
-                    "Use when a research protocol explicitly requires a named provider."
-                ),
-                "items": {
-                    "type": "string",
-                    "enum": [
-                        "brave-free",
-                        "ddgs",
-                        "exa",
-                        "firecrawl",
-                        "parallel",
-                        "searxng",
-                        "tavily",
-                    ],
-                },
-            },
-            "require_capabilities": {
-                "type": "array",
-                "items": {
-                    "type": "string",
-                    "enum": ["search", "extract", "crawl"],
-                },
-                "description": (
-                    "Optional capabilities that must have at least one available "
-                    "provider. If unmet, the result status is dependency_blocked."
-                ),
-            },
-            "require_providers": {
-                "type": "array",
-                "items": {
-                    "type": "string",
-                    "enum": [
-                        "brave-free",
-                        "ddgs",
-                        "exa",
-                        "firecrawl",
-                        "parallel",
-                        "searxng",
-                        "tavily",
-                    ],
-                },
-                "description": (
-                    "Optional provider names that must be registered and available. "
-                    "Use ['firecrawl'] for jobs that require Firecrawl-backed capture."
-                ),
-            },
-        },
-        "required": [],
-    },
-}
-
-
-def _handle_web_search_matrix_registry(args, **kw):
-    if args.get("queries") is not None or args.get("required_providers") is not None:
-        return web_search_matrix_tool(
-            args.get("queries"),
-            limit_per_query=args.get("limit_per_query", 3),
-            query=args.get("query"),
-            limit=args.get("limit"),
-            providers=args.get("providers"),
-            required_providers=args.get("required_providers"),
-        )
-    return web_search_matrix(
-        query=args.get("query"),
-        limit=args.get("limit") or 5,
-        providers=args.get("providers"),
-        require_capabilities=args.get("require_capabilities"),
-        require_providers=args.get("require_providers"),
-    )
-
-
 registry.register(
     name="web_search",
     toolset="web",
@@ -3466,14 +1233,5 @@ registry.register(
     requires_env=_web_requires_env(),
     is_async=True,
     emoji="📄",
-    max_result_size_chars=100_000,
-)
-registry.register(
-    name="web_search_matrix",
-    toolset="web",
-    schema=WEB_SEARCH_MATRIX_SCHEMA,
-    handler=_handle_web_search_matrix_registry,
-    check_fn=lambda: True,
-    emoji="🔎",
     max_result_size_chars=100_000,
 )
