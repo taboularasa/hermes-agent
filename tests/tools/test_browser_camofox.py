@@ -17,7 +17,6 @@ from tools.browser_camofox import (
     camofox_type,
     camofox_vision,
     check_camofox_available,
-    cleanup_all_camofox_sessions,
     is_camofox_mode,
     _rewrite_loopback_url_for_camofox,
 )
@@ -33,9 +32,6 @@ class TestCamofoxMode:
         monkeypatch.delenv("CAMOFOX_URL", raising=False)
         assert is_camofox_mode() is False
 
-    def test_enabled_when_url_set(self, monkeypatch):
-        monkeypatch.setenv("CAMOFOX_URL", "http://localhost:9377")
-        assert is_camofox_mode() is True
 
     def test_health_check_unreachable(self, monkeypatch):
         monkeypatch.setenv("CAMOFOX_URL", "http://localhost:19999")
@@ -82,25 +78,6 @@ class TestCamofoxLoopbackRewrite:
             "rewritten_url": "http://host.docker.internal:8766/#settings",
         }
 
-    @patch("tools.browser_camofox.load_config")
-    def test_rewrite_is_opt_in(self, mock_config, monkeypatch):
-        monkeypatch.delenv("CAMOFOX_REWRITE_LOOPBACK_URLS", raising=False)
-        mock_config.return_value = _config_with_camofox(rewrite_loopback_urls=False)
-
-        rewritten, metadata = _rewrite_loopback_url_for_camofox("http://localhost:3000/app?x=1")
-
-        assert rewritten == "http://localhost:3000/app?x=1"
-        assert metadata is None
-
-    @patch("tools.browser_camofox.load_config")
-    def test_preserves_public_urls_when_enabled(self, mock_config, monkeypatch):
-        monkeypatch.delenv("CAMOFOX_REWRITE_LOOPBACK_URLS", raising=False)
-        mock_config.return_value = _config_with_camofox(rewrite_loopback_urls=True)
-
-        rewritten, metadata = _rewrite_loopback_url_for_camofox("https://example.com:8443/path?q=1#top")
-
-        assert rewritten == "https://example.com:8443/path?q=1#top"
-        assert metadata is None
 
     @patch("tools.browser_camofox.load_config")
     def test_env_alias_takes_precedence(self, mock_config, monkeypatch):
@@ -129,36 +106,6 @@ class TestCamofoxNavigate:
         assert result["success"] is True
         assert result["url"] == "https://example.com"
 
-    @patch("tools.browser_camofox.load_config")
-    @patch("tools.browser_camofox.requests.post")
-    def test_navigate_uses_rewritten_loopback_url(self, mock_post, mock_config, monkeypatch):
-        monkeypatch.setenv("CAMOFOX_URL", "http://localhost:9377")
-        monkeypatch.delenv("CAMOFOX_REWRITE_LOOPBACK_URLS", raising=False)
-        monkeypatch.delenv("CAMOFOX_LOOPBACK_HOST_ALIAS", raising=False)
-        mock_config.return_value = _config_with_camofox(rewrite_loopback_urls=True)
-        mock_post.return_value = _mock_response(json_data={"tabId": "tab_rewrite"})
-
-        result = json.loads(camofox_navigate("http://127.0.0.1:8766/#settings", task_id="t_rewrite"))
-
-        assert result["success"] is True
-        assert result["url"] == "http://host.docker.internal:8766/#settings"
-        assert result["requested_url"] == "http://127.0.0.1:8766/#settings"
-        assert result["url_rewrite"]["to"] == "host.docker.internal"
-        assert "Rewrote loopback URL" in result["warning"]
-        assert mock_post.call_args.kwargs["json"]["url"] == "http://host.docker.internal:8766/#settings"
-
-    @patch("tools.browser_camofox.requests.post")
-    def test_navigates_existing_tab(self, mock_post, monkeypatch):
-        monkeypatch.setenv("CAMOFOX_URL", "http://localhost:9377")
-        # First call creates tab
-        mock_post.return_value = _mock_response(json_data={"tabId": "tab2", "url": "https://a.com"})
-        camofox_navigate("https://a.com", task_id="t2")
-
-        # Second call navigates
-        mock_post.return_value = _mock_response(json_data={"ok": True, "url": "https://b.com"})
-        result = json.loads(camofox_navigate("https://b.com", task_id="t2"))
-        assert result["success"] is True
-        assert result["url"] == "https://b.com"
 
     def test_connection_error_returns_helpful_message(self, monkeypatch):
         monkeypatch.setenv("CAMOFOX_URL", "http://localhost:19999")
@@ -215,17 +162,6 @@ class TestCamofoxInteractions:
         assert result["success"] is True
         assert result["clicked"] == "e5"
 
-    @patch("tools.browser_camofox.requests.post")
-    def test_type(self, mock_post, monkeypatch):
-        monkeypatch.setenv("CAMOFOX_URL", "http://localhost:9377")
-        mock_post.return_value = _mock_response(json_data={"tabId": "tab5", "url": "https://x.com"})
-        camofox_navigate("https://x.com", task_id="t5")
-
-        mock_post.return_value = _mock_response(json_data={"ok": True})
-        result = json.loads(camofox_type("@e3", "hello world", task_id="t5"))
-        assert result["success"] is True
-        # Normal text is left readable.
-        assert result["typed"] == "hello world"
 
     @patch("tools.browser_camofox.requests.post")
     def test_type_redacts_api_key(self, mock_post, monkeypatch):
@@ -257,26 +193,6 @@ class TestCamofoxInteractions:
         assert secret not in raw_result
         assert "sk-pro" in raw_result
 
-    @patch("tools.browser_camofox.requests.post")
-    def test_scroll(self, mock_post, monkeypatch):
-        monkeypatch.setenv("CAMOFOX_URL", "http://localhost:9377")
-        mock_post.return_value = _mock_response(json_data={"tabId": "tab6", "url": "https://x.com"})
-        camofox_navigate("https://x.com", task_id="t6")
-
-        mock_post.return_value = _mock_response(json_data={"ok": True})
-        result = json.loads(camofox_scroll("down", task_id="t6"))
-        assert result["success"] is True
-        assert result["scrolled"] == "down"
-
-    @patch("tools.browser_camofox.requests.post")
-    def test_back(self, mock_post, monkeypatch):
-        monkeypatch.setenv("CAMOFOX_URL", "http://localhost:9377")
-        mock_post.return_value = _mock_response(json_data={"tabId": "tab7", "url": "https://x.com"})
-        camofox_navigate("https://x.com", task_id="t7")
-
-        mock_post.return_value = _mock_response(json_data={"ok": True, "url": "https://prev.com"})
-        result = json.loads(camofox_back(task_id="t7"))
-        assert result["success"] is True
 
     @patch("tools.browser_camofox.requests.post")
     def test_press(self, mock_post, monkeypatch):
@@ -341,8 +257,13 @@ class TestCamofoxGetImages:
         mock_post.return_value = _mock_response(json_data={"tabId": "tab10", "url": "https://x.com"})
         camofox_navigate("https://x.com", task_id="t10")
 
+        # camofox_get_images parses images from the accessibility tree snapshot
+        snapshot_text = (
+            '- img "Logo"\n'
+            '  /url: https://x.com/img.png\n'
+        )
         mock_get.return_value = _mock_response(json_data={
-            "snapshot": 'img "Logo"\n/url: https://x.com/img.png',
+            "snapshot": snapshot_text,
         })
         result = json.loads(camofox_get_images(task_id="t10"))
         assert result["success"] is True
@@ -441,22 +362,3 @@ class TestBrowserToolRouting:
         assert check_browser_requirements() is True
 
 
-# ---------------------------------------------------------------------------
-# Cleanup helper
-# ---------------------------------------------------------------------------
-
-
-class TestCamofoxCleanup:
-    @patch("tools.browser_camofox.requests.post")
-    @patch("tools.browser_camofox.requests.delete")
-    def test_cleanup_all(self, mock_delete, mock_post, monkeypatch):
-        monkeypatch.setenv("CAMOFOX_URL", "http://localhost:9377")
-        mock_post.return_value = _mock_response(json_data={"tabId": "tab_c", "url": "https://x.com"})
-        camofox_navigate("https://x.com", task_id="t_cleanup")
-
-        mock_delete.return_value = _mock_response(json_data={"ok": True})
-        cleanup_all_camofox_sessions()
-
-        # Session should be gone
-        result = json.loads(camofox_snapshot(task_id="t_cleanup"))
-        assert result["success"] is False

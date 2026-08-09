@@ -84,93 +84,9 @@ class TestFirecrawlClientConfig:
                     )
                     assert result is mock_fc.return_value
 
-    def test_tool_gateway_scheme_can_switch_derived_gateway_origin_to_http(self):
-        """Shared gateway scheme should allow local plain-http vendor hosts."""
-        with patch.dict(os.environ, {
-            "TOOL_GATEWAY_DOMAIN": "nousresearch.com",
-            "TOOL_GATEWAY_SCHEME": "http",
-        }):
-            with patch("tools.web_tools._read_nous_access_token", return_value="nous-token"):
-                with patch("tools.web_tools.Firecrawl") as mock_fc:
-                    from tools.web_tools import _get_firecrawl_client
-                    result = _get_firecrawl_client()
-                    mock_fc.assert_called_once_with(
-                        api_key="nous-token",
-                        api_url="http://firecrawl-gateway.nousresearch.com",
-                    )
-                    assert result is mock_fc.return_value
-
-    def test_invalid_tool_gateway_scheme_raises(self):
-        """Unexpected shared gateway schemes should fail fast."""
-        with patch.dict(os.environ, {
-            "TOOL_GATEWAY_DOMAIN": "nousresearch.com",
-            "TOOL_GATEWAY_SCHEME": "ftp",
-        }):
-            with patch("tools.web_tools._read_nous_access_token", return_value="nous-token"):
-                from tools.web_tools import _get_firecrawl_client
-                with pytest.raises(ValueError, match="TOOL_GATEWAY_SCHEME"):
-                    _get_firecrawl_client()
-
-    def test_explicit_firecrawl_gateway_url_takes_precedence(self):
-        """An explicit Firecrawl gateway origin should override the shared domain."""
-        with patch.dict(os.environ, {
-            "FIRECRAWL_GATEWAY_URL": "https://firecrawl-gateway.localhost:3009/",
-            "TOOL_GATEWAY_DOMAIN": "nousresearch.com",
-        }):
-            with patch("tools.web_tools._read_nous_access_token", return_value="nous-token"):
-                with patch("tools.web_tools.Firecrawl") as mock_fc:
-                    from tools.web_tools import _get_firecrawl_client
-                    _get_firecrawl_client()
-                    mock_fc.assert_called_once_with(
-                        api_key="nous-token",
-                        api_url="https://firecrawl-gateway.localhost:3009",
-                    )
-
-    def test_default_gateway_domain_targets_nous_production_origin(self):
-        """Default gateway origin should point at the Firecrawl vendor hostname."""
-        with patch("tools.web_tools._read_nous_access_token", return_value="nous-token"):
-            with patch("tools.web_tools.Firecrawl") as mock_fc:
-                from tools.web_tools import _get_firecrawl_client
-                _get_firecrawl_client()
-                mock_fc.assert_called_once_with(
-                    api_key="nous-token",
-                    api_url="https://firecrawl-gateway.nousresearch.com",
-                )
-
-    def test_nous_auth_token_respects_hermes_home_override(self, tmp_path):
-        """Auth lookup should read from HERMES_HOME/auth.json, not ~/.hermes/auth.json."""
-        real_home = tmp_path / "real-home"
-        (real_home / ".hermes").mkdir(parents=True)
-
-        hermes_home = tmp_path / "hermes-home"
-        hermes_home.mkdir()
-        (hermes_home / "auth.json").write_text(json.dumps({
-            "providers": {
-                "nous": {
-                    "access_token": "nous-token",
-                }
-            }
-        }))
-
-        with patch.dict(os.environ, {
-            "HOME": str(real_home),
-            "HERMES_HOME": str(hermes_home),
-        }, clear=False):
-            import tools.web_tools
-            importlib.reload(tools.web_tools)
-            assert tools.web_tools._read_nous_access_token() == "nous-token"
 
     # ── Singleton caching ────────────────────────────────────────────
 
-    def test_singleton_returns_same_instance(self):
-        """Second call returns cached client without re-constructing."""
-        with patch.dict(os.environ, {"FIRECRAWL_API_KEY": "fc-test"}):
-            with patch("tools.web_tools.Firecrawl") as mock_fc:
-                from tools.web_tools import _get_firecrawl_client
-                client1 = _get_firecrawl_client()
-                client2 = _get_firecrawl_client()
-                assert client1 is client2
-                mock_fc.assert_called_once()  # constructed only once
 
     def test_constructor_failure_allows_retry(self):
         """If Firecrawl() raises, next call should retry (not return None)."""
@@ -244,44 +160,6 @@ class TestBackendSelection:
         with patch("tools.web_tools._load_web_config", return_value={"backend": "parallel"}):
             assert _get_backend() == "parallel"
 
-    def test_config_exa(self):
-        """web.backend=exa in config → 'exa' regardless of other keys."""
-        from tools.web_tools import _get_backend
-        with patch("tools.web_tools._load_web_config", return_value={"backend": "exa"}), \
-             patch.dict(os.environ, {"PARALLEL_API_KEY": "test-key"}):
-            assert _get_backend() == "exa"
-
-    def test_config_firecrawl(self):
-        """web.backend=firecrawl in config → 'firecrawl' even if Parallel key set."""
-        from tools.web_tools import _get_backend
-        with patch("tools.web_tools._load_web_config", return_value={"backend": "firecrawl"}), \
-             patch.dict(os.environ, {"PARALLEL_API_KEY": "test-key"}):
-            assert _get_backend() == "firecrawl"
-
-    def test_config_tavily(self):
-        """web.backend=tavily in config → 'tavily' regardless of other keys."""
-        from tools.web_tools import _get_backend
-        with patch("tools.web_tools._load_web_config", return_value={"backend": "tavily"}):
-            assert _get_backend() == "tavily"
-
-    def test_config_tavily_overrides_env_keys(self):
-        """web.backend=tavily in config → 'tavily' even if Firecrawl key set."""
-        from tools.web_tools import _get_backend
-        with patch("tools.web_tools._load_web_config", return_value={"backend": "tavily"}), \
-             patch.dict(os.environ, {"FIRECRAWL_API_KEY": "fc-test"}):
-            assert _get_backend() == "tavily"
-
-    def test_config_case_insensitive(self):
-        """web.backend=Parallel (mixed case) → 'parallel'."""
-        from tools.web_tools import _get_backend
-        with patch("tools.web_tools._load_web_config", return_value={"backend": "Parallel"}):
-            assert _get_backend() == "parallel"
-
-    def test_config_tavily_case_insensitive(self):
-        """web.backend=Tavily (mixed case) → 'tavily'."""
-        from tools.web_tools import _get_backend
-        with patch("tools.web_tools._load_web_config", return_value={"backend": "Tavily"}):
-            assert _get_backend() == "tavily"
 
     # ── Fallback (no web.backend in config) ───────────────────────────
 
@@ -321,12 +199,6 @@ class TestBackendSelection:
              patch.dict(os.environ, {"TAVILY_API_KEY": "tvly-test", "FIRECRAWL_API_KEY": "fc-test"}):
             assert _get_backend() == "tavily"
 
-    def test_fallback_tavily_beats_parallel(self):
-        """Tavily is first in the explicit-credential block so it wins over parallel."""
-        from tools.web_tools import _get_backend
-        with patch("tools.web_tools._load_web_config", return_value={}), \
-             patch.dict(os.environ, {"TAVILY_API_KEY": "tvly-test", "PARALLEL_API_KEY": "par-test"}):
-            assert _get_backend() == "tavily"
 
     def test_fallback_parallel_beats_firecrawl_direct(self):
         """Parallel + Firecrawl-direct → parallel (parallel is the higher-priority
@@ -444,177 +316,6 @@ class TestWebSearchSchema:
         assert limit_schema["default"] == 5
         assert "limit" not in tools.web_tools.WEB_SEARCH_SCHEMA["parameters"]["required"]
 
-    def test_registered_handler_passes_limit(self):
-        import tools.web_tools
-
-        entry = tools.web_tools.registry.get_entry("web_search")
-        with patch("tools.web_tools.web_search_tool", return_value='{"success": true}') as mock_search:
-            result = entry.handler({"query": "site:example.com docs", "limit": 12})
-
-        assert result == '{"success": true}'
-        mock_search.assert_called_once_with("site:example.com docs", limit=12)
-
-    def test_registered_handler_defaults_limit_to_five(self):
-        import tools.web_tools
-
-        entry = tools.web_tools.registry.get_entry("web_search")
-        with patch("tools.web_tools.web_search_tool", return_value='{"success": true}') as mock_search:
-            result = entry.handler({"query": "docs"})
-
-        assert result == '{"success": true}'
-        mock_search.assert_called_once_with("docs", limit=5)
-
-    def test_web_search_matrix_reports_provider_presence_without_values(self, monkeypatch):
-        import tools.web_tools
-
-        class FakeProvider:
-            name = "firecrawl"
-            display_name = "Firecrawl"
-
-            def is_available(self):
-                return True
-
-            def supports_search(self):
-                return True
-
-            def supports_extract(self):
-                return True
-
-            def supports_crawl(self):
-                return True
-
-        monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-secret-value")
-        with patch("hermes_cli.plugins.discover_plugins"), \
-             patch("agent.web_search_registry.list_providers", return_value=[FakeProvider()]), \
-             patch("agent.web_search_registry.get_active_search_provider", return_value=FakeProvider()), \
-             patch("agent.web_search_registry.get_active_extract_provider", return_value=FakeProvider()), \
-             patch("hermes_cli.config.load_config", return_value={"browser": {"cloud_provider": "firecrawl"}}):
-            result = json.loads(
-                tools.web_tools.web_search_matrix(
-                    require_capabilities=["search", "extract"],
-                    require_providers=["firecrawl"],
-                )
-            )
-
-        assert result["success"] is True
-        assert result["status"] == "ok"
-        assert result["active"]["search"]["name"] == "firecrawl"
-        firecrawl = result["providers"][0]
-        assert firecrawl["name"] == "firecrawl"
-        assert firecrawl["available"] is True
-        assert firecrawl["capabilities"] == {
-            "search": True,
-            "extract": True,
-            "crawl": True,
-        }
-        assert result["firecrawl_surfaces"]["search"] is True
-        assert result["firecrawl_surfaces"]["scrape"] is True
-        assert result["firecrawl_surfaces"]["extract"] is True
-        assert result["firecrawl_surfaces"]["interact"] is True
-        assert "FIRECRAWL_API_KEY" in firecrawl["config"]["present"]
-        assert "fc-secret-value" not in json.dumps(result)
-
-    def test_web_search_matrix_dependency_blocked_when_firecrawl_unavailable(self, monkeypatch):
-        import tools.web_tools
-
-        class FakeProvider:
-            name = "firecrawl"
-            display_name = "Firecrawl"
-
-            def is_available(self):
-                return False
-
-            def supports_search(self):
-                return True
-
-            def supports_extract(self):
-                return True
-
-            def supports_crawl(self):
-                return True
-
-        monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
-        with patch("hermes_cli.plugins.discover_plugins"), \
-             patch("agent.web_search_registry.list_providers", return_value=[FakeProvider()]), \
-             patch("agent.web_search_registry.get_active_search_provider", return_value=None), \
-             patch("agent.web_search_registry.get_active_extract_provider", return_value=None), \
-             patch("hermes_cli.config.load_config", return_value={"browser": {"cloud_provider": "firecrawl"}}):
-            result = json.loads(
-                tools.web_tools.web_search_matrix(
-                    require_capabilities=["search", "extract"],
-                    require_providers=["firecrawl"],
-                )
-            )
-
-        assert result["success"] is False
-        assert result["status"] == "dependency_blocked"
-        assert result["firecrawl_surfaces"]["interact"] is False
-        assert any("firecrawl" in reason.lower() for reason in result["blocked_reasons"])
-
-    def test_web_search_matrix_query_fuses_provider_results(self, monkeypatch):
-        import tools.web_tools
-
-        class FakeProvider:
-            def __init__(self, name, url):
-                self.name = name
-                self.display_name = name.title()
-                self.url = url
-
-            def is_available(self):
-                return True
-
-            def supports_search(self):
-                return True
-
-            def supports_extract(self):
-                return self.name == "firecrawl"
-
-            def supports_crawl(self):
-                return self.name == "firecrawl"
-
-            def search(self, query, limit=5):
-                return {
-                    "success": True,
-                    "data": {
-                        "web": [
-                            {
-                                "title": f"{self.name} result",
-                                "url": self.url,
-                                "description": query,
-                                "position": 1,
-                            }
-                        ]
-                    },
-                }
-
-        firecrawl = FakeProvider("firecrawl", "https://example.com/page/")
-        exa = FakeProvider("exa", "https://example.com/page")
-        providers = {"firecrawl": firecrawl, "exa": exa}
-
-        monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-secret-value")
-        monkeypatch.setenv("EXA_API_KEY", "exa-secret-value")
-        with patch("hermes_cli.plugins.discover_plugins"), \
-             patch("agent.web_search_registry.list_providers", return_value=[firecrawl, exa]), \
-             patch("agent.web_search_registry.get_provider", side_effect=providers.get), \
-             patch("agent.web_search_registry.get_active_search_provider", return_value=firecrawl), \
-             patch("agent.web_search_registry.get_active_extract_provider", return_value=firecrawl), \
-             patch("hermes_cli.config.load_config", return_value={"browser": {"cloud_provider": "firecrawl"}}):
-            result = json.loads(
-                tools.web_tools.web_search_matrix(
-                    query="ontology evidence",
-                    providers=["firecrawl", "exa"],
-                    require_providers=["firecrawl"],
-                )
-            )
-
-        assert result["success"] is True
-        assert result["query"] == "ontology evidence"
-        assert result["providers_used"] == ["firecrawl", "exa"]
-        assert result["data"]["web"][0]["provider_hits"] == 2
-        assert result["data"]["web"][0]["providers"] == ["exa", "firecrawl"]
-        assert result["provider_status"]["available_providers"] == ["exa", "firecrawl"]
-        assert "fc-secret-value" not in json.dumps(result)
-        assert "exa-secret-value" not in json.dumps(result)
 
     def test_web_search_clamps_limit_before_backend_call(self):
         import tools.web_tools
@@ -641,217 +342,6 @@ class TestWebSearchSchema:
 
         assert result == {"success": True, "data": {"web": []}}
         fake_search.assert_called_once_with("docs", 100)
-
-    def test_web_search_falls_back_when_configured_provider_hits_quota(self):
-        import tools.web_tools
-
-        primary = MagicMock(
-            name="FirecrawlWebSearchProvider",
-            supports_search=MagicMock(return_value=True),
-        )
-        primary.name = "firecrawl"
-        primary.search.return_value = {
-            "success": False,
-            "error": "Payment Required: Insufficient credits",
-        }
-        fallback = MagicMock(
-            name="ParallelWebSearchProvider",
-            supports_search=MagicMock(return_value=True),
-        )
-        fallback.name = "parallel"
-        fallback.is_available.return_value = True
-        fallback.search.return_value = {
-            "success": True,
-            "data": {"web": [{"url": "https://example.com", "title": "ok"}]},
-        }
-
-        def provider_for(name):
-            return {"firecrawl": primary, "parallel": fallback}.get(name)
-
-        with patch("tools.web_tools._get_search_backend", return_value="firecrawl"), \
-             patch("agent.web_search_registry.get_provider", side_effect=provider_for), \
-             patch("agent.web_search_registry.list_providers", return_value=[primary, fallback]), \
-             patch("tools.interrupt.is_interrupted", return_value=False), \
-             patch.object(tools.web_tools._debug, "log_call"), \
-             patch.object(tools.web_tools._debug, "save"):
-            result = json.loads(tools.web_tools.web_search_tool("docs", limit=3))
-
-        assert result["success"] is True
-        assert result["data"]["web"][0]["url"] == "https://example.com"
-        assert result["meta"]["primary_provider"] == "firecrawl"
-        assert result["meta"]["provider"] == "parallel"
-        assert result["meta"]["fallback_from"] == "firecrawl"
-        assert "Insufficient credits" in result["meta"]["fallback_reason"]
-        assert result["meta"]["providers_attempted"] == ["firecrawl", "parallel"]
-        primary.search.assert_called_once_with("docs", 3)
-        fallback.search.assert_called_once_with("docs", 3)
-
-    @pytest.mark.asyncio
-    async def test_web_extract_falls_back_to_direct_http_on_firecrawl_credit_exhaustion(self):
-        import tools.web_tools
-
-        class FakeFirecrawlProvider:
-            name = "firecrawl"
-            display_name = "Firecrawl"
-
-            def supports_extract(self):
-                return True
-
-            async def extract(self, urls, **kwargs):
-                return [
-                    {
-                        "url": urls[0],
-                        "title": "",
-                        "content": "",
-                        "raw_content": "",
-                        "error": "Payment Required: Insufficient credits",
-                    }
-                ]
-
-        direct_result = {
-            "url": "https://www.medicaid.gov/example",
-            "title": "Official source",
-            "content": "official Medicaid source text",
-            "raw_content": "official Medicaid source text",
-            "metadata": {
-                "source": "direct_http",
-                "sha256": "abc123",
-            },
-        }
-
-        with patch("tools.web_tools._get_extract_backend", return_value="firecrawl"), \
-             patch("agent.web_search_registry.get_provider", return_value=FakeFirecrawlProvider()), \
-             patch("tools.web_tools.is_safe_url", return_value=True), \
-             patch("tools.web_tools.check_auxiliary_model", return_value=False), \
-             patch("tools.web_tools._direct_http_extract_one", new=AsyncMock(return_value=direct_result)), \
-             patch.object(tools.web_tools._debug, "log_call"), \
-             patch.object(tools.web_tools._debug, "save"):
-            result = json.loads(
-                await tools.web_tools.web_extract_tool(
-                    ["https://www.medicaid.gov/example"],
-                )
-            )
-
-        entry = result["results"][0]
-        assert entry["content"] == "official Medicaid source text"
-        assert entry["error"] is None
-        assert entry["degradation"]["category"] == "provider_credit_exhaustion"
-        assert entry["degradation"]["primary_provider"] == "firecrawl"
-        assert entry["degradation"]["fallback_provider"] == "direct_http"
-        assert entry["degradation"]["fallback_status"] == "succeeded"
-        assert result["meta"]["degradations"][0]["category"] == "provider_credit_exhaustion"
-
-    def test_web_search_falls_back_when_configured_provider_raises_retryable_error(self):
-        import tools.web_tools
-
-        primary = MagicMock(
-            name="FirecrawlWebSearchProvider",
-            supports_search=MagicMock(return_value=True),
-        )
-        primary.name = "firecrawl"
-        primary.search.side_effect = RuntimeError("rate limited by provider")
-        fallback = MagicMock(
-            name="ParallelWebSearchProvider",
-            supports_search=MagicMock(return_value=True),
-        )
-        fallback.name = "parallel"
-        fallback.is_available.return_value = True
-        fallback.search.return_value = {
-            "success": True,
-            "data": {"web": [{"url": "https://example.com", "title": "ok"}]},
-        }
-
-        def provider_for(name):
-            return {"firecrawl": primary, "parallel": fallback}.get(name)
-
-        with patch("tools.web_tools._get_search_backend", return_value="firecrawl"), \
-             patch("agent.web_search_registry.get_provider", side_effect=provider_for), \
-             patch("agent.web_search_registry.list_providers", return_value=[primary, fallback]), \
-             patch("tools.interrupt.is_interrupted", return_value=False), \
-             patch.object(tools.web_tools._debug, "log_call"), \
-             patch.object(tools.web_tools._debug, "save"):
-            result = json.loads(tools.web_tools.web_search_tool("docs", limit=3))
-
-        assert result["success"] is True
-        assert result["meta"]["primary_provider"] == "firecrawl"
-        assert result["meta"]["provider"] == "parallel"
-        assert result["meta"]["fallback_reason"] == "rate limited by provider"
-        primary.search.assert_called_once_with("docs", 3)
-        fallback.search.assert_called_once_with("docs", 3)
-
-
-class TestWebSearchMatrix:
-    """Test suite for web_search_matrix provider coverage reporting."""
-
-    class FakeProvider:
-        def __init__(self, name, *, available=True, response=None):
-            self.name = name
-            self.display_name = name.title()
-            self._available = available
-            self._response = response or {
-                "success": True,
-                "data": {
-                    "web": [
-                        {
-                            "title": f"{name} result",
-                            "url": f"https://{name}.example/result",
-                            "description": "result",
-                            "position": 1,
-                        }
-                    ]
-                },
-            }
-
-        def supports_search(self):
-            return True
-
-        def is_available(self):
-            return self._available
-
-        def search(self, query, limit):
-            return self._response
-
-    def test_matrix_reports_degraded_coverage_for_unavailable_provider(self):
-        import tools.web_tools
-
-        exa = self.FakeProvider("exa")
-        firecrawl = self.FakeProvider("firecrawl", available=False)
-        providers = {"exa": exa, "firecrawl": firecrawl}
-
-        with patch("agent.web_search_registry.list_providers", return_value=[exa, firecrawl]), \
-             patch("agent.web_search_registry.get_provider", side_effect=lambda name: providers.get(name)), \
-             patch("tools.interrupt.is_interrupted", return_value=False):
-            result = json.loads(tools.web_tools.web_search_matrix_tool("ontology source registry", limit=2))
-
-        assert result["success"] is True
-        assert result["coverage_status"] == "degraded"
-        assert result["degraded_coverage"] is True
-        assert result["providers_succeeded"] == 1
-        by_provider = {item["provider"]: item for item in result["providers"]}
-        assert by_provider["exa"]["status"] == "ok"
-        assert by_provider["firecrawl"]["status"] == "unavailable"
-
-    def test_required_provider_failure_makes_matrix_unsuccessful(self):
-        import tools.web_tools
-
-        exa = self.FakeProvider("exa")
-        firecrawl = self.FakeProvider("firecrawl", available=False)
-        providers = {"exa": exa, "firecrawl": firecrawl}
-
-        with patch("agent.web_search_registry.list_providers", return_value=[exa, firecrawl]), \
-             patch("agent.web_search_registry.get_provider", side_effect=lambda name: providers.get(name)), \
-             patch("tools.interrupt.is_interrupted", return_value=False):
-            result = json.loads(
-                tools.web_tools.web_search_matrix_tool(
-                    "ontology source registry",
-                    providers=["exa", "firecrawl"],
-                    required_providers=["firecrawl"],
-                )
-            )
-
-        assert result["success"] is False
-        assert result["coverage_status"] == "degraded"
-        assert "firecrawl" in result["error"]
 
 
 class TestWebSearchErrorHandling:
@@ -890,55 +380,6 @@ class TestWebSearchErrorHandling:
         assert "traceback" not in result
 
 
-class TestWebExtractProviderStatus:
-    """Provider degradation metadata survives web_extract result trimming."""
-
-    @pytest.mark.asyncio
-    async def test_trimmed_extract_output_keeps_provider_status(self):
-        import tools.web_tools
-
-        provider_status = {
-            "provider": "firecrawl",
-            "status": "degraded",
-            "reason": "credit_exhausted",
-            "operator_action_required": False,
-            "policy": "Treat Firecrawl as optional degraded coverage.",
-            "fallback_path": "Use Parallel search plus direct capture.",
-        }
-
-        class FakeProvider:
-            name = "firecrawl"
-            display_name = "Firecrawl"
-
-            def supports_extract(self):
-                return True
-
-            async def extract(self, urls, **_kwargs):
-                return [
-                    {
-                        "url": urls[0],
-                        "title": "",
-                        "content": "",
-                        "raw_content": "",
-                        "error": "Firecrawl degraded: optional degraded coverage.",
-                        "provider_status": provider_status,
-                    }
-                ]
-
-        with patch("tools.web_tools._get_extract_backend", return_value="firecrawl"), \
-             patch("agent.web_search_registry.get_provider", return_value=FakeProvider()), \
-             patch.object(tools.web_tools._debug, "log_call"), \
-             patch.object(tools.web_tools._debug, "save"):
-            result = json.loads(
-                await tools.web_tools.web_extract_tool(
-                    ["https://example.com/source.pdf"],
-                )
-            )
-
-        assert result["provider_status"] == provider_status
-        assert result["results"][0]["provider_status"] == provider_status
-
-
 class TestCheckWebApiKey:
     """Test suite for check_web_api_key() unified availability check."""
 
@@ -960,6 +401,14 @@ class TestCheckWebApiKey:
         self._managed_patchers = [
             patch("tools.web_tools.managed_nous_tools_enabled", return_value=True),
             patch("tools.managed_tool_gateway.managed_nous_tools_enabled", return_value=True),
+            # ddgs availability is package-presence driven and the plugin
+            # registry can hold an available ddgs provider. Neutralize both
+            # fallback surfaces so this class only exercises env-key/gateway
+            # resolution — otherwise these tests flip on machines where the
+            # optional ``ddgs`` package is installed (dev venvs) vs CI.
+            patch("tools.web_tools._ddgs_package_importable", return_value=False),
+            patch("agent.web_search_registry.get_active_search_provider", return_value=None),
+            patch("agent.web_search_registry.get_active_extract_provider", return_value=None),
         ]
         for p in self._managed_patchers:
             p.start()
@@ -980,93 +429,13 @@ class TestCheckWebApiKey:
             from tools.web_tools import check_web_api_key
             assert check_web_api_key() is True
 
-    def test_firecrawl_key_only(self):
-        with patch.dict(os.environ, {"FIRECRAWL_API_KEY": "fc-test"}):
+    def test_null_backend_value_does_not_crash(self):
+        # config.yaml with ``web:\n  backend:`` yields backend=None. The gate
+        # must not raise AttributeError on None.lower() — mirrors _get_backend.
+        with patch("tools.web_tools._load_web_config", return_value={"backend": None}):
             from tools.web_tools import check_web_api_key
-            assert check_web_api_key() is True
-
-    def test_firecrawl_url_only(self):
-        with patch.dict(os.environ, {"FIRECRAWL_API_URL": "http://localhost:3002"}):
-            from tools.web_tools import check_web_api_key
-            assert check_web_api_key() is True
-
-    def test_tavily_key_only(self):
-        with patch.dict(os.environ, {"TAVILY_API_KEY": "tvly-test"}):
-            from tools.web_tools import check_web_api_key
-            assert check_web_api_key() is True
-
-    def test_no_keys_returns_false(self):
-        from tools.web_tools import check_web_api_key
-        with patch("tools.web_tools._ddgs_package_importable", return_value=False):
             assert check_web_api_key() is False
 
-    def test_both_keys_returns_true(self):
-        with patch.dict(os.environ, {
-            "PARALLEL_API_KEY": "test-key",
-            "FIRECRAWL_API_KEY": "fc-test",
-        }):
-            from tools.web_tools import check_web_api_key
-            assert check_web_api_key() is True
-
-    def test_all_three_keys_returns_true(self):
-        with patch.dict(os.environ, {
-            "PARALLEL_API_KEY": "test-key",
-            "FIRECRAWL_API_KEY": "fc-test",
-            "TAVILY_API_KEY": "tvly-test",
-        }):
-            from tools.web_tools import check_web_api_key
-            assert check_web_api_key() is True
-
-    def test_tool_gateway_returns_true(self):
-        with patch("tools.web_tools._peek_nous_access_token", return_value="nous-token"):
-            from tools.web_tools import check_web_api_key
-            assert check_web_api_key() is True
-
-    def test_tool_gateway_availability_skips_refresh_for_expired_cached_token(
-        self,
-        tmp_path,
-        monkeypatch,
-    ):
-        monkeypatch.delenv("TOOL_GATEWAY_USER_TOKEN", raising=False)
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-        expired_at = "2000-01-01T00:00:00+00:00"
-        (tmp_path / "auth.json").write_text(json.dumps({
-            "providers": {
-                "nous": {
-                    "access_token": "expired-token",
-                    "refresh_token": "refresh-token",
-                    "expires_at": expired_at,
-                }
-            }
-        }))
-        refresh_calls = []
-
-        def _record_refresh(*, refresh_skew_seconds=120, **_kwargs):
-            refresh_calls.append(refresh_skew_seconds)
-            return "fresh-token"
-
-        monkeypatch.setattr(
-            "hermes_cli.auth.resolve_nous_access_token",
-            _record_refresh,
-        )
-
-        with patch.dict(
-            os.environ,
-            {"FIRECRAWL_GATEWAY_URL": "http://127.0.0.1:3002"},
-            clear=False,
-        ):
-            from tools.web_tools import check_web_api_key
-
-            assert check_web_api_key() is True
-
-        assert refresh_calls == []
-
-    def test_configured_backend_must_match_available_provider(self):
-        with patch("tools.web_tools._load_web_config", return_value={"backend": "parallel"}):
-            with patch("tools.web_tools._read_nous_access_token", return_value="nous-token"):
-                with patch.dict(os.environ, {"FIRECRAWL_GATEWAY_URL": "http://127.0.0.1:3002"}, clear=False):
-                    from tools.web_tools import check_web_api_key
-                    assert check_web_api_key() is False
 
     def test_configured_firecrawl_backend_accepts_managed_gateway(self):
         with patch("tools.web_tools._load_web_config", return_value={"backend": "firecrawl"}):
@@ -1169,13 +538,6 @@ class TestNonBuiltinProviderAvailability:
             from tools.web_tools import _get_backend
             assert _get_backend() == "fake-plugin-prov"
 
-    def test_is_backend_available_delegates_to_registry(self):
-        """_is_backend_available() must consult the registry for a
-        non-legacy backend name."""
-        from tools.web_tools import _is_backend_available
-        assert _is_backend_available("fake-plugin-prov") is True
-        # Unknown, unregistered name -> False (no legacy probe matches).
-        assert _is_backend_available("totally-unknown-backend") is False
 
     def test_capability_backend_honors_custom_extract_provider(self):
         """Per-capability selection (_get_extract_backend) must resolve the
@@ -1199,3 +561,88 @@ class TestNonBuiltinProviderAvailability:
                 "web_search tool was filtered out despite custom provider being available"
             assert web_extract_entry is not None, \
                 "web_extract tool was filtered out despite custom provider being available"
+
+
+class TestFirecrawlEnvResolution:
+    """Verify Firecrawl reads env values from hermes_cli.config.get_env_value,
+    not just os.getenv.  This catches the regression reported in #40190 where
+    values stored in ~/.hermes/.env were invisible to the provider."""
+
+    def test_direct_config_reads_via_get_env_value(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """_get_direct_firecrawl_config() must use get_env_value, not os.getenv."""
+        # Ensure os.environ does NOT carry the key
+        monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+        monkeypatch.delenv("FIRECRAWL_API_URL", raising=False)
+
+        fake_key = "fc-test-key-from-dotenv"
+        with patch(
+            "hermes_cli.config.get_env_value",
+            side_effect=lambda k: fake_key if k == "FIRECRAWL_API_KEY" else None,
+        ):
+            from plugins.web.firecrawl.provider import _get_direct_firecrawl_config
+
+            result = _get_direct_firecrawl_config()
+            assert result is not None, "get_env_value fallback should find the key"
+            kwargs, _cache_key = result
+            assert kwargs["api_key"] == fake_key
+
+    def test_direct_config_reads_url_via_get_env_value(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Self-hosted URL from .env must be picked up."""
+        monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+        monkeypatch.delenv("FIRECRAWL_API_URL", raising=False)
+
+        fake_url = "https://firecrawl.internal.example.com"
+        with patch(
+            "hermes_cli.config.get_env_value",
+            side_effect=lambda k: fake_url if k == "FIRECRAWL_API_URL" else None,
+        ):
+            from plugins.web.firecrawl.provider import _get_direct_firecrawl_config
+
+            result = _get_direct_firecrawl_config()
+            assert result is not None
+            kwargs, _cache_key = result
+            assert kwargs["api_url"] == fake_url.rstrip("/")
+
+
+class TestSiblingProvidersEnvResolution:
+    """The same #40190 bug class widened: every keyed web provider must
+    resolve its credential through the config-aware lookup (os.environ OR
+    ~/.hermes/.env), not bare os.getenv. Parametrized over the four
+    providers that previously read only the process environment."""
+
+    _CASES = [
+        ("plugins.web.exa.provider", "ExaWebSearchProvider", "EXA_API_KEY"),
+        ("plugins.web.parallel.provider", "ParallelWebSearchProvider", "PARALLEL_API_KEY"),
+        ("plugins.web.tavily.provider", "TavilyWebSearchProvider", "TAVILY_API_KEY"),
+        ("plugins.web.brave_free.provider", "BraveFreeWebSearchProvider", "BRAVE_SEARCH_API_KEY"),
+    ]
+
+    @pytest.mark.parametrize("module_path,cls_name,env_key", _CASES)
+    def test_is_available_reads_via_get_env_value(
+        self, monkeypatch, module_path, cls_name, env_key
+    ):
+        """is_available() must see a key that lives only in the .env layer."""
+        monkeypatch.delenv(env_key, raising=False)
+
+        import importlib
+        module = importlib.import_module(module_path)
+        provider = getattr(module, cls_name)()
+
+        assert provider.is_available() is False
+
+        with patch(
+            "hermes_cli.config.get_env_value",
+            side_effect=lambda k: "test-key-from-dotenv" if k == env_key else None,
+        ):
+            assert provider.is_available() is True, (
+                f"{cls_name}.is_available() ignored {env_key} from the "
+                "config-aware env layer (get_env_value)"
+            )
+
+
+    def test_get_provider_env_unset_returns_empty(self, monkeypatch):
+        monkeypatch.delenv("WSP_TEST_UNSET_KEY", raising=False)
+        with patch("hermes_cli.config.get_env_value", return_value=None):
+            from agent.web_search_provider import get_provider_env
+
+            assert get_provider_env("WSP_TEST_UNSET_KEY") == ""

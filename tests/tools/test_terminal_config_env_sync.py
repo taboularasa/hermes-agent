@@ -25,7 +25,6 @@ mirrors the pattern used in tests/hermes_cli/test_config_drift.py.
 
 import ast
 import inspect
-import json
 
 
 def _extract_dict_values(source: str, dict_name: str) -> set[str]:
@@ -183,7 +182,6 @@ def test_save_config_set_supports_critical_bridged_keys():
         "container_memory",
         "container_disk",
         "container_persistent",
-        "container_isolation",
     }
     missing = required - save_keys
     assert not missing, (
@@ -235,51 +233,6 @@ def test_docker_env_is_bridged_everywhere():
     assert "TERMINAL_DOCKER_ENV" in _terminal_tool_env_var_names()
 
 
-def test_container_isolation_is_bridged_everywhere():
-    """terminal.container_isolation controls shared vs per-session containers.
-
-    It must be bridged across CLI, gateway, and `hermes config set` paths;
-    otherwise a user can set Docker session isolation in config.yaml but still
-    end up with all sessions collapsed into the historical default sandbox.
-    """
-    assert "container_isolation" in _cli_env_map_keys()
-    assert "container_isolation" in _gateway_env_map_keys()
-    assert "container_isolation" in _save_config_env_sync_keys()
-    assert "TERMINAL_CONTAINER_ISOLATION" in _terminal_tool_env_var_names()
-
-
-def test_docker_cwd_uses_explicit_same_path_bind_mount(monkeypatch, tmp_path):
-    stacks = tmp_path / "stacks"
-    stacks.mkdir()
-
-    monkeypatch.setenv("TERMINAL_ENV", "docker")
-    monkeypatch.setenv("TERMINAL_CWD", str(stacks))
-    monkeypatch.setenv("TERMINAL_DOCKER_VOLUMES", json.dumps([f"{stacks}:{stacks}"]))
-
-    from tools.terminal_tool import _get_env_config
-
-    assert _get_env_config()["cwd"] == str(stacks)
-
-
-def test_docker_workdir_falls_back_when_ctx_path_is_unmounted(monkeypatch, tmp_path):
-    stacks = tmp_path / "stacks"
-    stacks.mkdir()
-    stale_ctx = "/home/david/.ctx-data/worktrees/missing/session"
-
-    monkeypatch.setenv("TERMINAL_ENV", "docker")
-    monkeypatch.setenv("TERMINAL_CWD", str(stacks))
-    monkeypatch.setenv("TERMINAL_DOCKER_VOLUMES", json.dumps([f"{stacks}:{stacks}"]))
-
-    from tools.terminal_tool import _get_env_config, _resolve_effective_workdir
-
-    config = _get_env_config()
-    assert config["cwd"] == str(stacks)
-    assert _resolve_effective_workdir(
-        stale_ctx,
-        config=config,
-        env_type="docker",
-        cwd=config["cwd"],
-    ) == str(stacks)
 def test_docker_extra_args_is_bridged_everywhere():
     """Regression pin for docker_extra_args config key being silently ignored.
 

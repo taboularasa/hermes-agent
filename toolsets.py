@@ -15,10 +15,10 @@ Features:
 
 Usage:
     from toolsets import get_toolset, resolve_toolset, get_all_toolsets
-
+    
     # Get tools for a specific toolset
     tools = get_toolset("research")
-
+    
     # Resolve a toolset to get all tool names (including from composed toolsets)
     all_tools = resolve_toolset("full_stack")
 """
@@ -30,17 +30,24 @@ from typing import List, Dict, Any, Set, Optional
 # Edit this once to update all platforms simultaneously.
 _HERMES_CORE_TOOLS = [
     # Web
-    "web_search", "web_search_matrix", "web_extract",
+    "web_search", "web_extract",
     # Terminal + process management
     "terminal", "process",
-    # Read the desktop GUI's embedded terminal pane, and close an agent's
-    # read-only terminal tab (both gated on HERMES_DESKTOP via check_fn —
-    # hidden outside the GUI).
-    "read_terminal", "close_terminal",
+    # NOTE: the desktop GUI affordances (read_terminal, open_preview, …) are
+    # deliberately NOT here, for the same reason as the `project` tools below:
+    # they only work where a GUI renderer can answer them. They live in the
+    # `desktop_ui` toolset and are enabled solely by the GUI gateway for a
+    # session whose SOURCE is the desktop app (tui_gateway/server.py::
+    # _load_enabled_toolsets) — never keyed on a process env var, which is
+    # blind to a desktop client talking to a remote/cloud backend.
     # File manipulation
     "read_file", "write_file", "patch", "search_files",
     # Vision + image generation
     "vision_analyze", "image_generate",
+    # BFL FLUX 3 video generation
+    "bfl_flux3_text_to_video", "bfl_flux3_image_to_video",
+    "bfl_flux3_keyframes_to_video", "bfl_flux3_video_continuation",
+    "bfl_flux3_get_result", "bfl_flux3_prompting_guide",
     # Skills
     "skills_list", "skill_view", "skill_manage",
     # Browser automation
@@ -65,11 +72,6 @@ _HERMES_CORE_TOOLS = [
     "execute_code", "delegate_task",
     # Cronjob management
     "cronjob",
-    # Self-improvement reliability tools are provided by the Hadto plugin.
-    # Keep them out of the built-in core list so a checkout without that
-    # plugin does not advertise stale repo-local providers.
-    # Cross-platform messaging (gated on gateway running via check_fn)
-    "send_message",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
     "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
     # Kanban multi-agent coordination — only in schema when the agent is
@@ -80,6 +82,7 @@ _HERMES_CORE_TOOLS = [
     "kanban_complete", "kanban_block", "kanban_heartbeat",
     "kanban_comment", "kanban_create", "kanban_link",
     "kanban_unblock",
+    "kanban_attach", "kanban_attach_url", "kanban_attachments",
     # Computer use (macOS, gated on cua-driver being installed via check_fn)
     "computer_use",
 ]
@@ -101,27 +104,29 @@ TOOLSETS = {
     # Basic toolsets - individual tool categories
     "web": {
         "description": "Web research and content extraction tools",
-        "tools": ["web_search", "web_search_matrix", "web_extract"],
+        "tools": ["web_search", "web_extract"],
         "includes": []  # No other toolsets included
     },
-
+    
     "search": {
         "description": "Web search only (no content extraction/scraping)",
-        "tools": ["web_search", "web_search_matrix"],
+        "tools": ["web_search"],
         "includes": []
     },
 
     "x_search": {
         "description": (
             "Search X (Twitter) posts and threads via xAI's built-in "
-            "x_search Responses tool. Available when xAI credentials are "
-            "configured (SuperGrok OAuth or XAI_API_KEY). Off by default; "
-            "enable in `hermes tools` → X (Twitter) Search."
+            "x_search Responses tool. Read-only public X discovery; use the "
+            "xurl skill for authenticated X API reads and account actions. "
+            "Available when xAI credentials are configured (SuperGrok OAuth "
+            "or XAI_API_KEY). Off by default; enable in `hermes tools` → "
+            "X (Twitter) Search."
         ),
         "tools": ["x_search"],
         "includes": []
     },
-
+    
     "vision": {
         "description": "Image analysis and vision tools",
         "tools": ["vision_analyze"],
@@ -133,7 +138,7 @@ TOOLSETS = {
         "tools": ["video_analyze"],
         "includes": []
     },
-
+    
     "image_gen": {
         "description": "Creative generation tools (images)",
         "tools": ["image_generate"],
@@ -152,6 +157,25 @@ TOOLSETS = {
         "includes": []
     },
 
+    "bfl": {
+        "description": (
+            "Black Forest Labs FLUX 3 video generation through the Nous tool "
+            "gateway: per-mode submit tools (text, image, keyframes, "
+            "continuation), a poll tool, and a prompting guide. Generations "
+            "take minutes, so submit returns a job id and the model polls for "
+            "the result."
+        ),
+        "tools": [
+            "bfl_flux3_text_to_video",
+            "bfl_flux3_image_to_video",
+            "bfl_flux3_keyframes_to_video",
+            "bfl_flux3_video_continuation",
+            "bfl_flux3_get_result",
+            "bfl_flux3_prompting_guide",
+        ],
+        "includes": []
+    },
+
     "computer_use": {
         "description": (
             "Background desktop control via cua-driver (macOS/Windows/Linux) — "
@@ -167,13 +191,13 @@ TOOLSETS = {
         "tools": ["terminal", "process"],
         "includes": []
     },
-
+    
     "skills": {
         "description": "Access, create, edit, and manage skill documents with specialized instructions and knowledge",
         "tools": ["skills_list", "skill_view", "skill_manage"],
         "includes": []
     },
-
+    
     "browser": {
         "description": "Browser automation for web interaction (navigate, click, type, scroll, iframes, hold-click) with web search for finding URLs",
         "tools": [
@@ -185,37 +209,32 @@ TOOLSETS = {
         ],
         "includes": []
     },
-
+    
     "cronjob": {
         "description": "Cronjob management tool - create, list, update, pause, resume, remove, and trigger scheduled tasks",
         "tools": ["cronjob"],
         "includes": []
     },
-
-    "messaging": {
-        "description": "Cross-platform messaging: send messages to Telegram, Discord, Slack, SMS, etc.",
-        "tools": ["send_message"],
-        "includes": []
-    },
+    
 
     "file": {
         "description": "File manipulation tools: read, write, patch (with fuzzy matching), and search (content + files)",
         "tools": ["read_file", "write_file", "patch", "search_files"],
         "includes": []
     },
-
+    
     "tts": {
         "description": "Text-to-speech: convert text to audio with Edge TTS (free), ElevenLabs, OpenAI, or xAI",
         "tools": ["text_to_speech"],
         "includes": []
     },
-
+    
     "todo": {
         "description": "Task planning and tracking for multi-step work",
         "tools": ["todo"],
         "includes": []
     },
-
+    
     "memory": {
         "description": "Persistent memory across sessions (personal notes + user profile)",
         "tools": ["memory"],
@@ -227,7 +246,7 @@ TOOLSETS = {
         "tools": [],
         "includes": []
     },
-
+    
     "session_search": {
         "description": "Search and recall past conversations with summarization",
         "tools": ["session_search"],
@@ -240,18 +259,38 @@ TOOLSETS = {
         "includes": []
     },
 
+    # Affordances that only exist because a GUI renderer is on the other end of
+    # the connection: read/close the embedded terminal pane, open and read the
+    # in-app browser, focus a pane, tapback a message.
+    #
+    # Enabled by the GUI gateway for a session whose SOURCE is the desktop app
+    # (tui_gateway/server.py::_load_enabled_toolsets), NOT by a process env var.
+    # The renderer is a CLIENT — it can be driving a local, SSH, URL, or cloud
+    # backend — so "was this process spawned by Electron?" is the wrong
+    # question and silently strips these tools from every remote gateway.
+    "desktop_ui": {
+        "description": "Desktop GUI affordances — in-app terminal/browser panes, pane focus, reactions (GUI sessions only)",
+        "tools": [
+            "read_terminal", "close_terminal",
+            "open_preview", "read_preview",
+            "read_window_below",
+            "focus_pane", "react_to_message",
+        ],
+        "includes": []
+    },
+    
     "clarify": {
         "description": "Ask the user clarifying questions (multiple-choice or open-ended)",
         "tools": ["clarify"],
         "includes": []
     },
-
+    
     "code_execution": {
         "description": "Run Python scripts that call tools programmatically (reduces LLM round trips)",
         "tools": ["execute_code"],
         "includes": []
     },
-
+    
     "delegation": {
         "description": "Spawn subagents with isolated context for complex subtasks",
         "tools": ["delegate_task"],
@@ -274,14 +313,15 @@ TOOLSETS = {
             "set). The dispatcher runs inside the gateway by default; see "
             "`kanban.dispatch_in_gateway` in config.yaml. Lets workers mark "
             "tasks done with structured handoffs, block for human input, "
-            "heartbeat during long ops, comment on threads, and (for "
-            "orchestrators) list, unblock, and fan out tasks."
+            "heartbeat during long ops, comment on threads, attach files, and "
+            "(for orchestrators) list, unblock, and fan out tasks."
         ),
         "tools": [
             "kanban_show", "kanban_list", "kanban_complete", "kanban_block",
             "kanban_heartbeat", "kanban_comment",
             "kanban_create", "kanban_link",
             "kanban_unblock",
+            "kanban_attach", "kanban_attach_url", "kanban_attachments",
         ],
         "includes": [],
     },
@@ -336,13 +376,13 @@ TOOLSETS = {
 
 
     # Scenario-specific toolsets
-
+    
     "debugging": {
         "description": "Debugging and troubleshooting toolkit",
         "tools": ["terminal", "process"],
         "includes": ["web", "file"]  # For searching error messages and solutions, and file operations
     },
-
+    
     "safe": {
         "description": "Safe toolkit without terminal access",
         "tools": [],
@@ -353,11 +393,16 @@ TOOLSETS = {
     # code workspace; see agent/coding_context.py. Keeps everything you reach
     # for while pairing on code and drops the rest (messaging, tts, image_gen,
     # spotify, home-assistant, cron, computer-use).
+    #
+    # The GUI pane/browser affordances are NOT listed here: they belong to the
+    # client surface, not the posture, so the GUI gateway folds `desktop_ui`
+    # in alongside this selection for a desktop-sourced session (see
+    # tui_gateway/server.py::_load_enabled_toolsets).
     "coding": {
         "description": "Coding-focused toolset: files, terminal, search, web docs, skills, todo, delegate, vision, browser",
         "tools": [
             "web_search", "web_extract",
-            "terminal", "process", "read_terminal", "close_terminal",
+            "terminal", "process",
             "read_file", "write_file", "patch", "search_files",
             "vision_analyze",
             "skills_list", "skill_view", "skill_manage",
@@ -375,7 +420,7 @@ TOOLSETS = {
         # non-configurable-toolset recovery loop in hermes_cli/tools_config.py).
         "posture": True,
     },
-
+    
     # ==========================================================================
     # Full Hermes toolsets (CLI + messaging platforms)
     #
@@ -388,7 +433,7 @@ TOOLSETS = {
     "hermes-acp": {
         "description": "Editor integration (VS Code, Zed, JetBrains) — coding-focused tools without messaging, audio, or clarify UI",
         "tools": [
-            "web_search", "web_search_matrix", "web_extract",
+            "web_search", "web_extract",
             "terminal", "process",
             "read_file", "write_file", "patch", "search_files",
             "vision_analyze",
@@ -408,13 +453,17 @@ TOOLSETS = {
         "description": "OpenAI-compatible API server — full agent tools accessible via HTTP (no interactive UI tools like clarify or send_message)",
         "tools": [
             # Web
-            "web_search", "web_search_matrix", "web_extract",
+            "web_search", "web_extract",
             # Terminal + process management
             "terminal", "process",
             # File manipulation
             "read_file", "write_file", "patch", "search_files",
             # Vision + image generation
             "vision_analyze", "image_generate",
+            # BFL FLUX 3 video generation
+            "bfl_flux3_text_to_video", "bfl_flux3_image_to_video",
+            "bfl_flux3_keyframes_to_video", "bfl_flux3_video_continuation",
+            "bfl_flux3_get_result", "bfl_flux3_prompting_guide",
             # Skills
             "skills_list", "skill_view", "skill_manage",
             # Browser automation
@@ -436,7 +485,7 @@ TOOLSETS = {
         ],
         "includes": []
     },
-
+    
     "hermes-cli": {
         "description": "Full interactive CLI toolset - all default tools plus cronjob management",
         "tools": _HERMES_CORE_TOOLS,
@@ -446,8 +495,8 @@ TOOLSETS = {
     "hermes-cron": {
         # Mirrors hermes-cli so cron's "default" toolset is the same set of
         # core tools users see interactively — then `hermes tools` filters
-        # them down per the platform config. _DEFAULT_OFF_TOOLSETS
-        # (homeassistant) are excluded by _get_platform_tools() unless
+        # them down per the platform config. _DEFAULT_OFF_TOOLSETS (moa,
+        # homeassistant) are excluded by _get_platform_tools() unless
         # the user explicitly enables them.
         "description": "Default cron toolset - same core tools as hermes-cli; gated by `hermes tools`",
         "tools": _HERMES_CORE_TOOLS,
@@ -459,7 +508,7 @@ TOOLSETS = {
         "tools": _HERMES_CORE_TOOLS,
         "includes": []
     },
-
+    
     "hermes-discord": {
         "description": "Discord bot toolset - full access (terminal has safety checks via dangerous command approval)",
         "tools": _HERMES_CORE_TOOLS + [
@@ -468,19 +517,19 @@ TOOLSETS = {
         ],
         "includes": []
     },
-
+    
     "hermes-whatsapp": {
         "description": "WhatsApp bot toolset - similar to Telegram (personal messaging, more trusted)",
         "tools": _HERMES_CORE_TOOLS,
         "includes": []
     },
-
+    
     "hermes-slack": {
         "description": "Slack bot toolset - full access for workspace use (terminal has safety checks)",
         "tools": _HERMES_CORE_TOOLS,
         "includes": []
     },
-
+    
     "hermes-signal": {
         "description": "Signal bot toolset - encrypted messaging platform (full access)",
         "tools": _HERMES_CORE_TOOLS,
@@ -779,19 +828,19 @@ def resolve_toolset(name: str, visited: Set[str] = None, *, include_registry: bo
 def resolve_multiple_toolsets(toolset_names: List[str]) -> List[str]:
     """
     Resolve multiple toolsets and combine their tools.
-
+    
     Args:
         toolset_names (List[str]): List of toolset names to resolve
-
+        
     Returns:
         List[str]: Combined list of all tool names (deduplicated)
     """
     all_tools = set()
-
+    
     for name in toolset_names:
         tools = resolve_toolset(name)
         all_tools.update(tools)
-
+    
     return sorted(all_tools)
 
 
@@ -826,7 +875,7 @@ def get_all_toolsets() -> Dict[str, Dict[str, Any]]:
     Get all available toolsets with their definitions.
 
     Includes both statically-defined toolsets and plugin-registered ones.
-
+    
     Returns:
         Dict: All toolset definitions
     """
@@ -851,7 +900,7 @@ def get_toolset_names() -> List[str]:
     Get names of all available toolsets (excluding aliases).
 
     Includes plugin-registered toolset names.
-
+    
     Returns:
         List[str]: List of toolset names
     """
@@ -872,10 +921,10 @@ def get_toolset_names() -> List[str]:
 def validate_toolset(name: str) -> bool:
     """
     Check if a toolset name is valid.
-
+    
     Args:
         name (str): Toolset name to validate
-
+        
     Returns:
         bool: True if valid, False otherwise
     """
@@ -897,7 +946,7 @@ def create_custom_toolset(
 ) -> None:
     """
     Create a custom toolset at runtime.
-
+    
     Args:
         name (str): Name for the new toolset
         description (str): Description of the toolset
@@ -916,19 +965,19 @@ def create_custom_toolset(
 def get_toolset_info(name: str) -> Dict[str, Any]:
     """
     Get detailed information about a toolset including resolved tools.
-
+    
     Args:
         name (str): Toolset name
-
+        
     Returns:
         Dict: Detailed toolset information
     """
     toolset = get_toolset(name)
     if not toolset:
         return None
-
+    
     resolved_tools = resolve_toolset(name)
-
+    
     return {
         "name": name,
         "description": toolset["description"],
@@ -945,7 +994,7 @@ def get_toolset_info(name: str) -> Dict[str, Any]:
 if __name__ == "__main__":
     print("Toolsets System Demo")
     print("=" * 60)
-
+    
     print("\nAvailable Toolsets:")
     print("-" * 40)
     for name, toolset in get_all_toolsets().items():
@@ -953,20 +1002,20 @@ if __name__ == "__main__":
         composite = "[composite]" if info["is_composite"] else "[leaf]"
         print(f"  {composite} {name:20} - {toolset['description']}")
         print(f"     Tools: {len(info['resolved_tools'])} total")
-
+    
     print("\nToolset Resolution Examples:")
     print("-" * 40)
     for name in ["web", "terminal", "safe", "debugging"]:
         tools = resolve_toolset(name)
         print(f"\n  {name}:")
         print(f"    Resolved to {len(tools)} tools: {', '.join(sorted(tools))}")
-
+    
     print("\nMultiple Toolset Resolution:")
     print("-" * 40)
     combined = resolve_multiple_toolsets(["web", "vision", "terminal"])
     print("  Combining ['web', 'vision', 'terminal']:")
     print(f"    Result: {', '.join(sorted(combined))}")
-
+    
     print("\nCustom Toolset Creation:")
     print("-" * 40)
     create_custom_toolset(
