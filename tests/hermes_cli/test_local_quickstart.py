@@ -118,7 +118,26 @@ def test_quickstart_refuses_when_nothing_fits(client, monkeypatch):
     assert "Local Models" in r.json()["detail"]
 
 
-def test_quickstart_runs_all_three_legs(client, monkeypatch, tmp_path):
+@pytest.fixture
+def eligible_hardware(monkeypatch):
+    """Exercise orchestration with a real recommendation on every CI host."""
+    from hermes_cli.local_runtime.estimator import HardwareBudget
+    import hermes_cli.web_routers.local_models as lm
+
+    gib = 1 << 30
+    budget = HardwareBudget(
+        usable_vram_bytes=128 * gib * 4 // 5,
+        total_device_bytes=128 * gib,
+        ram_available_bytes=0,
+        uma=True,
+    )
+    monkeypatch.setattr(lm.hardware, "probe_budget", lambda **kw: budget)
+    monkeypatch.setattr(lm.catalog, "refresh_catalog_soon", lambda: None)
+
+
+def test_quickstart_runs_all_three_legs(
+    client, eligible_hardware, monkeypatch, tmp_path
+):
     """Fresh machine: install runtime -> download recommended -> activate.
     Each leg is asserted by its observable call, in order."""
     calls: list[str] = []
@@ -179,7 +198,7 @@ def test_quickstart_runs_all_three_legs(client, monkeypatch, tmp_path):
     assert load_config()["local_runtime"]["enabled"] is True
 
 
-def test_quickstart_skips_satisfied_legs(client, monkeypatch):
+def test_quickstart_skips_satisfied_legs(client, eligible_hardware, monkeypatch):
     """Runtime present and model already staged: the response says so and
     the job goes straight to activation."""
     calls: list[str] = []

@@ -99,13 +99,18 @@ jobs:
         run: |
           source .venv/bin/activate
           # No mutable duration cache may assign different files in each slice.
-          if [ -n "$HERMES_TEST_SLICE" ] && [ -e test_durations.json ]; then
+          if [ -n "$TEST_SLICE" ] && [ -e test_durations.json ]; then
             echo "::error::fork slices require the same absent duration cache"
             exit 1
           fi
-          scripts/run_tests.sh
+          # Slice only this runner invocation, not runners spawned by tests.
+          if [ -n "$TEST_SLICE" ]; then
+            scripts/run_tests.sh --slice "$TEST_SLICE"
+          else
+            scripts/run_tests.sh
+          fi
         env:
-          HERMES_TEST_SLICE: ${{ matrix.slice }}
+          TEST_SLICE: ${{ matrix.slice }}
           # This is the maximum number of test FILES that run together.
           # run_tests_parallel.py starts one pytest subprocess for each file
           # from a single ThreadPoolExecutor, so this value IS the limit. The
