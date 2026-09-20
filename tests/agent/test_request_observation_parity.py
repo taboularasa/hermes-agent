@@ -1,6 +1,6 @@
 """HAD-2911: measure the existing pre-request hook against real final dispatch.
 
-These expected-mismatch diagnostics establish no exact-capture capability. The
+These pre-hook mismatch and final-observer diagnostics establish no HTTP capture capability. The
 provider SDK entry is fake; request assembly, middleware, native Relay and late
 transport transformations run normally. HTTP serialization is a separate proof.
 """
@@ -219,6 +219,7 @@ def test_pre_request_observation_compares_with_final_sdk_dispatch(
     ]
     initial_history = _freeze(history)
     snapshots = {"request": [], "hook": [], "execution": [], "relay": [], "sdk": []}
+    observations, narrow_observations, lifecycle_ids = [], [], []
 
     def provider_create(**kwargs):
         snapshots["sdk"].append(_freeze(_projection(kwargs)))
@@ -247,6 +248,27 @@ def test_pre_request_observation_compares_with_final_sdk_dispatch(
                 "system": kwargs["system_prompt"],
             })
         )
+        lifecycle_ids.append({
+            key: kwargs.get(key)
+            for key in (
+                "session_id",
+                "task_id",
+                "turn_id",
+                "api_request_id",
+                "api_call_count",
+            )
+        })
+
+    def narrow_observer(sdk_kwargs_json, observation_window):
+        assert observation_window.active
+        value = json.loads(sdk_kwargs_json)
+        narrow_observations.append(deepcopy(value))
+        # Editing a decoded value cannot mutate another callback or the SDK call.
+        value.clear()
+
+    async def observer(**kwargs):
+        assert kwargs["observation_window"].active
+        observations.append(kwargs)
 
     def execution_middleware(request, next_call, **kwargs):
         value = _rewrite(request, "execution rewrite", 0.22) if rewritten else request
@@ -260,6 +282,8 @@ def test_pre_request_observation_compares_with_final_sdk_dispatch(
         ctx.register_middleware("llm_request", request_middleware),
         ctx.register_hook("pre_api_request", pre_request),
         ctx.register_middleware("llm_execution", execution_middleware),
+        ctx.register_hook("api_request_dispatch", narrow_observer),
+        ctx.register_hook("api_request_dispatch", observer),
     ]
     host = relay_runtime.get_runtime()
     assert host is not None, "This comparison requires the actual native Relay runtime"
@@ -307,6 +331,20 @@ def test_pre_request_observation_compares_with_final_sdk_dispatch(
     request, hook, execution, relay_value, final = (
         json.loads(snapshots[key][0]) for key in snapshots
     )
+    assert len(observations) == len(narrow_observations) == 1
+    observed = observations[0]
+    observed_kwargs = json.loads(observed["sdk_kwargs_json"])
+    assert observed_kwargs == narrow_observations[0]
+    assert _projection(observed_kwargs) == final
+    assert observed["representation"] == "sdk_kwargs_projection"
+    assert observed["snapshot_status"] != "unavailable"
+    assert observed["reason_codes"] == ()
+    assert not observed["observation_window"].active
+    assert {key: observed[key] for key in lifecycle_ids[0]} == lifecycle_ids[0]
+    assert observed["session_id"] == "observation-fixture"
+    assert observed["task_id"] == "controlled-task"
+    assert observed["api_request_id"] and observed["turn_id"]
+    assert observed["retry_count"] == 0
     key = "input" if codex else "messages"
     assert hook["messages"] == request[key]
     assert hook["body"]["model"] == request["model"]
@@ -372,5 +410,11 @@ def test_pre_request_observation_compares_with_final_sdk_dispatch(
             "snapshots": {
                 key: json.loads(values[0]) for key, values in snapshots.items()
             },
+        }),
+    )
+    record_property(
+        "dispatch_observation",
+        _freeze({
+            key: value for key, value in observed.items() if key != "observation_window"
         }),
     )

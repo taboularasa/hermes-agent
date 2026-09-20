@@ -133,9 +133,76 @@ API hooks describe provider attempts inside the agent loop:
 
 | Hook | When it fires |
 | --- | --- |
-| `pre_api_request` | Immediately before a provider API request. |
+| `pre_api_request` | Before execution middleware and final transport transformations. |
 | `post_api_request` | After a successful provider response. |
 | `api_request_error` | After a failed provider request or retryable error path. |
+
+#### Opt-in final SDK observation
+
+`api_request_dispatch` is a separate Python plugin subscription immediately before
+the supported SDK `create` calls: ordinary Chat Completions non-streaming,
+Chat Completions streaming after stream options, and Codex Responses streaming
+after Relay, consumer sanitation and the SDK-transform bypass. It does not
+replace the sanitized, capped `pre_api_request` telemetry contract or forward
+raw payloads through builtin lifecycle telemetry. Without a subscriber, the
+new path performs no payload traversal, serialization, capture I/O or observer
+worker allocation; ordinary plugin discovery still applies.
+
+```python
+def register(ctx):
+    ctx.register_hook("api_request_dispatch", observe_dispatch)
+
+def observe_dispatch(sdk_kwargs_json, snapshot_status, observation_window, **event):
+    # A collector must join lifecycle terminal events and enforce its own
+    # privacy, retention and synchronized late-write/tombstone rules.
+    if not observation_window.active or sdk_kwargs_json is None:
+        return
+```
+
+The callback receives `observation_schema_version="hermes.sdk_request_observation.v1"`,
+`representation="sdk_kwargs_projection"`, `route`, `provider`, `api_mode`, and the
+existing `session_id`, `task_id`, `turn_id`, `api_request_id`, `retry_count` and
+`api_call_count`. IDs are frozen around the call and propagated through existing
+worker/Relay ContextVars; unavailable values are `None`, including direct calls
+outside that lifecycle scope. These are logical lifecycle IDs, not new episode
+IDs or unique identities for SDK-internal retries. The context never enters SDK
+kwargs.
+
+`sdk_kwargs_json` is an immutable JSON string containing the supported body-field
+projection of the final SDK kwargs, including supported fields under `extra_body`.
+It preserves that nesting; it does not simulate the SDK's HTTP-body merge.
+`omitted_fields` is an immutable tuple of `(field_path, reason)` pairs. Transport
+headers, credentials, SDK options/clients and unknown extensions are omitted.
+Fields containing hidden reasoning, non-JSON objects, nonfinite numbers, invalid
+Unicode or cycles are omitted whole: values are never truncated, stringified or
+replaced with object representations. User-supplied prompt content can itself be
+sensitive; this opt-in surface is not a general secret scrubber.
+
+`snapshot_status` is `complete_projection` when no supplied fields were omitted,
+`partial_projection` when fields were omitted, or `unavailable` on serialization
+failure/resource limits. Unavailable snapshots have `sdk_kwargs_json=None` and
+stable `reason_codes`, with no partial JSON. Projection traversal is bounded by
+1 MiB of encoded JSON, 50,000 visited nodes, and depth 24; exact builtin JSON types
+are supported. See `agent/request_observation.py` for the field allowlist. Even
+`complete_projection` describes only supplied SDK kwargs: it is not HTTP-byte
+identity, provider receipt, whole-request completeness or permission to retain data.
+
+Callbacks use the existing bounded dispatcher and signature filtering (narrow
+callbacks and `**kwargs` both work). This hook remains bounded when the existing
+`plugins.hook_callback_timeout` is zero/nonfinite, using the 30-second default;
+other hooks retain their existing timeout behavior. Each callback receives a
+separate `observation_window` with a monotonic deadline and `active` property.
+The window closes on return, exception, worker-start failure or timeout. Timed-out
+workers are abandoned and suppressed under existing rules; research proceeds.
+Callback return values never establish capture success. An `active` read is an
+expiry signal, not an atomic write permission: collectors must synchronize their
+own terminal/tombstone checks with finalization and reject delayed completion.
+Missing, dropped, failed or late observations remain explicit collection gaps.
+
+Anthropic/Bedrock, MoA/ACP, auxiliary/summary/compression calls, internal SDK retries
+and unwitnessed routes are outside the current parity proof. Controlled SDK-boundary
+tests do not establish HTTP serialization, live profile parity, a deployed collector
+or complete capture. Those require their own matching source/runtime evidence.
 
 `pre_api_request` includes:
 

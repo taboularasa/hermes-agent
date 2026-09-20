@@ -10,12 +10,13 @@ import contextvars
 import copy
 import inspect
 import logging
+import math
 import queue
 import re
 import threading
 import time
 import types
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Union
 
 from hermes_cli.middleware import OBSERVER_SCHEMA_VERSION
@@ -41,7 +42,7 @@ logger = logging.getLogger("hermes_cli.plugins")
 _HOOK_TIMEOUT_BOUNDED_HOOKS: Set[str] = {
     "post_tool_call", "transform_terminal_output", "transform_tool_result", "transform_llm_output",
     "pre_llm_call", "post_llm_call", "pre_api_request", "post_api_request", "api_request_error",
-    "pre_verify", "on_session_start", "on_session_end",
+    "pre_verify", "on_session_start", "on_session_end", "api_request_dispatch",
 }
 
 # Policy hooks: timeout / still-running must fail closed (block the tool).
@@ -140,6 +141,23 @@ _MAX_HOOK_CALLBACK_TIMEOUT_SECS = 600.0
 _HOOK_SKIPPED = object()  # returned by _run_hook_callback_bounded on skip/timeout
 
 
+@dataclass(frozen=True)
+class HookObservationWindow:
+    """Expiry signal for one SDK observer callback, not a persistence permission.
+
+    Collectors must synchronize their finalization against their own lifecycle
+    terminal/tombstone state. Checking ``active`` alone cannot make a later write
+    atomic with expiry. Async work escaping the callback must not claim capture.
+    """
+
+    deadline_monotonic: float
+    _closed: threading.Event = field(default_factory=threading.Event, repr=False)
+
+    @property
+    def active(self) -> bool:
+        return not self._closed.is_set() and time.monotonic() < self.deadline_monotonic
+
+
 def _hook_uses_callback_timeout(hook_name: str, timeout: float) -> bool:
     """Whether *hook_name* should run under the non-blocking timeout path."""
     if timeout <= 0 or hook_name in _HOOK_CALLER_THREAD_HOOKS:
@@ -185,6 +203,10 @@ class PluginDispatchMixin:
             kwargs.setdefault("telemetry_schema_version", OBSERVER_SCHEMA_VERSION)
         results: List[Any] = []
         timeout = _resolve_hook_callback_timeout()
+        # This raw, opt-in observer is always bounded. Preserve timeout=0 behavior
+        # for existing hooks; it must not turn the new dispatch observer unbounded.
+        if hook_name == "api_request_dispatch" and (not math.isfinite(timeout) or timeout <= 0):
+            timeout = _HOOK_CALLBACK_TIMEOUT_SECS
         use_timeout = _hook_uses_callback_timeout(hook_name, timeout)
         fail_closed = hook_name in _HOOK_TIMEOUT_FAIL_CLOSED_HOOKS
         for cb in self._hooks.get(hook_name, []):
@@ -201,7 +223,8 @@ class PluginDispatchMixin:
                     results.append(ret)
             except Exception as exc:
                 logger.warning(
-                    "Hook '%s' callback %s raised: %s", hook_name, getattr(cb, "__name__", repr(cb)), exc)
+                    "Hook '%s' callback %s raised: %s", hook_name, getattr(cb, "__name__", repr(cb)),
+                    type(exc).__name__ if hook_name == "api_request_dispatch" else exc)
         return results
 
     def _run_hook_callback_bounded(
@@ -229,6 +252,10 @@ class PluginDispatchMixin:
         done = threading.Event()
         outcome: Dict[str, Any] = {}
         failure: Dict[str, Exception] = {}
+        window = None
+        if hook_name == "api_request_dispatch":
+            window = HookObservationWindow(time.monotonic() + timeout)
+            kwargs = {**kwargs, "observation_window": window}
 
         def _release_token() -> None:
             with self._hook_timeout_lock:
@@ -241,6 +268,8 @@ class PluginDispatchMixin:
             except Exception as exc:
                 failure["exc"] = exc
             finally:
+                if window is not None:
+                    window._closed.set()
                 _release_token()
                 done.set()
 
@@ -248,12 +277,16 @@ class PluginDispatchMixin:
         try:
             thread.start()
         except RuntimeError as exc:
+            if window is not None:
+                window._closed.set()
             _release_token()  # the runner's finally never runs when OS thread creation fails
             logger.warning(
                 "Hook '%s' callback %s worker failed to start: %s — skipping",
                 hook_name, callback_name, exc)
             return _HOOK_SKIPPED
         if not done.wait(timeout=timeout):  # do not join — that would reintroduce the hang
+            if window is not None:
+                window._closed.set()
             with self._hook_timeout_lock:
                 # See #6622.
                 self._hook_timeout_suppressed_until[callback_key] = (

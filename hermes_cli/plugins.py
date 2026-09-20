@@ -115,7 +115,7 @@ VALID_HOOKS: Set[str] = {
     # pre_verify: once per turn when the agent edited code and is about to verify/finish. Return
     # {"action": "continue", "message"} (or Claude-Code Stop {"decision": "block", "reason"}) to keep
     # going; anything else finishes. Bounded by agent.max_verify_nudges.
-    "pre_verify", "pre_api_request", "post_api_request", "api_request_error",
+    "pre_verify", "pre_api_request", "post_api_request", "api_request_error", "api_request_dispatch",
     # transform_api_error_classification: once per failed API call BEFORE
     # agent/error_classifier.classify_api_error(). Kwargs: provider, model, status_code, error_type,
     # error_code, error_message, error_body, error, approx_tokens, context_length, num_messages.
