@@ -28,6 +28,8 @@ from hermes_cli.plugins_manifest import PluginManifest
         "unicode",
         "hidden",
         "nested_hidden",
+        "thinking_block",
+        "redacted_block",
         "serialization",
         "exception",
         "timeout",
@@ -78,6 +80,10 @@ def test_dispatch_observer_isolation_and_failure(case, monkeypatch, caplog):
         request["input"] = [
             {"role": "assistant", "content": [{"reasoning": "private"}]}
         ]
+    elif case == "thinking_block":
+        request["input"] = [{"type": "thinking", "text": "private"}]
+    elif case == "redacted_block":
+        request["input"] = [{"type": "redacted_thinking", "data": "opaque"}]
     request["extra_headers"] = {"Authorization": "never-observed"}
     request["extra_body"] = {"temperature": 0.2, "api_key": "never-observed"}
 
@@ -195,6 +201,8 @@ def test_dispatch_observer_isolation_and_failure(case, monkeypatch, caplog):
                     "unicode": ("instructions", "invalid_unicode"),
                     "hidden": ("input", "hidden_reasoning"),
                     "nested_hidden": ("input", "hidden_reasoning"),
+                    "thinking_block": ("input", "hidden_reasoning"),
+                    "redacted_block": ("input", "hidden_reasoning"),
                 }.get(case)
                 if expected:
                     assert expected in value["omitted_fields"]

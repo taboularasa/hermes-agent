@@ -61,6 +61,7 @@ _HIDDEN_FIELDS = frozenset({
     "thinking",
     "redacted_thinking",
 })
+_HIDDEN_TYPES = frozenset({"reasoning", "thinking", "redacted_thinking"})
 _MAX_BYTES = 1_048_576
 _MAX_NODES = 50_000
 _MAX_DEPTH = 24
@@ -156,7 +157,7 @@ class _JSONProjection:
                 raise _Unsupported("non_string_key")
             item_type = value.get("type")
             if _HIDDEN_FIELDS.intersection(value) or (
-                type(item_type) is str and item_type == "reasoning"
+                type(item_type) is str and item_type in _HIDDEN_TYPES
             ):
                 raise _Unsupported("hidden_reasoning")
             return {
