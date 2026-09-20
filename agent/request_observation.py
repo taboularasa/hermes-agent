@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import json
 import logging
 import math
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -233,11 +234,13 @@ def observe_api_dispatch(agent, sdk_kwargs, *, route: str) -> None:
 
         if not plugins.has_hook("api_request_dispatch"):
             return
+        observation_id = str(uuid.uuid4())
         encoded, omitted, status, reasons = _snapshot(sdk_kwargs)
         context = _CONTEXT.get() or RequestObservationContext()
         plugins.invoke_hook(
             "api_request_dispatch",
             observation_schema_version="hermes.sdk_request_observation.v1",
+            observation_id=observation_id,
             representation="sdk_kwargs_projection",
             route=route,
             provider=agent.provider if type(agent.provider) is str else None,

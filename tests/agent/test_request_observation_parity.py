@@ -1,13 +1,14 @@
 """HAD-2911: measure the existing pre-request hook against real final dispatch.
 
-These pre-hook mismatch and final-observer diagnostics establish no HTTP capture capability. The
-provider SDK entry is fake; request assembly, middleware, native Relay and late
-transport transformations run normally. HTTP serialization is a separate proof.
+Request assembly, middleware, native Relay and late transport transformations
+run normally. The SDK cases fake create; the HTTP cases run actual OpenAI
+serialization into MockTransport. Neither establishes live provider receipt.
 """
 
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 import importlib.metadata
 import json
 import os
@@ -16,6 +17,7 @@ import sys
 from types import SimpleNamespace
 
 import nemo_relay
+import httpx
 import openai
 import pytest
 
@@ -121,6 +123,85 @@ def _provider_result(route):
     ])
 
 
+def _http_response(route):
+    """Controlled response bytes, decoded by the actual SDK stream machinery."""
+    if route == "codex":
+        response = {
+            "id": "resp_observation",
+            "object": "response",
+            "created_at": 0,
+            "status": "completed",
+            "model": "gpt-5-codex",
+            "output": [
+                {
+                    "type": "message",
+                    "id": "msg_observation",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "observed answer",
+                            "annotations": [],
+                        }
+                    ],
+                }
+            ],
+        }
+        events = [
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": response["output"][0],
+            },
+            {"type": "response.completed", "response": response},
+        ]
+    else:
+        response = {
+            "id": "chatcmpl_observation",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "gpt-4.1",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "observed answer"},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+        if route == "chat_nonstream":
+            return httpx.Response(200, json=response)
+        events = [
+            {
+                "id": "chatcmpl_observation",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "gpt-4.1",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": "observed answer"},
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                "id": "chatcmpl_observation",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "gpt-4.1",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            },
+        ]
+    content = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+    return httpx.Response(
+        200,
+        headers={"Content-Type": "text/event-stream"},
+        content=content + "data: [DONE]\n\n",
+    )
+
+
 def _runtime_profile(tmp_path):
     root = Path(__file__).resolve().parents[2]
     modules = (
@@ -139,6 +220,7 @@ def _runtime_profile(tmp_path):
     for module in modules:
         assert Path(module.__file__).resolve().is_relative_to(root)
     assert Path(openai.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+    assert Path(httpx.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
     assert (
         Path(nemo_relay.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
     )
@@ -159,16 +241,23 @@ def _runtime_profile(tmp_path):
             "path": nemo_relay.__file__,
         },
         "pydantic": importlib.metadata.version("pydantic"),
+        "httpx": {
+            "version": importlib.metadata.version("httpx"),
+            "path": httpx.__file__,
+        },
+        "codex_sdk_transform_override": os.environ.get("HERMES_CODEX_SDK_TRANSFORM"),
         "hermes_home": os.environ["HERMES_HOME"],
     }
 
 
 @pytest.mark.parametrize("route", ["chat_nonstream", "chat_stream", "codex"])
+@pytest.mark.parametrize("boundary", ["sdk", "http"])
 @pytest.mark.parametrize(
     "rewritten", [False, True], ids=["baseline", "middleware_and_relay"]
 )
 def test_pre_request_observation_compares_with_final_sdk_dispatch(
     route,
+    boundary,
     rewritten,
     monkeypatch,
     tmp_path,
@@ -219,7 +308,14 @@ def test_pre_request_observation_compares_with_final_sdk_dispatch(
     ]
     initial_history = _freeze(history)
     snapshots = {"request": [], "hook": [], "execution": [], "relay": [], "sdk": []}
-    observations, narrow_observations, lifecycle_ids = [], [], []
+    observations, narrow_observations, lifecycle_ids, wire, emission_ids = (
+        [],
+        [],
+        [],
+        [],
+        [],
+    )
+    http_override = boundary == "http" and rewritten
 
     def provider_create(**kwargs):
         snapshots["sdk"].append(_freeze(_projection(kwargs)))
@@ -231,6 +327,28 @@ def test_pre_request_observation_compares_with_final_sdk_dispatch(
         base_url=agent.base_url,
         close=lambda: None,
     )
+    if boundary == "http":
+
+        def respond(request):
+            assert request.method == "POST"
+            assert request.url.host == ("chatgpt.com" if codex else "openai.invalid")
+            assert request.url.path == (
+                "/backend-api/codex/responses" if codex else "/v1/chat/completions"
+            )
+            raw = request.content
+            wire.append({
+                "body_utf8": raw.decode("utf-8"),
+                "bytes": len(raw),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+            })
+            return _http_response(route)
+
+        client = openai.OpenAI(
+            api_key="controlled-fake-key",
+            base_url=agent.base_url,
+            max_retries=0,
+            http_client=httpx.Client(transport=httpx.MockTransport(respond)),
+        )
     monkeypatch.setattr(agent, "_create_request_openai_client", lambda **kwargs: client)
 
     def request_middleware(request, **kwargs):
@@ -259,8 +377,9 @@ def test_pre_request_observation_compares_with_final_sdk_dispatch(
             )
         })
 
-    def narrow_observer(sdk_kwargs_json, observation_window):
+    def narrow_observer(sdk_kwargs_json, observation_window, observation_id):
         assert observation_window.active
+        emission_ids.append(observation_id)
         value = json.loads(sdk_kwargs_json)
         narrow_observations.append(deepcopy(value))
         # Editing a decoded value cannot mutate another callback or the SDK call.
@@ -269,6 +388,12 @@ def test_pre_request_observation_compares_with_final_sdk_dispatch(
     async def observer(**kwargs):
         assert kwargs["observation_window"].active
         observations.append(kwargs)
+        if boundary == "http":
+            # The SDK is unmodified: this is the observer's pre-serialization
+            # declaration, independently checked against real HTTP bytes below.
+            snapshots["sdk"].append(
+                _freeze(_projection(json.loads(kwargs["sdk_kwargs_json"])))
+            )
 
     def execution_middleware(request, next_call, **kwargs):
         value = _rewrite(request, "execution rewrite", 0.22) if rewritten else request
@@ -297,6 +422,17 @@ def test_pre_request_observation_compares_with_final_sdk_dispatch(
         if rewritten and codex:
             value["prompt_cache_retention"] = "24h"
             value["extra_body"] = {"prompt_cache_retention": "24h"}
+        if http_override:
+            value.setdefault("extra_body", {})["temperature"] = 0.73
+            if codex:
+                override = _rewrite(value, "extra-body override — café", 0.73)
+                value["extra_body"].update(
+                    input=override["input"],
+                    tools=[
+                        {"type": "function", **tool.get("function", tool)}
+                        for tool in override["tools"]
+                    ],
+                )
         snapshots["relay"].append(_freeze(_projection(value)))
         if rewritten:
             codec = (
@@ -324,6 +460,7 @@ def test_pre_request_observation_compares_with_final_sdk_dispatch(
         for registration in registrations:
             registration.dispose()
         agent.close()
+        client.close()
         relay_runtime._reset_for_tests()
 
     assert result["final_response"] == "observed answer"
@@ -333,6 +470,8 @@ def test_pre_request_observation_compares_with_final_sdk_dispatch(
     )
     assert len(observations) == len(narrow_observations) == 1
     observed = observations[0]
+    assert emission_ids == [observed["observation_id"]]
+    assert observed["observation_id"]
     observed_kwargs = json.loads(observed["sdk_kwargs_json"])
     assert observed_kwargs == narrow_observations[0]
     assert _projection(observed_kwargs) == final
@@ -358,7 +497,15 @@ def test_pre_request_observation_compares_with_final_sdk_dispatch(
     if rewritten:
         assert request[key] != execution[key]
         assert request[key] != final_payload[key]
-        assert request["tools"] != execution["tools"] == final_payload["tools"]
+        assert request["tools"] != execution["tools"]
+        if codex and http_override:
+            assert execution["tools"] != final_payload["tools"]
+            assert (
+                final_payload["tools"][0]["description"] == "extra-body override — café"
+            )
+            assert final_payload["input"] != execution["input"]
+        else:
+            assert execution["tools"] == final_payload["tools"]
         assert request["temperature"] == 0.11
         assert execution["temperature"] == 0.22
         assert final["temperature"] == 0.33
@@ -387,6 +534,47 @@ def test_pre_request_observation_compares_with_final_sdk_dispatch(
         assert final["stream_options"] == {"include_usage": True}
         assert "stream_options" not in hook["body"]
 
+    if boundary == "http":
+        assert len(wire) == 1
+        body = json.loads(wire[0]["body_utf8"])
+        # SDK extra_body overrides its transformed typed body. Compare the
+        # permitted projection, without pretending snapshot JSON is wire bytes.
+        expected_body = {
+            key: value for key, value in observed_kwargs.items() if key != "extra_body"
+        }
+        expected_body.update(observed_kwargs.get("extra_body", {}))
+        assert expected_body == {key: body[key] for key in expected_body}
+        assert "extra_body" not in body and "extra_headers" not in body
+        assert "timeout" not in body and "api_request_id" not in body
+        assert body.get("stream", False) == (route != "chat_nonstream")
+        if http_override:
+            assert observed_kwargs["temperature"] == 0.33
+            assert (
+                observed_kwargs["extra_body"]["temperature"]
+                == body["temperature"]
+                == 0.73
+            )
+        if codex:
+            assert "input" not in observed_kwargs and "tools" not in observed_kwargs
+            assert body["input"] == observed_kwargs["extra_body"]["input"]
+            assert body["tools"] == observed_kwargs["extra_body"]["tools"]
+            assert "prompt_cache_retention" not in body
+        record_property(
+            "http_serialization",
+            _freeze({
+                "evidence_class": "controlled_real_sdk_mock_http_transport",
+                "wire": wire[0],
+                "permitted_body": expected_body,
+                "observer_json_sha256": hashlib.sha256(
+                    observed["sdk_kwargs_json"].encode("utf-8")
+                ).hexdigest(),
+                "extra_body_override": http_override,
+                "provider_receipt_proven": False,
+            }),
+        )
+    else:
+        assert wire == []
+
     assert _freeze(agent.tools) == initial_tools
     assert agent._cached_system_prompt == initial_system
     assert _freeze(history) == initial_history
@@ -402,9 +590,12 @@ def test_pre_request_observation_compares_with_final_sdk_dispatch(
         "request_observation_comparison",
         _freeze({
             "route": route,
+            "boundary": boundary,
             "rewritten": rewritten,
             "profile": profile,
-            "evidence_class": "controlled_final_sdk_kwargs_not_http_body",
+            "evidence_class": "controlled_final_sdk_kwargs_not_http_body"
+            if boundary == "sdk"
+            else "controlled_real_sdk_mock_http_transport",
             "prehook_equals_final_allowed_kwargs": hook["body"] == final,
             "exact_capture_supported": False,
             "snapshots": {

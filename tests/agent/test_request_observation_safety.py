@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import uuid
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +20,7 @@ from hermes_cli.plugins_manifest import PluginManifest
         "absent",
         "supported",
         "missing_context",
+        "repeat_emission",
         "unsupported",
         "nonfinite",
         "cycle",
@@ -135,6 +137,7 @@ def test_dispatch_observer_isolation_and_failure(case, monkeypatch, caplog):
             raise AssertionError("no observer must mean no capture work")
 
         monkeypatch.setattr(request_observation, "_snapshot", forbidden)
+        monkeypatch.setattr(request_observation.uuid, "uuid4", forbidden)
         monkeypatch.setattr(plugins_dispatch.threading, "Thread", forbidden)
     elif case == "serialization":
         monkeypatch.setattr(
@@ -157,7 +160,16 @@ def test_dispatch_observer_isolation_and_failure(case, monkeypatch, caplog):
     try:
         assert dispatch("A") == "provider-result"
         assert request["messages"] == [{"role": "user", "content": "hello"}]
-        if case == "timeout":
+        if case == "repeat_emission":
+            assert dispatch("A") == "provider-result"
+            assert len(observed) == 2
+            assert observed[0]["api_request_id"] == observed[1]["api_request_id"] == "A"
+            assert observed[0]["sdk_kwargs_json"] == observed[1]["sdk_kwargs_json"]
+            assert uuid.UUID(observed[0]["observation_id"]) != uuid.UUID(
+                observed[1]["observation_id"]
+            )
+            assert all("observation_id" not in kwargs for kwargs in provider_calls)
+        elif case == "timeout":
             assert entered.is_set()
             registrations.append(
                 ctx.register_hook(
@@ -213,7 +225,9 @@ def test_dispatch_observer_isolation_and_failure(case, monkeypatch, caplog):
                 assert ("extra_body.api_key", "outside_projection") in value[
                     "omitted_fields"
                 ]
-        assert len(provider_calls) == (2 if case == "timeout" else 1)
+        assert len(provider_calls) == (
+            2 if case in {"timeout", "repeat_emission"} else 1
+        )
         assert forbidden_calls == []
         assert "never-observed" not in caplog.text
         # The call scope resets even across exceptions; stale agent IDs are never used.

@@ -168,6 +168,13 @@ outside that lifecycle scope. These are logical lifecycle IDs, not new episode
 IDs or unique identities for SDK-internal retries. The context never enters SDK
 kwargs.
 
+`observation_id` is a UUID allocated once per hook emission after the subscription
+check, shared by every callback receiving that emission. Repeated dispatches get
+different observation IDs even when logical IDs and SDK kwargs are identical.
+Collectors can use it to distinguish duplicate delivery from another observed
+dispatch. It is not an episode ID, provider attempt ID or evidence of unobserved
+SDK retries; it never enters provider kwargs.
+
 `sdk_kwargs_json` is an immutable JSON string containing the supported body-field
 projection of the final SDK kwargs, including supported fields under `extra_body`.
 It preserves that nesting; it does not simulate the SDK's HTTP-body merge.
@@ -199,10 +206,22 @@ expiry signal, not an atomic write permission: collectors must synchronize their
 own terminal/tombstone checks with finalization and reject delayed completion.
 Missing, dropped, failed or late observations remain explicit collection gaps.
 
-Anthropic/Bedrock, MoA/ACP, auxiliary/summary/compression calls, internal SDK retries
-and unwitnessed routes are outside the current parity proof. Controlled SDK-boundary
-tests do not establish HTTP serialization, live profile parity, a deployed collector
-or complete capture. Those require their own matching source/runtime evidence.
+The controlled serialization profile uses Python 3.11, OpenAI 2.24.0, httpx 0.28.1
+and NeMo Relay 0.8.3 with the default Codex SDK bypass. The route test family runs
+real `AIAgent` turns through registered middleware and Relay, then actual SDK
+serialization into `httpx.MockTransport`. It checks Chat stream/non-stream and
+Codex stream JSON bodies, including `extra_body` precedence, input/tool relocation
+and late retention removal. SDK retries are disabled in this proof. Raw serialized
+body hashes and observer JSON hashes are separate; the assertion compares only
+the permitted body projection. Headers, timeout and Codex `include` remain
+explicit omissions, so the observed snapshots are partial projections.
+
+Anthropic/Bedrock, MoA/ACP, auxiliary/summary/compression calls, internal SDK retries,
+alternate Codex bypass settings and unwitnessed routes are outside that proof.
+Controlled HTTP serialization does not establish live provider receipt, live
+profile parity, a deployed collector or complete capture. Those require matching
+source/runtime and lifecycle collection evidence. No collector or capture storage
+is enabled by this hook addition.
 
 `pre_api_request` includes:
 
