@@ -14,8 +14,8 @@ concurrency:
 jobs:
   test:
     name: ${{ matrix.slice == '' && 'Run tests' || format('Run tests ({0})', matrix.slice) }}
-    # Keep upstream's measured 96-core unsliced path. Forks have no access
-    # to that custom label; use the existing runner's four disjoint slices.
+    # Keep upstream's measured 96-core unsliced path. Forks use standard
+    # runners with the existing runner's four disjoint slices.
     # Each fresh checkout starts with the same absent duration cache.
     runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-96-core' || 'ubuntu-latest' }}
     timeout-minutes: ${{ github.repository == 'NousResearch/hermes-agent' && 30 || 45 }}
