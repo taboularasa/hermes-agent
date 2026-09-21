@@ -13,16 +13,17 @@ concurrency:
 
 jobs:
   test:
-    name: Run tests
-    # One 96-core runner for the whole suite. There is no slicing. Slicing
-    # existed to spread the suite over 4-core runners. It cost a matrix job, a
-    # duration cache, a per-slice artifact and a merge job to do it.
-    #
-    # 96 cores clear the floor that the slowest single test file sets (about
-    # 82s). A second slice divides work that is already at that floor, and
-    # adds a second setup.
-    runs-on: ubuntu-latest-96-core
-    timeout-minutes: 30
+    name: ${{ matrix.slice == '' && 'Run tests' || format('Run tests ({0})', matrix.slice) }}
+    # Keep upstream's measured 96-core unsliced path. Forks use standard
+    # runners with the existing runner's four disjoint slices.
+    # Each fresh checkout starts with the same absent duration cache.
+    runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-96-core' || 'ubuntu-latest' }}
+    timeout-minutes: ${{ github.repository == 'NousResearch/hermes-agent' && 30 || 45 }}
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        slice: ${{ fromJSON(github.repository == 'NousResearch/hermes-agent' && '[""]' || '["1/4","2/4","3/4","4/4"]') }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -97,14 +98,25 @@ jobs:
         # set is identical to the list the removed matrix job used to pass in.
         run: |
           source .venv/bin/activate
-          scripts/run_tests.sh
+          # No mutable duration cache may assign different files in each slice.
+          if [ -n "$TEST_SLICE" ] && [ -e test_durations.json ]; then
+            echo "::error::fork slices require the same absent duration cache"
+            exit 1
+          fi
+          # Slice only this runner invocation, not runners spawned by tests.
+          if [ -n "$TEST_SLICE" ]; then
+            scripts/run_tests.sh --slice "$TEST_SLICE"
+          else
+            scripts/run_tests.sh
+          fi
         env:
+          TEST_SLICE: ${{ matrix.slice }}
           # This is the maximum number of test FILES that run together.
           # run_tests_parallel.py starts one pytest subprocess for each file
           # from a single ThreadPoolExecutor, so this value IS the limit. The
-          # default is cpu_count*2, which is 192 here.
+          # default is cpu_count*2, which is 192 on the upstream runner.
           #
-          # Measured on this runner (96-core EPYC 7763, 377GB). Whole suite,
+          # Measured on the upstream runner (96-core EPYC 7763, 377GB). Whole suite,
           # two repetitions for each value. See run 32549672063:
           #
           #     workers   x cores   mean
@@ -119,7 +131,7 @@ jobs:
           # across a 6x range. The suite has sufficient concurrency at this
           # size. The remaining time is the slowest files plus the setup.
           # Workers above the core count only add contention.
-          HERMES_TEST_WORKERS: 96
+          HERMES_TEST_WORKERS: ${{ github.repository == 'NousResearch/hermes-agent' && 96 || 2 }}
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
