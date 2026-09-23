@@ -117,7 +117,7 @@ class _JSONProjection:
         self.bytes = 0
         self.ancestors = set()
 
-    def copy(self, value, depth=0):
+    def copy(self, value, depth=0, *, conversation_path=None, omitted=None):
         self.nodes += 1
         self.bytes += 2  # container separators / scalar framing
         if self.nodes > _MAX_NODES or depth > _MAX_DEPTH or self.bytes > _MAX_BYTES:
@@ -153,7 +153,22 @@ class _JSONProjection:
         self.ancestors.add(id(value))
         try:
             if kind is list:
-                return [self.copy(item, depth + 1) for item in value]
+                result = []
+                for index, item in enumerate(value):
+                    try:
+                        result.append(self.copy(item, depth + 1))
+                    except _Unsupported as exc:
+                        if conversation_path is None or str(exc) != "hidden_reasoning":
+                            raise
+                        # A hidden item must not erase its visible siblings on
+                        # every subsequent turn. Omit the entire affected item;
+                        # never inspect its hidden values or mutate SDK kwargs.
+                        omission = (f"{conversation_path}[{index}]", "hidden_reasoning")
+                        self.copy(list(omission), depth + 1)  # charge metadata to the same budget
+                        omitted.append(omission)
+                if value and not result:
+                    raise _Unsupported("hidden_reasoning")
+                return result
             if any(type(key) is not str for key in value):
                 raise _Unsupported("non_string_key")
             item_type = value.get("type")
@@ -170,7 +185,7 @@ class _JSONProjection:
 
 
 def _snapshot(kwargs):
-    """Omit whole unsupported fields; never substitute repr or truncate values."""
+    """Omit unsupported fields or hidden conversation items, without truncation."""
     omitted = []
     budget = _JSONProjection()
 
@@ -195,7 +210,11 @@ def _snapshot(kwargs):
                 omitted.append((path, "outside_projection"))
             else:
                 try:
-                    result[key] = budget.copy(item)
+                    result[key] = budget.copy(
+                        item,
+                        conversation_path=path if key in {"input", "messages"} else None,
+                        omitted=omitted,
+                    )
                 except _BudgetExceeded:
                     raise
                 except _Unsupported as exc:
