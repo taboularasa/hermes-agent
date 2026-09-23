@@ -29,6 +29,7 @@ from hermes_cli.plugins_manifest import PluginManifest
         "nodes",
         "unicode",
         "hidden",
+        "hidden_with_visible",
         "nested_hidden",
         "thinking_block",
         "redacted_block",
@@ -78,6 +79,12 @@ def test_dispatch_observer_isolation_and_failure(case, monkeypatch, caplog):
         request["instructions"] = "\ud800"
     elif case == "hidden":
         request["input"] = [{"type": "reasoning", "encrypted_content": "private"}]
+    elif case == "hidden_with_visible":
+        request["input"] = [
+            {"role": "user", "content": "visible evidence"},
+            {"type": "reasoning", "encrypted_content": "private"},
+            {"type": "function_call_output", "call_id": "call_1", "output": "source"},
+        ]
     elif case == "nested_hidden":
         request["input"] = [
             {"role": "assistant", "content": [{"reasoning": "private"}]}
@@ -206,6 +213,12 @@ def test_dispatch_observer_isolation_and_failure(case, monkeypatch, caplog):
                 assert captured["messages"] == request["messages"]
                 assert captured["extra_body"] == {"temperature": 0.2}
                 assert "never-observed" not in value["sdk_kwargs_json"]
+                if case == "hidden_with_visible":
+                    assert captured["input"] == [request["input"][0], request["input"][2]]
+                    assert ("input[1]", "hidden_reasoning") in value["omitted_fields"]
+                    assert "private" not in value["sdk_kwargs_json"]
+                    assert provider_calls[0]["input"] is request["input"]
+                    assert provider_calls[0]["input"][1]["encrypted_content"] == "private"
                 expected = {
                     "unsupported": ("tools", "non_json_value"),
                     "nonfinite": ("temperature", "nonfinite_number"),
@@ -242,3 +255,29 @@ def test_dispatch_observer_isolation_and_failure(case, monkeypatch, caplog):
         release.set()
         for registration in registrations:
             registration.dispose()
+
+
+@pytest.mark.parametrize("field", ["input", "messages", "extra_body.input"])
+@pytest.mark.parametrize("hidden", [
+    {"type": "reasoning", "encrypted_content": "private-reasoning"},
+    {"role": "assistant", "content": [{"type": "thinking", "text": "private-reasoning"}]},
+])
+def test_hidden_conversation_item_preserves_visible_siblings(field, hidden):
+    """Later turns keep visible context without retaining hidden reasoning."""
+    visible = [
+        {"role": "user", "content": "Inspect the ontology source"},
+        {"type": "function_call", "call_id": "call_1", "name": "read_file", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call_1", "output": "visible evidence"},
+    ]
+    items = [visible[0], hidden, *visible[1:]]
+    original = json.dumps(items)
+    request = {"model": "controlled", "extra_body": {"input": items}} if field.startswith("extra_body") else {"model": "controlled", field: items}
+    encoded, omitted, status, reasons = request_observation._snapshot(request)
+    snapshot = json.loads(encoded)
+    projected = snapshot["extra_body"]["input"] if field.startswith("extra_body") else snapshot[field]
+    assert projected == visible
+    assert "private-reasoning" not in encoded
+    assert (field + "[1]", "hidden_reasoning") in omitted
+    assert status == "partial_projection" and reasons == ()
+    assert json.dumps(items) == original
+    assert items[1] is hidden

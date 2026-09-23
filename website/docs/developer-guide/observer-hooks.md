@@ -180,8 +180,15 @@ projection of the final SDK kwargs, including supported fields under `extra_body
 It preserves that nesting; it does not simulate the SDK's HTTP-body merge.
 `omitted_fields` is an immutable tuple of `(field_path, reason)` pairs. Transport
 headers, credentials, SDK options/clients and unknown extensions are omitted.
-Fields containing hidden reasoning, non-JSON objects, nonfinite numbers, invalid
-Unicode or cycles are omitted whole: values are never truncated, stringified or
+In `input` and `messages` lists (including under `extra_body`), an item containing
+hidden reasoning is omitted whole while its visible siblings are retained. The
+omission identifies the original list index, such as `extra_body.input[1]`, with
+reason `hidden_reasoning`; indexes in the retained list can therefore shift.
+An all-hidden conversation field is omitted whole. This also means a message
+containing both visible content and hidden reasoning is omitted whole, not rewritten.
+Elsewhere, fields containing hidden reasoning are omitted whole. Fields containing
+non-JSON objects, nonfinite numbers, invalid Unicode or cycles are also omitted whole:
+values are never truncated, stringified or
 replaced with object representations. User-supplied prompt content can itself be
 sensitive; this opt-in surface is not a general secret scrubber.
 
