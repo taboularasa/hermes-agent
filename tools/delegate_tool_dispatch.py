@@ -9,6 +9,7 @@ import contextvars
 import json
 import logging
 import time
+from contextlib import contextmanager
 from concurrent.futures import FIRST_COMPLETED, wait as _cf_wait
 from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional
@@ -22,6 +23,24 @@ from tools.delegate_tool_registry import _capture_gateway_steer_authority
 from tools.delegate_tool_results import _finalize_child_results
 
 logger = logging.getLogger("tools.delegate_tool")  # log-record parity with the origin module
+
+_INLINE_RESULT_CONSUMER = contextvars.ContextVar("delegate_inline_result_consumer", default=None)
+
+
+@contextmanager
+def scoped_delegation_result_consumer(consumer):
+    """A native caller owns consumption before a finite tool call can return.
+
+    This is not model input or a channel wake capability. The caller must keep
+    its lifetime boundary open until the existing durable dispatch terminates.
+    """
+    if not callable(consumer):
+        raise TypeError("delegation result consumer must be callable")
+    token = _INLINE_RESULT_CONSUMER.set(consumer)
+    try:
+        yield
+    finally:
+        _INLINE_RESULT_CONSUMER.reset(token)
 
 
 @dataclass
@@ -221,7 +240,7 @@ def _resolve_async_wake_sid(origin_wake_sid: str, origin_session_history_deliver
     # approval/lifecycle marker without disabling terminal notify completions:
     # those have their own bounded exit linger and durable result receipts.
     if get_session_env("HERMES_SINGLE_QUERY_SESSION") == "1":
-        return None
+        return "" if _INLINE_RESULT_CONSUMER.get() is not None else None
 
     try:
         # Finite sessions cannot route a detached subagent result back to the agent after their turn/process
@@ -430,6 +449,9 @@ def _dispatch_background(batch: _Batch) -> str:
     payload = _dispatched_payload(batch, dispatched)
     if inline_results:
         payload["inline_results"] = inline_results
+    consumer = _INLINE_RESULT_CONSUMER.get()
+    if consumer is not None:
+        consumer(payload)
     return json.dumps(payload, ensure_ascii=False)
 
 def _run_batch(batch: _Batch, background: bool) -> str:

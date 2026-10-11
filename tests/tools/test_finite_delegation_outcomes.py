@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -203,6 +204,35 @@ def test_finite_marker_overrides_api_history_continuation(harness):
     assert sc.session_history_delivery_supported()
     result = dispatch("completed", "error")
     _joined(result, ["completed", "error"])
+
+
+def test_finite_native_consumer_owns_durable_result_and_restores_inline(harness):
+    from tools.delegate_tool_dispatch import scoped_delegation_result_consumer
+
+    _parent, children, dispatch = harness
+    consumed = []
+
+    def consume(handle):
+        deadline = time.monotonic() + 5
+        while True:
+            event = process_registry.completion_queue.get(timeout=max(0, deadline - time.monotonic()))
+            if event.get("delegation_id") == handle["delegation_id"]:
+                break
+        assert event["type"] == "async_delegation"
+        assert handle["mode"] == "background"
+        durable = async_delegation.get_durable_delegation(handle["delegation_id"])
+        assert durable["state"] == "completed"
+        assert [item["status"] for item in durable["result"]["results"]] == ["completed", "error"]
+        consumed.append(event)
+        assert all(child.closed.wait(2) for child in children)
+
+    with scoped_delegation_result_consumer(consume):
+        result = dispatch("completed", "error")
+    assert result["status"] == "dispatched" and len(consumed) == 1
+    assert sc.get_session_env("HERMES_SINGLE_QUERY_SESSION") == "1"
+    # The permit is call-local; ordinary finite sessions still cannot detach.
+    children.clear()
+    _joined(dispatch("completed", "completed"), ["completed", "completed"])
 
 
 @pytest.mark.parametrize("marker", [None, "0", "false"])
